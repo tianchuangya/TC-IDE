@@ -10,6 +10,9 @@ TC-IDE 是一个 Rust 原生、低色彩噪声、强调空间关系与丝滑动�
 - 项目关系图的完整层级：`项目 → 文件 → Class → 函数`；
 - 鼠标经过节点时自动聚焦上下游关系，无需手动切换“函数/Class/路径”；
 - 文件树可点击切换，编辑器支持输入、退格、换行与方向键；
+- 可从项目树新建文件，并根据扩展名自动选择语言包；
+- `Extensions → Programming Languages` 提供可滚动语言包目录，安装状态持久化到用户配置；
+- 内置 Rust、Python、TypeScript/JavaScript、C/C++、Go、Java、C#、Kotlin、Swift、Zig 等 29 个语言/格式入口，未知格式回退为 Plain Text；
 - 关系图支持滚轮缩放，Package 菜单支持目标选择与构建动画；
 - 编辑区、项目树与语义图使用同一帧绘制；
 - 零网页运行时、零 CSS、零第三方 Rust 依赖。
