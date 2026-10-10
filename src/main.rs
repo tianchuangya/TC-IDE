@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::ffi::{c_void, CString};
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong};
 use std::path::PathBuf;
@@ -225,6 +226,21 @@ struct FileBuffer {
     lines: Vec<String>,
 }
 
+struct ParsedComment<'a> {
+    code: &'a str,
+    text: &'a str,
+    content_column: usize,
+}
+
+struct BubbleLayout {
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+    lines: Vec<String>,
+    chars_per_line: usize,
+}
+
 struct LanguagePack {
     name: &'static str,
     extensions: &'static [&'static str],
@@ -281,6 +297,7 @@ struct App {
     mouse_x: i32,
     mouse_y: i32,
     hovered: Option<usize>,
+    hovered_from_code: bool,
     selected_file: usize,
     files: Vec<FileBuffer>,
     folders: Vec<String>,
@@ -291,8 +308,9 @@ struct App {
     caret_column: usize,
     graph_zoom: f32,
     package_open: bool,
-    package_targets: [bool; 3],
+    package_targets: [bool; 4],
     build_started: Option<Instant>,
+    new_menu_open: bool,
     extensions_open: bool,
     languages: Vec<LanguagePack>,
     downloading: Option<(usize, Instant)>,
@@ -307,6 +325,7 @@ struct App {
     project_environment: usize,
     project_language_menu: bool,
     project_environment_menu: bool,
+    expanded_comments: BTreeSet<(usize,usize)>,
     status_message: String,
     started: Instant,
 }
@@ -333,7 +352,7 @@ impl App {
 
     fn accept_completion(&mut self){if let Some(candidate)=self.completions().first().cloned(){let prefix=self.current_prefix();let suffix=&candidate[prefix.len()..];self.files[self.selected_file].lines[self.caret_line].insert_str(self.caret_column,suffix);self.caret_column+=suffix.len();self.status_message=format!("Completed {candidate}");}}
 
-    fn comment_parts<'a>(&self,line:&'a str)->Option<(&'a str,&'a str)>{["//","#","--"].iter().filter_map(|marker|line.find(marker).map(|index|(index,*marker))).min_by_key(|(index,_)|*index).map(|(index,marker)|(&line[..index],line[index+marker.len()..].trim()))}
+    fn comment_parts<'a>(&self,line:&'a str)->Option<ParsedComment<'a>>{let file=&self.files[self.selected_file].name;let marker=comment_markers_for_file(file).iter().filter_map(|marker|line.find(marker).map(|index|(index,*marker))).min_by_key(|(index,_)|*index)?;if marker.1=="#"&&marker.0==0&&line.starts_with("#!"){return None;}let after=&line[marker.0+marker.1.len()..];let leading=after.len()-after.trim_start().len();let mut text=after.trim();if marker.1=="/*"{text=text.strip_suffix("*/").unwrap_or(text).trim_end();}if marker.1=="<!--"{text=text.strip_suffix("-->").unwrap_or(text).trim_end();}Some(ParsedComment{code:&line[..marker.0],text,content_column:marker.0+marker.1.len()+leading})}
 
     fn filtered_language_indices(&self)->Vec<usize>{let needle=self.extension_search.to_ascii_lowercase();self.languages.iter().enumerate().filter(|(_,pack)|needle.is_empty()||pack.name.to_ascii_lowercase().contains(&needle)||pack.extensions.iter().any(|ext|ext.contains(&needle))).map(|(index,_)|index).collect()}
 
@@ -366,7 +385,9 @@ impl App {
         XDrawArc(self.display, self.canvas, self.gc, x-radius, y-radius, (radius*2) as u32, (radius*2) as u32, 0, 360*64);
     }
 
-    unsafe fn comment_bubble(&self,anchor_x:i32,y:i32,value:&str){let s=|v|self.s(v);let right=anchor_x-s(9);let available=(right-s(4)).max(s(72));let chars_per_line=((available-s(24))/s(11).max(1)).clamp(6,30) as usize;let lines=wrap_bubble_text(value,chars_per_line,4);let longest=lines.iter().map(|line|line.chars().count()).max().unwrap_or(7) as i32;let width=(longest*s(11)+s(24)).max(s(72)).min(available);let height=s(12)+lines.len() as i32*s(22);let top=y-s(21);let left=right-width;self.rect(self.colors.bright,left,top,width,height);let tail_center=top+s(14);let mut tail=[XPoint{x:anchor_x as i16,y:tail_center as i16},XPoint{x:right as i16,y:(tail_center-s(7)) as i16},XPoint{x:right as i16,y:(tail_center+s(7)) as i16}];self.set_color(self.colors.bright);XFillPolygon(self.display,self.canvas,self.gc,tail.as_mut_ptr(),3,0,0);for (index,line) in lines.iter().enumerate(){self.text(self.colors.bg,left+s(12),top+s(22)+index as i32*s(22),line);}}
+    fn comment_bubble_layout(&self,anchor_x:i32,y:i32,value:&str,expanded:bool,min_left:i32)->BubbleLayout{let s=|v|self.s(v);let right=anchor_x-s(9);let available=(right-min_left).max(s(72));let chars_per_line=((available-s(24))/s(11).max(1)).clamp(6,34) as usize;let lines=wrap_bubble_text(value,chars_per_line,if expanded{8}else{1});let longest=lines.iter().map(|line|line.chars().count()).max().unwrap_or(7) as i32;let width=(longest*s(11)+s(24)).max(s(112)).min(available);let height=s(31)+lines.len() as i32*s(22);BubbleLayout{left:right-width,top:y-s(21),width,height,lines,chars_per_line}}
+
+    unsafe fn comment_bubble(&self,anchor_x:i32,y:i32,value:&str,expanded:bool,editing:bool,min_left:i32){let s=|v|self.s(v);let layout=self.comment_bubble_layout(anchor_x,y,value,expanded,min_left);self.rect(self.colors.bright,layout.left,layout.top,layout.width,layout.height);self.line(self.colors.line,1,(layout.left,layout.top+s(27)),(layout.left+layout.width,layout.top+s(27)));let tail_center=layout.top+s(14);let right=layout.left+layout.width;let mut tail=[XPoint{x:anchor_x as i16,y:tail_center as i16},XPoint{x:right as i16,y:(tail_center-s(7)) as i16},XPoint{x:right as i16,y:(tail_center+s(7)) as i16}];self.set_color(self.colors.bright);XFillPolygon(self.display,self.canvas,self.gc,tail.as_mut_ptr(),3,0,0);self.text(self.colors.bg,layout.left+s(9),layout.top+s(20),if expanded{"v"}else{">"});self.text(self.colors.bg,layout.left+s(29),layout.top+s(20),if editing{"EDITING"}else{"COMMENT"});self.text(self.colors.bg,layout.left+layout.width-s(48),layout.top+s(20),"EDIT");for (index,line) in layout.lines.iter().enumerate(){self.text(self.colors.bg,layout.left+s(12),layout.top+s(48)+index as i32*s(22),line);}}
 
     unsafe fn text(&self, color: c_ulong, x: i32, y: i32, value: &str) {
         let clean = value.replace('\0', "");
@@ -399,6 +420,8 @@ impl App {
         self.draw_workspace();
         self.draw_editor();
         self.draw_graph();
+        if self.hovered_from_code { self.draw_code_relations(); }
+        if self.new_menu_open { self.draw_new_menu(); }
         if self.package_open { self.draw_package_menu(); }
         if self.extensions_open { self.draw_extensions(); }
         if self.create_kind.is_some() { self.draw_create_dialog(); }
@@ -415,7 +438,9 @@ impl App {
         self.rect(self.colors.bright,s(14),s(12),s(22),s(22));
         self.text(self.colors.bg,s(20),s(29),"T");
         self.text(self.colors.text,s(46),s(29),"TC-IDE");
-        self.text(self.colors.muted,s(122),s(29),"motion-core / src / editor / graph.rs");
+        self.outline(if self.new_menu_open{self.colors.accent}else{self.colors.line},s(112),s(10),s(88),s(27));
+        self.text(self.colors.text,s(130),s(29),"New  v");
+        let path=format!("{}  /  {}",self.project_name,self.files[self.selected_file].name);let path_x=self.width/2-path.chars().count() as i32*s(5);self.text(self.colors.muted,path_x.max(s(220)),s(29),&path);
         self.outline(if self.extensions_open{self.colors.accent}else{self.colors.line},self.width-s(275),s(10),s(126),s(27));
         self.text(self.colors.text,self.width-s(260),s(29),"Extensions");
         self.outline(if self.package_open{self.colors.accent}else{self.colors.line},self.width-s(136),s(10),s(118),s(27));
@@ -429,11 +454,12 @@ impl App {
         self.line(self.colors.line,1,(width,s(46)),(width,self.height-s(24)));
         self.text(self.colors.muted,s(14),s(71),"PROJECT");
         self.text(self.colors.bright,s(15),s(101),&format!("v  {}",self.project_name));
-        let button_w=(width-s(32))/3;for (index,label) in ["+ Project","+ Folder","+ File"].iter().enumerate(){let x=s(8)+index as i32*(button_w+s(8));self.outline(self.colors.line,x,s(113),button_w,s(27));self.text(self.colors.text,x+s(9),s(133),label);}
-        let mut row_y=174;for folder in &self.folders{self.text(self.colors.text,s(16),s(row_y),&format!("  v  {folder}"));row_y+=28;}
+        let mut row_y=134;for folder in &self.folders{self.text(self.colors.text,s(16),s(row_y),&format!("  v  {folder}"));row_y+=28;}
         for (index,file) in self.files.iter().enumerate(){let y=row_y+index as i32*29;if s(y)>self.height-s(65){break;}if index==self.selected_file{self.rect(self.colors.panel_2,s(7),s(y-21),width-s(14),s(27));}let color=if index==self.selected_file{self.colors.bright}else{self.colors.muted};self.text(color,s(16),s(y),&format!("       {}",file.name));
         }
     }
+
+    unsafe fn draw_new_menu(&self){let s=|v|self.s(v);let x=s(112);let y=s(43);let w=s(220);let h=s(126);self.rect(self.colors.panel_2,x,y,w,h);self.outline(self.colors.line,x,y,w,h);self.text(self.colors.muted,x+s(15),y+s(23),"CREATE");for (index,label) in ["New Project","New File","New Folder"].iter().enumerate(){let row=y+s(50+index as i32*30);self.text(self.colors.text,x+s(18),row,label);self.text(self.colors.muted,x+w-s(28),row,"+");}}
 
     unsafe fn draw_editor(&self) {
         let s=|v|self.s(v);
@@ -446,13 +472,14 @@ impl App {
         let language=self.language_for_file(&self.files[self.selected_file].name);
         self.text(self.colors.muted,right-s(150),s(71),&language);
         let base_y=s(119);let step=s(28);
+        let show_bubbles=!(self.mouse_x>=0&&self.mouse_x<left);
         for (index,line) in self.files[self.selected_file].lines.iter().enumerate() {
             let y=base_y+index as i32*step;if y>self.height-s(65){break;}
             self.text(self.colors.line,left+s(15),y,&(index+1).to_string());
             let color=if line.contains("fn "){self.colors.accent}else if line.contains("struct ")||line.starts_with("impl"){self.colors.bright}else{self.colors.text};
-            if let Some((code,comment))=self.comment_parts(line){self.text(color,left+s(52),y,code);let bubble_x=left+s(62)+(code.chars().count() as i32*s(10));self.comment_bubble(bubble_x,y,comment);}else{self.text(color,left+s(52),y,line);}
+            if let Some(comment)=self.comment_parts(line){self.text(color,left+s(52),y,comment.code);let raw_anchor=left+s(62)+(comment.code.chars().count() as i32*s(10));let bubble_x=if comment.code.trim().is_empty(){left+s(350)}else{raw_anchor};if show_bubbles{let expanded=self.expanded_comments.contains(&(self.selected_file,index));let editing=self.editor_focused&&self.caret_line==index&&self.caret_column>=comment.content_column;self.comment_bubble(bubble_x,y,comment.text,expanded,editing,left+s(18));}else{self.text(self.colors.accent,raw_anchor,y,"[comment]");}}else{self.text(color,left+s(52),y,line);}
             if self.editor_focused&&index==self.caret_line&&(self.started.elapsed().as_millis()/500)%2==0 {
-                let char_width=s(10);let caret_x=left+s(52)+self.caret_column as i32*char_width;
+                let char_width=s(10);let visual_column=self.files[self.selected_file].lines[index][..self.caret_column].chars().count() as i32;let caret_x=left+s(52)+visual_column*char_width;
                 self.line(self.colors.bright,1,(caret_x,y-s(18)),(caret_x,y+s(4)));
             }
         }
@@ -495,6 +522,8 @@ impl App {
         self.text(self.colors.muted,x+s(14),y+h-s(10),"wheel: zoom - project -> file -> class -> function / call");
     }
 
+    unsafe fn draw_code_relations(&self){let Some(active)=self.hovered else{return;};let s=|v|self.s(v);let editor_right=(self.width as f32*0.61) as i32;let start=(self.mouse_x.max((self.width as f32*0.17) as i32+s(50)),self.mouse_y);let junction=(editor_right-s(18),start.1);self.circle(self.colors.panel_2,self.colors.bright,start.0,start.1,s(4));self.line(self.colors.accent,2,start,junction);let mut targets=vec![active];for &(from,to) in EDGES{if from==active&&!targets.contains(&to){targets.push(to);}}for target in targets{let end=self.node_position(&NODES[target]);let bend=(editor_right+s(18),end.1);self.line(self.colors.accent,2,junction,bend);self.line(self.colors.accent,2,bend,(end.0-s(8),end.1));let mut arrow=[XPoint{x:end.0 as i16,y:end.1 as i16},XPoint{x:(end.0-s(10)) as i16,y:(end.1-s(5)) as i16},XPoint{x:(end.0-s(10)) as i16,y:(end.1+s(5)) as i16}];self.set_color(self.colors.accent);XFillPolygon(self.display,self.canvas,self.gc,arrow.as_mut_ptr(),3,0,0);}let travel=((self.started.elapsed().as_secs_f32()*1.8)%1.0).clamp(0.0,1.0);let pulse_x=start.0+((junction.0-start.0) as f32*travel) as i32;self.circle(self.colors.bright,self.colors.accent,pulse_x,start.1,s(3));}
+
     unsafe fn draw_status(&self) {
         let s=|v|self.s(v);self.rect(self.colors.panel_2,0,self.height-s(24),self.width,s(24));
         self.line(self.colors.line,1,(0,self.height-s(24)),(self.width,self.height-s(24)));
@@ -504,10 +533,10 @@ impl App {
     }
 
     unsafe fn draw_package_menu(&self) {
-        let s=|v|self.s(v);let x=self.width-s(270);let y=s(48);let w=s(250);let h=s(176);
+        let s=|v|self.s(v);let x=self.width-s(270);let y=s(48);let w=s(250);let h=s(207);
         self.rect(self.colors.panel_2,x,y,w,h);self.outline(self.colors.line,x,y,w,h);
         self.text(self.colors.muted,x+s(15),y+s(25),"BUILD TARGETS");
-        let labels=["Windows  .exe","Linux    .deb","Linux    .AppImage"];
+        let labels=["Windows  .exe","Linux    .deb","Linux    .AppImage","macOS    .dmg"];
         for (index,label) in labels.iter().enumerate(){let row_y=y+s(51+index as i32*31);self.outline(if self.package_targets[index]{self.colors.accent}else{self.colors.line},x+s(15),row_y-s(15),s(16),s(16));if self.package_targets[index]{self.rect(self.colors.accent,x+s(19),row_y-s(11),s(8),s(8));}self.text(self.colors.text,x+s(42),row_y,label);}
         self.rect(self.colors.bright,x+s(15),y+h-s(37),w-s(30),s(25));self.text(self.colors.bg,x+s(72),y+h-s(19),"BUILD SELECTED");
     }
@@ -538,11 +567,9 @@ impl App {
     }
 
     unsafe fn draw_build_animation(&self) {
-        let s=|v|self.s(v);let elapsed=self.build_started.unwrap().elapsed().as_secs_f32();
-        let cx=self.width/2;let cy=self.height/2;let radius=s((32.0+(elapsed.min(1.0)*30.0)) as i32);
-        self.rect(self.colors.bg,cx-s(230),cy-s(140),s(460),s(280));self.outline(self.colors.line,cx-s(230),cy-s(140),s(460),s(280));
-        if elapsed<2.2 {self.circle(self.colors.bg,self.colors.accent,cx,cy,radius);self.circle(self.colors.bg,self.colors.line,cx,cy,radius+s(18));self.text(self.colors.text,cx-s(70),cy+s(105),"CODE COLLAPSING INTO BUILD CORE");}
-        else {self.circle(self.colors.bright,self.colors.accent,cx,cy,radius);self.circle(self.colors.panel,self.colors.bright,cx,cy,radius+s(18));self.text(self.colors.bright,cx-s(70),cy+s(105),"BUILD COMPLETE - PACKAGES EMITTED");}
+        let s=|v|self.s(v);let elapsed=self.build_started.unwrap().elapsed().as_secs_f32();let cx=self.width/2;let cy=self.height/2;
+        if elapsed<2.4{let t=(elapsed/2.4).clamp(0.0,1.0);if t>0.72{let left=(self.width as f32*0.17) as i32;let right=(self.width as f32*0.61) as i32;self.rect(self.colors.bg,left+s(1),s(85),right-left-s(1),self.height-s(109));}let sources=[(s(250),s(160),"fn build_graph()"),(s(420),s(310),"resolve_symbols(files)"),(self.width-s(460),s(220),"GraphController"),(self.width-s(330),self.height-s(320),"render_graph(nodes)"),(s(310),self.height-s(260),"workspace.index()")];for (index,(sx,sy,label)) in sources.iter().enumerate(){let local=(t+index as f32*0.035).min(1.0);let px=*sx+((cx-*sx) as f32*local) as i32;let py=*sy+((cy-*sy) as f32*local) as i32;let color=if local>0.82{self.colors.line}else{self.colors.text};self.text(color,px,py,label);self.line(self.colors.accent,1,(px,py+s(5)),(cx,cy));}let pulse=((elapsed*7.0).sin().abs()*s(8) as f32) as i32;self.circle(self.colors.bg,self.colors.accent,cx,cy,s(34)+pulse);self.circle(self.colors.bg,self.colors.line,cx,cy,s(53)-pulse/2);self.text(self.colors.muted,cx-s(104),cy+s(105),"CODE IS COLLAPSING INTO THE BUILD CORE");}
+        else{let t=((elapsed-2.4)/2.2).clamp(0.0,1.0);let radius=s(28)+(t*s(24) as f32) as i32;self.circle(self.colors.bright,self.colors.accent,cx,cy,radius);self.circle(self.colors.panel,self.colors.bright,cx,cy,radius+s(13));let labels=[(".exe",-190,-85),(".deb",180,-80),(".AppImage",-210,90),(".dmg",185,95)];for (index,(label,dx,dy)) in labels.iter().enumerate(){if !self.package_targets[index]{continue;}let spread=((t-0.08*index as f32).max(0.0)).min(1.0);let px=cx+(*dx as f32*spread) as i32;let py=cy+(*dy as f32*spread) as i32;self.line(self.colors.accent,2,(cx,cy),(px,py));self.rect(self.colors.bright,px-s(42),py-s(17),s(84),s(31));self.text(self.colors.bg,px-s(28),py+s(5),label);}self.text(self.colors.bright,cx-s(106),cy+s(150),if t<0.85{"WHITE HOLE IS EMITTING PACKAGES"}else{"BUILD COMPLETE"});}
     }
 
     unsafe fn resize(&mut self,width:i32,height:i32){
@@ -551,7 +578,7 @@ impl App {
         self.update_hover();
     }
 
-    fn update_background(&mut self){if let Some((index,started))=self.downloading{if started.elapsed()>Duration::from_millis(900){self.languages[index].installed=true;self.status_message=format!("{} {} language pack installed",self.languages[index].name,self.languages[index].versions[self.languages[index].selected_version]);save_language_settings(&self.languages);self.downloading=None;}}}
+    fn update_background(&mut self){if let Some((index,started))=self.downloading{if started.elapsed()>Duration::from_millis(900){self.languages[index].installed=true;self.status_message=format!("{} {} language pack installed",self.languages[index].name,self.languages[index].versions[self.languages[index].selected_version]);save_language_settings(&self.languages);self.downloading=None;}}if self.build_started.map(|started|started.elapsed()>Duration::from_millis(5000)).unwrap_or(false){self.build_started=None;self.status_message="Build animation complete - selected packages emitted".into();}}
 
     fn active_root(&mut self)->PathBuf {if let Some(path)=&self.project_path{return path.clone();}let base=projects_root().join("TC-IDE-Scratch");let _=fs::create_dir_all(&base);self.project_path=Some(base.clone());base}
 
@@ -566,8 +593,10 @@ impl App {
         if self.extensions_open&&(button==4||button==5){let filtered=self.filtered_language_indices();let visible=10;let maximum=filtered.len().saturating_sub(visible);if button==4{self.extension_scroll=self.extension_scroll.saturating_sub(1);}else{self.extension_scroll=(self.extension_scroll+1).min(maximum);}return;}
         if x>=graph_left&&button==4 {self.graph_zoom=(self.graph_zoom*1.1).min(1.55);return;}
         if x>=graph_left&&button==5 {self.graph_zoom=(self.graph_zoom/1.1).max(0.65);return;}
-        if x>self.width-s(290)&&x<self.width-s(145)&&y<s(46){self.extensions_open=!self.extensions_open;self.package_open=false;self.editor_focused=false;return;}
-        if x>self.width-s(150)&&y<s(46){self.package_open=!self.package_open;self.extensions_open=false;self.editor_focused=false;return;}
+        if x>=s(112)&&x<=s(200)&&y<s(46){self.new_menu_open=!self.new_menu_open;self.extensions_open=false;self.package_open=false;self.editor_focused=false;return;}
+        if self.new_menu_open{let menu_x=s(112);let menu_y=s(43);if x>=menu_x&&x<=menu_x+s(220)&&y>=menu_y&&y<=menu_y+s(126){for (index,kind) in [CreateKind::Project,CreateKind::File,CreateKind::Folder].iter().enumerate(){let row=menu_y+s(50+index as i32*30);if (y-row).abs()<=s(14){self.create_kind=Some(*kind);self.new_file_name.clear();self.new_menu_open=false;return;}}return;}self.new_menu_open=false;}
+        if x>self.width-s(290)&&x<self.width-s(145)&&y<s(46){self.extensions_open=!self.extensions_open;self.new_menu_open=false;self.package_open=false;self.editor_focused=false;return;}
+        if x>self.width-s(150)&&y<s(46){self.package_open=!self.package_open;self.new_menu_open=false;self.extensions_open=false;self.editor_focused=false;return;}
         if self.extensions_open {
             let w=s(780);let h=s(680);let menu_x=self.width-w-s(20);let menu_y=s(52);
             if x>=menu_x&&x<=menu_x+w&&y>=menu_y&&y<=menu_y+h {if x>=menu_x+s(20)&&x<=menu_x+s(350)&&y>=menu_y+s(82)&&y<=menu_y+s(120){self.extension_search_focused=true;return;}let filtered=self.filtered_language_indices();for visible in 0..10{let position=self.extension_scroll+visible;if position>=filtered.len(){break;}let index=filtered[position];let row=menu_y+s(153+visible as i32*47);if x<menu_x+s(350)&&(y-row).abs()<s(20){self.selected_language=Some(index);self.version_menu_open=false;self.extension_search_focused=false;return;}}if let Some(index)=self.selected_language{let dx=menu_x+s(392);if self.version_menu_open{let versions=self.languages[index].versions;for version in 0..versions.len(){let row=menu_y+s(274+version as i32*34);if x>=dx&&x<=dx+s(330)&&(y-row).abs()<s(16){if self.languages[index].selected_version!=version&&self.languages[index].installed{self.languages[index].installed=false;save_language_settings(&self.languages);self.status_message="Version changed; download the selected language pack".into();}self.languages[index].selected_version=version;self.version_menu_open=false;return;}}}if x>=dx&&x<=dx+s(330)&&y>=menu_y+s(207)&&y<=menu_y+s(247){self.version_menu_open=!self.version_menu_open;return;}if x>=dx&&x<=dx+s(330)&&y>=menu_y+s(282)&&y<=menu_y+s(320){if self.languages[index].installed{self.languages[index].installed=false;self.status_message=format!("{} language pack removed",self.languages[index].name);save_language_settings(&self.languages);}else{self.downloading=Some((index,Instant::now()));self.status_message=format!("Downloading {} {}...",self.languages[index].name,self.languages[index].versions[self.languages[index].selected_version]);}return;}}return;}
@@ -577,18 +606,18 @@ impl App {
         if self.package_open {
             let menu_x=self.width-s(270);let menu_y=s(48);
             if x>=menu_x&&x<=self.width-s(20)&&y>=menu_y {
-                for index in 0..3 {let center=menu_y+s(51+index as i32*31);if (y-center).abs()<s(15){self.package_targets[index]=!self.package_targets[index];return;}}
-                if y>menu_y+s(139)&&self.package_targets.iter().any(|v|*v){self.build_started=Some(Instant::now());self.package_open=false;return;}
+                for index in 0..4 {let center=menu_y+s(51+index as i32*31);if (y-center).abs()<s(15){self.package_targets[index]=!self.package_targets[index];return;}}
+                if y>menu_y+s(170)&&self.package_targets.iter().any(|v|*v){self.build_started=Some(Instant::now());self.status_message="Building selected targets...".into();self.package_open=false;return;}
             }
             self.package_open=false;
         }
         let workspace_right=(self.width as f32*0.17) as i32;
+        if x>=workspace_right&&x<graph_left&&button==1{let base=s(119);let step=s(28);for index in 0..self.files[self.selected_file].lines.len(){let y_line=base+index as i32*step;let Some(comment)=self.comment_parts(&self.files[self.selected_file].lines[index]) else{continue;};let text=comment.text.to_string();let content_column=comment.content_column;let raw_anchor=workspace_right+s(62)+comment.code.chars().count() as i32*s(10);let anchor=if comment.code.trim().is_empty(){workspace_right+s(350)}else{raw_anchor};let expanded=self.expanded_comments.contains(&(self.selected_file,index));let layout=self.comment_bubble_layout(anchor,y_line,&text,expanded,workspace_right+s(18));if x>=layout.left&&x<=layout.left+layout.width&&y>=layout.top&&y<=layout.top+layout.height{if y<=layout.top+s(27)&&x<=layout.left+s(28){let key=(self.selected_file,index);if !self.expanded_comments.remove(&key){self.expanded_comments.insert(key);}return;}self.expanded_comments.insert((self.selected_file,index));self.editor_focused=true;self.caret_line=index;if y>layout.top+s(27){let visual_line=((y-layout.top-s(38))/s(22).max(1)).max(0) as usize;let visual_column=((x-layout.left-s(12))/s(11).max(1)).max(0) as usize;let char_offset=(visual_line*layout.chars_per_line+visual_column).min(text.chars().count());self.caret_column=content_column+char_to_byte_index(&text,char_offset);}else{self.caret_column=content_column+text.len();}self.status_message="Comment editing active - click text to place the caret".into();return;}}}
         if x<workspace_right {
-            if y>=s(113)&&y<=s(142){let button_w=(workspace_right-s(32))/3;if x<s(8)+button_w{self.create_kind=Some(CreateKind::Project);}else if x<s(16)+button_w*2{self.create_kind=Some(CreateKind::Folder);}else{self.create_kind=Some(CreateKind::File);}self.new_file_name.clear();self.editor_focused=false;return;}
-            let file_start=174+self.folders.len() as i32*28;for index in 0..self.files.len(){let center=file_start+index as i32*29;if (y-s(center)).abs()<s(15){self.selected_file=index;self.caret_line=0;self.caret_column=0;self.editor_focused=false;self.hovered=if index<3{Some(index+1)}else{None};return;}}
+            let file_start=134+self.folders.len() as i32*28;for index in 0..self.files.len(){let center=file_start+index as i32*29;if (y-s(center)).abs()<s(15){self.selected_file=index;self.caret_line=0;self.caret_column=0;self.editor_focused=false;self.hovered=if index<3{Some(index+1)}else{None};self.hovered_from_code=false;return;}}
         }
         if x>=workspace_right&&x<graph_left&&y>s(85)&&y<self.height-s(60){
-            self.editor_focused=true;let base=s(119);let step=s(28);let line=((y-base+step/2)/step).max(0) as usize;self.caret_line=line.min(self.files[self.selected_file].lines.len().saturating_sub(1));let text_x=workspace_right+s(52);self.caret_column=(((x-text_x).max(0))/s(10).max(1)) as usize;self.caret_column=self.caret_column.min(self.files[self.selected_file].lines[self.caret_line].len());return;
+            self.editor_focused=true;let base=s(119);let step=s(28);let line=((y-base+step/2)/step).max(0) as usize;self.caret_line=line.min(self.files[self.selected_file].lines.len().saturating_sub(1));let text_x=workspace_right+s(52);let visual_column=(((x-text_x).max(0))/s(10).max(1)) as usize;self.caret_column=char_to_byte_index(&self.files[self.selected_file].lines[self.caret_line],visual_column);return;
         }
         self.editor_focused=false;
     }
@@ -597,16 +626,16 @@ impl App {
         let mut keysym=0;let mut buffer=[0_i8;32];let count=XLookupString(event,buffer.as_mut_ptr(),buffer.len() as i32,&mut keysym,ptr::null_mut());
         if self.extension_search_focused {if keysym==ESCAPE_KEYSYM{self.extension_search_focused=false;return true;}if keysym==BACKSPACE_KEYSYM{self.extension_search.pop();self.extension_scroll=0;return true;}if keysym==RETURN_KEYSYM{self.extension_search_focused=false;return true;}if count>0{let bytes=buffer[..count as usize].iter().map(|v|*v as u8).collect::<Vec<_>>();if let Ok(input)=std::str::from_utf8(&bytes){if !input.chars().any(char::is_control){self.extension_search.push_str(input);self.extension_scroll=0;}}}return true;}
         if self.create_kind.is_some() {if keysym==ESCAPE_KEYSYM{if self.project_language_menu||self.project_environment_menu{self.project_language_menu=false;self.project_environment_menu=false;}else{self.create_kind=None;}return true;}if keysym==BACKSPACE_KEYSYM{self.new_file_name.pop();return true;}if keysym==RETURN_KEYSYM{self.create_requested_item();return true;}if count>0{let bytes=buffer[..count as usize].iter().map(|v|*v as u8).collect::<Vec<_>>();if let Ok(input)=std::str::from_utf8(&bytes){if !input.chars().any(char::is_control){self.new_file_name.push_str(input);}}}return true;}
-        if keysym==ESCAPE_KEYSYM {if self.extensions_open||self.package_open||self.build_started.is_some(){self.extensions_open=false;self.version_menu_open=false;self.package_open=false;self.build_started=None;return true;}return false;}
+        if keysym==ESCAPE_KEYSYM {if self.extensions_open||self.new_menu_open||self.package_open||self.build_started.is_some(){self.extensions_open=false;self.new_menu_open=false;self.version_menu_open=false;self.package_open=false;self.build_started=None;return true;}return false;}
         if !self.editor_focused{return true;}
         match keysym {
             TAB_KEYSYM=>self.accept_completion(),
-            BACKSPACE_KEYSYM=>{if self.caret_column>0 {let line=&mut self.files[self.selected_file].lines[self.caret_line];self.caret_column-=1;line.remove(self.caret_column);}else if self.caret_line>0{let current=self.files[self.selected_file].lines.remove(self.caret_line);self.caret_line-=1;self.caret_column=self.files[self.selected_file].lines[self.caret_line].len();self.files[self.selected_file].lines[self.caret_line].push_str(&current);}},
+            BACKSPACE_KEYSYM=>{if self.caret_column>0 {let line=&mut self.files[self.selected_file].lines[self.caret_line];let previous=previous_char_boundary(line,self.caret_column);line.replace_range(previous..self.caret_column,"");self.caret_column=previous;}else if self.caret_line>0{let current=self.files[self.selected_file].lines.remove(self.caret_line);self.caret_line-=1;self.caret_column=self.files[self.selected_file].lines[self.caret_line].len();self.files[self.selected_file].lines[self.caret_line].push_str(&current);}},
             RETURN_KEYSYM=>{let tail=self.files[self.selected_file].lines[self.caret_line].split_off(self.caret_column);self.caret_line+=1;self.caret_column=0;self.files[self.selected_file].lines.insert(self.caret_line,tail);},
-            LEFT_KEYSYM=>self.caret_column=self.caret_column.saturating_sub(1),
-            RIGHT_KEYSYM=>self.caret_column=(self.caret_column+1).min(self.files[self.selected_file].lines[self.caret_line].len()),
-            UP_KEYSYM=>{self.caret_line=self.caret_line.saturating_sub(1);self.caret_column=self.caret_column.min(self.files[self.selected_file].lines[self.caret_line].len());},
-            DOWN_KEYSYM=>{self.caret_line=(self.caret_line+1).min(self.files[self.selected_file].lines.len()-1);self.caret_column=self.caret_column.min(self.files[self.selected_file].lines[self.caret_line].len());},
+            LEFT_KEYSYM=>self.caret_column=previous_char_boundary(&self.files[self.selected_file].lines[self.caret_line],self.caret_column),
+            RIGHT_KEYSYM=>self.caret_column=next_char_boundary(&self.files[self.selected_file].lines[self.caret_line],self.caret_column),
+            UP_KEYSYM=>{let visual=self.files[self.selected_file].lines[self.caret_line][..self.caret_column].chars().count();self.caret_line=self.caret_line.saturating_sub(1);self.caret_column=char_to_byte_index(&self.files[self.selected_file].lines[self.caret_line],visual);},
+            DOWN_KEYSYM=>{let visual=self.files[self.selected_file].lines[self.caret_line][..self.caret_column].chars().count();self.caret_line=(self.caret_line+1).min(self.files[self.selected_file].lines.len()-1);self.caret_column=char_to_byte_index(&self.files[self.selected_file].lines[self.caret_line],visual);},
             _=>if count>0 {let bytes=buffer[..count as usize].iter().map(|v|*v as u8).collect::<Vec<_>>();if let Ok(input)=std::str::from_utf8(&bytes){if !input.chars().any(char::is_control){self.files[self.selected_file].lines[self.caret_line].insert_str(self.caret_column,input);self.caret_column+=input.len();}}}
         }
         true
@@ -614,7 +643,8 @@ impl App {
 
     fn update_hover(&mut self) {
         let scale=self.scale();let s=move|v:i32|(v as f32*scale).round() as i32;let left=(self.width as f32*0.17) as i32;let graph=(self.width as f32*0.61) as i32;
-        if self.mouse_x>=left&&self.mouse_x<graph&&self.mouse_y>s(90){let row=((self.mouse_y-s(119)+s(14))/s(28).max(1)).max(0) as usize;if let Some(line)=self.files[self.selected_file].lines.get(row){self.hovered=if line.contains("build_graph"){Some(5)}else if line.contains("analyze_workspace"){Some(6)}else if line.contains("resolve_symbols"){Some(7)}else if line.contains("render_graph"){Some(8)}else{None};return;}}
+        if self.mouse_x>=left&&self.mouse_x<graph&&self.mouse_y>s(90){let row=((self.mouse_y-s(119)+s(14))/s(28).max(1)).max(0) as usize;if let Some(line)=self.files[self.selected_file].lines.get(row){self.hovered=if line.contains("build_graph"){Some(5)}else if line.contains("analyze_workspace"){Some(6)}else if line.contains("resolve_symbols"){Some(7)}else if line.contains("render_graph"){Some(8)}else{None};self.hovered_from_code=self.hovered.is_some();return;}}
+        self.hovered_from_code=false;
         let mut best=None;
         let mut distance=self.s(40) as i64*self.s(40) as i64;
         for (index,node) in NODES.iter().enumerate() {
@@ -647,6 +677,14 @@ fn initial_files() -> Vec<FileBuffer> {
 fn language_settings_path()->PathBuf {std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(||std::env::var_os("HOME").map(|home|PathBuf::from(home).join(".config"))).unwrap_or_else(||PathBuf::from(".")).join("tc-ide/languages.conf")}
 
 fn projects_root()->PathBuf {std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(||PathBuf::from(".")).join("TC-IDE-Projects")}
+
+fn comment_markers_for_file(name:&str)->&'static [&'static str]{let extension=name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();match extension.as_str(){"py"|"pyw"|"rb"|"sh"|"bash"|"zsh"|"fish"|"r"=>&["#"],"sql"|"lua"|"hs"|"lhs"=>&["--"],"html"|"htm"|"md"|"mdx"=>&["<!--"],"css"|"scss"|"sass"=>&["/*"],"c"|"h"|"cc"|"cpp"|"cxx"|"hpp"|"rs"|"java"|"kt"|"kts"|"swift"|"go"|"cs"|"ts"|"tsx"|"js"|"jsx"|"mjs"|"dart"|"php"|"scala"|"vue"|"svelte"=>&["//","/*"],_=>&[]}}
+
+fn char_to_byte_index(value:&str,character:usize)->usize{value.char_indices().nth(character).map(|(index,_)|index).unwrap_or(value.len())}
+
+fn previous_char_boundary(value:&str,index:usize)->usize{value[..index.min(value.len())].char_indices().last().map(|(position,_)|position).unwrap_or(0)}
+
+fn next_char_boundary(value:&str,index:usize)->usize{if index>=value.len(){return value.len();}value[index..].char_indices().nth(1).map(|(offset,_)|index+offset).unwrap_or(value.len())}
 
 fn wrap_bubble_text(value:&str,max_chars:usize,max_lines:usize)->Vec<String>{let source=if value.trim().is_empty(){"comment"}else{value.trim()};let mut lines=Vec::new();for paragraph in source.lines(){let chars=paragraph.chars().collect::<Vec<_>>();if chars.is_empty(){lines.push(String::new());continue;}for chunk in chars.chunks(max_chars.max(1)){lines.push(chunk.iter().collect());}}if lines.len()>max_lines{lines.truncate(max_lines);if let Some(last)=lines.last_mut(){if last.chars().count()>=3{let keep=last.chars().take(max_chars.saturating_sub(3)).collect::<String>();*last=format!("{keep}...");}}}lines}
 
@@ -702,7 +740,7 @@ fn main() {
             accent:color(display,map,"#9bbbc2"),
             project:color(display,map,"#29353a"),
         };
-        let mut app=App { display,window,gc,canvas,depth,font,colors,width,height,mouse_x:-100,mouse_y:-100,hovered:None,selected_file:0,files:initial_files(),folders:vec!["src".into(),"src/editor".into()],project_name:"TC-IDE".into(),project_path:None,editor_focused:false,caret_line:0,caret_column:0,graph_zoom:1.0,package_open:false,package_targets:[true,true,true],build_started:None,extensions_open:false,languages:initial_languages(),downloading:None,extension_scroll:0,extension_search:String::new(),extension_search_focused:false,selected_language:Some(1),version_menu_open:false,create_kind:None,new_file_name:String::new(),project_language:1,project_environment:0,project_language_menu:false,project_environment_menu:false,status_message:"Rust / X11 - 60 FPS double-buffered scene".into(),started:Instant::now() };
+        let mut app=App { display,window,gc,canvas,depth,font,colors,width,height,mouse_x:-100,mouse_y:-100,hovered:None,hovered_from_code:false,selected_file:0,files:initial_files(),folders:vec!["src".into(),"src/editor".into()],project_name:"TC-IDE".into(),project_path:None,editor_focused:false,caret_line:0,caret_column:0,graph_zoom:1.0,package_open:false,package_targets:[true,true,true,true],build_started:None,new_menu_open:false,extensions_open:false,languages:initial_languages(),downloading:None,extension_scroll:0,extension_search:String::new(),extension_search_focused:false,selected_language:Some(1),version_menu_open:false,create_kind:None,new_file_name:String::new(),project_language:1,project_environment:0,project_language_menu:false,project_environment_menu:false,expanded_comments:BTreeSet::new(),status_message:"Rust / X11 - 60 FPS double-buffered scene".into(),started:Instant::now() };
         let frame=Duration::from_micros(16_667);
         let mut running=true;
         while running {
@@ -777,5 +815,22 @@ mod tests {
         assert_eq!(wrap_bubble_text("first line\nsecond line",30,4),vec!["first line","second line"]);
         assert_eq!(wrap_bubble_text("123456789",4,4),vec!["1234","5678","9"]);
         assert!(wrap_bubble_text(&"x".repeat(100),10,3).last().unwrap().ends_with("..."));
+    }
+
+    #[test]
+    fn comment_syntax_depends_on_file_language() {
+        assert_eq!(comment_markers_for_file("main.c"),&["//","/*"]);
+        assert!(!comment_markers_for_file("main.c").contains(&"#"));
+        assert_eq!(comment_markers_for_file("main.py"),&["#"]);
+        assert_eq!(comment_markers_for_file("query.sql"),&["--"]);
+        assert!(comment_markers_for_file("data.json").is_empty());
+    }
+
+    #[test]
+    fn unicode_caret_helpers_stay_on_character_boundaries() {
+        let value="a注b";
+        assert_eq!(char_to_byte_index(value,2),4);
+        assert_eq!(previous_char_boundary(value,4),1);
+        assert_eq!(next_char_boundary(value,1),4);
     }
 }
