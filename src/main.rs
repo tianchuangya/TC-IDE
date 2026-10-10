@@ -18,6 +18,7 @@ type Colormap = c_ulong;
 type Atom = c_ulong;
 type Gc = *mut c_void;
 type Pixmap = c_ulong;
+type XFontSet = *mut c_void;
 
 #[repr(C)]
 struct Display {
@@ -173,6 +174,9 @@ extern "C" {
     fn XFillPolygon(display: *mut Display, drawable: Drawable, gc: Gc, points: *mut XPoint, count: c_int, shape: c_int, mode: c_int) -> c_int;
     fn XDrawArc(display: *mut Display, drawable: Drawable, gc: Gc, x: c_int, y: c_int, width: c_uint, height: c_uint, angle1: c_int, angle2: c_int) -> c_int;
     fn XDrawString(display: *mut Display, drawable: Drawable, gc: Gc, x: c_int, y: c_int, text: *const c_char, length: c_int) -> c_int;
+    fn XCreateFontSet(display: *mut Display, base_name: *const c_char, missing: *mut *mut *mut c_char, missing_count: *mut c_int, default_string: *mut *mut c_char) -> XFontSet;
+    fn Xutf8DrawString(display: *mut Display, drawable: Drawable, font_set: XFontSet, gc: Gc, x: c_int, y: c_int, text: *const c_char, length: c_int);
+    fn XFreeFontSet(display: *mut Display, font_set: XFontSet);
     fn XTextWidth(font: *mut XFontStruct, text: *const c_char, length: c_int) -> c_int;
     fn XLoadQueryFont(display: *mut Display, name: *const c_char) -> *mut XFontStruct;
     fn XSetFont(display: *mut Display, gc: Gc, font: c_ulong) -> c_int;
@@ -186,6 +190,11 @@ extern "C" {
     fn XFlush(display: *mut Display) -> c_int;
     fn XDestroyWindow(display: *mut Display, window: Window) -> c_int;
     fn XCloseDisplay(display: *mut Display) -> c_int;
+}
+
+#[link(name = "c")]
+extern "C" {
+    fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char;
 }
 
 const KEY_PRESS: c_int = 2;
@@ -209,6 +218,7 @@ const LEFT_KEYSYM: c_ulong = 0xff51;
 const UP_KEYSYM: c_ulong = 0xff52;
 const RIGHT_KEYSYM: c_ulong = 0xff53;
 const DOWN_KEYSYM: c_ulong = 0xff54;
+const LC_ALL: c_int = 6;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Level {
@@ -303,6 +313,7 @@ struct App {
     canvas: Pixmap,
     depth: c_int,
     font: *mut XFontStruct,
+    font_set: XFontSet,
     code_font: *mut XFontStruct,
     code_font_base: i32,
     colors: Palette,
@@ -312,6 +323,7 @@ struct App {
     mouse_y: i32,
     hovered: Option<usize>,
     hovered_from_code: bool,
+    hovered_code_span: Option<(usize, usize, usize)>,
     selected_file: usize,
     files: Vec<FileBuffer>,
     folders: Vec<String>,
@@ -340,7 +352,10 @@ struct App {
     package_targets: [bool; 4],
     build_started: Option<Instant>,
     new_menu_open: bool,
+    workspace_context_menu: Option<(i32, i32)>,
     extensions_open: bool,
+    settings_open: bool,
+    ui_chinese: bool,
     languages: Vec<LanguagePack>,
     downloading: Option<(usize, Instant)>,
     extension_scroll: usize,
@@ -366,6 +381,10 @@ impl App {
     }
 
     fn s(&self, value: i32) -> i32 { (value as f32 * self.scale()).round() as i32 }
+
+    fn tr<'a>(&self, english: &'a str, chinese: &'a str) -> &'a str {
+        if self.ui_chinese { chinese } else { english }
+    }
 
     fn code_line_step(&self)->i32{(self.s(28)+self.code_zoom*self.s(2)).max(self.s(20))}
 
@@ -422,15 +441,29 @@ impl App {
         XDrawArc(self.display, self.canvas, self.gc, x-radius, y-radius, (radius*2) as u32, (radius*2) as u32, 0, 360*64);
     }
 
-    fn comment_bubble_layout(&self,anchor_x:i32,y:i32,value:&str,expanded:bool,min_left:i32)->BubbleLayout{let s=|v|self.s(v);let right=anchor_x-s(9);let available=(right-min_left).max(s(72));let chars_per_line=((available-s(24))/s(11).max(1)).clamp(6,34) as usize;let lines=wrap_bubble_text(value,chars_per_line,if expanded{8}else{1});let longest=lines.iter().map(|line|line.chars().count()).max().unwrap_or(7) as i32;let width=(longest*s(11)+s(24)).max(s(112)).min(available);let height=s(31)+lines.len() as i32*s(22);BubbleLayout{left:right-width,top:y-s(21),width,height,lines,chars_per_line}}
+    fn comment_bubble_layout(&self,anchor_x:i32,y:i32,value:&str,expanded:bool,max_right:i32)->BubbleLayout{let s=|v|self.s(v);let left=(anchor_x+s(9)).min(max_right-s(112));let available=(max_right-left).max(s(112));let chars_per_line=((available-s(24))/s(11).max(1)).clamp(6,34) as usize;let lines=wrap_bubble_text(value,chars_per_line,if expanded{8}else{1});let longest=lines.iter().map(|line|line.chars().count()).max().unwrap_or(7) as i32;let width=(longest*s(11)+s(24)).max(s(112)).min(available);let height=s(31)+lines.len() as i32*s(22);BubbleLayout{left,top:y-s(21),width,height,lines,chars_per_line}}
 
-    unsafe fn comment_bubble(&self,anchor_x:i32,y:i32,value:&str,expanded:bool,editing:bool,min_left:i32){let s=|v|self.s(v);let layout=self.comment_bubble_layout(anchor_x,y,value,expanded,min_left);self.rect(self.colors.bright,layout.left,layout.top,layout.width,layout.height);self.line(self.colors.line,1,(layout.left,layout.top+s(27)),(layout.left+layout.width,layout.top+s(27)));let tail_center=layout.top+s(14);let right=layout.left+layout.width;let mut tail=[XPoint{x:anchor_x as i16,y:tail_center as i16},XPoint{x:right as i16,y:(tail_center-s(7)) as i16},XPoint{x:right as i16,y:(tail_center+s(7)) as i16}];self.set_color(self.colors.bright);XFillPolygon(self.display,self.canvas,self.gc,tail.as_mut_ptr(),3,0,0);self.text(self.colors.bg,layout.left+s(9),layout.top+s(20),if expanded{"v"}else{">"});self.text(self.colors.bg,layout.left+s(29),layout.top+s(20),if editing{"EDITING"}else{"COMMENT"});self.text(self.colors.bg,layout.left+layout.width-s(48),layout.top+s(20),"EDIT");for (index,line) in layout.lines.iter().enumerate(){self.text(self.colors.bg,layout.left+s(12),layout.top+s(48)+index as i32*s(22),line);}}
+    unsafe fn comment_bubble(&self,anchor_x:i32,y:i32,value:&str,expanded:bool,editing:bool,max_right:i32){let s=|v|self.s(v);let layout=self.comment_bubble_layout(anchor_x,y,value,expanded,max_right);self.rect(self.colors.bright,layout.left,layout.top,layout.width,layout.height);self.line(self.colors.line,1,(layout.left,layout.top+s(27)),(layout.left+layout.width,layout.top+s(27)));let tail_center=layout.top+s(14);let mut tail=[XPoint{x:anchor_x as i16,y:tail_center as i16},XPoint{x:layout.left as i16,y:(tail_center-s(7)) as i16},XPoint{x:layout.left as i16,y:(tail_center+s(7)) as i16}];self.set_color(self.colors.bright);XFillPolygon(self.display,self.canvas,self.gc,tail.as_mut_ptr(),3,0,0);self.text(self.colors.bg,layout.left+s(9),layout.top+s(20),if expanded{"v"}else{">"});self.text(self.colors.bg,layout.left+s(29),layout.top+s(20),if editing{self.tr("EDITING","编辑中")}else{self.tr("COMMENT","注释")});self.text(self.colors.bg,layout.left+layout.width-s(48),layout.top+s(20),self.tr("EDIT","编辑"));for (index,line) in layout.lines.iter().enumerate(){self.text(self.colors.bg,layout.left+s(12),layout.top+s(48)+index as i32*s(22),line);}}
 
     unsafe fn text(&self, color: c_ulong, x: i32, y: i32, value: &str) {
         let clean = value.replace('\0', "");
+        let is_ascii = clean.is_ascii();
         let value = CString::new(clean).expect("text contains no NUL");
         self.set_color(color);
-        XDrawString(self.display, self.canvas, self.gc, x, y, value.as_ptr(), value.as_bytes().len() as i32);
+        if is_ascii || self.font_set.is_null() {
+            XDrawString(self.display, self.canvas, self.gc, x, y, value.as_ptr(), value.as_bytes().len() as i32);
+        } else {
+            Xutf8DrawString(self.display, self.canvas, self.font_set, self.gc, x, y, value.as_ptr(), value.as_bytes().len() as i32);
+        }
+    }
+
+    fn code_symbol_bounds(&self, line: usize, start: usize, end: usize) -> (i32, i32, i32, i32) {
+        let left = (self.width as f32 * 0.17) as i32;
+        let y = self.s(119) + line as i32 * self.code_line_step();
+        let value = &self.files[self.selected_file].lines[line];
+        let x = left + self.s(52) + self.code_text_width(&value[..start]);
+        let width = self.code_text_width(&value[start..end]);
+        (x - self.s(4), y - self.s(21), width + self.s(8), self.s(27))
     }
 
     unsafe fn highlighted_text(&self,x:i32,y:i32,value:&str,language:&str){let mut cursor=x;for (token,kind) in syntax_tokens(value,completion_words_for_language(language)){let color=match kind{1=>self.colors.accent,2=>self.colors.bright,3=>self.colors.project,_=>self.colors.text};self.text(color,cursor,y,&token);cursor+=self.code_text_width(&token);}}
@@ -460,8 +493,10 @@ impl App {
         self.draw_editor();
         self.draw_graph();
         if self.hovered_from_code { self.draw_code_relations(); }
+        if self.workspace_context_menu.is_some() { self.draw_workspace_context_menu(); }
         if self.new_menu_open { self.draw_new_menu(); }
         if self.edit_menu_open { self.draw_edit_menu(); }
+        if self.settings_open { self.draw_settings_menu(); }
         if self.package_open { self.draw_package_menu(); }
         if self.extensions_open { self.draw_extensions(); }
         if self.create_kind.is_some() { self.draw_create_dialog(); }
@@ -475,17 +510,20 @@ impl App {
         let s=|v|self.s(v);let header=s(46);
         self.rect(self.colors.panel_2,0,0,self.width,header);
         self.line(self.colors.line,1,(0,header-1),(self.width,header-1));
-        self.rect(self.colors.bright,s(14),s(12),s(28),s(22));
-        self.text(self.colors.bg,s(17),s(29),"TCI");
-        self.text(self.colors.text,s(46),s(29),"TC-IDE");
+        self.circle(self.colors.project,self.colors.bright,s(27),s(23),s(13));
+        self.text(self.colors.bright,s(15),s(29),"TC");
+        self.text(self.colors.accent,s(31),s(29),"id");
+        self.text(self.colors.text,s(48),s(29),"TC-IDE");
         self.outline(if self.new_menu_open{self.colors.accent}else{self.colors.line},s(112),s(10),s(88),s(27));
-        self.text(self.colors.text,s(130),s(29),"New  v");
-        self.outline(if self.edit_menu_open{self.colors.accent}else{self.colors.line},s(207),s(10),s(88),s(27));self.text(self.colors.text,s(225),s(29),"Edit  v");
+        self.text(self.colors.text,s(124),s(29),self.tr("New  v","新建 v"));
+        self.outline(if self.edit_menu_open{self.colors.accent}else{self.colors.line},s(207),s(10),s(88),s(27));self.text(self.colors.text,s(219),s(29),self.tr("Edit  v","编辑 v"));
         let path=format!("{}  /  {}",self.project_name,self.files[self.selected_file].name);let path_x=self.width/2-path.chars().count() as i32*s(5);self.text(self.colors.muted,path_x.max(s(220)),s(29),&path);
+        self.outline(if self.settings_open{self.colors.accent}else{self.colors.line},self.width-s(410),s(10),s(120),s(27));
+        self.text(self.colors.text,self.width-s(394),s(29),self.tr("Settings","设置"));
         self.outline(if self.extensions_open{self.colors.accent}else{self.colors.line},self.width-s(275),s(10),s(126),s(27));
-        self.text(self.colors.text,self.width-s(260),s(29),"Extensions");
+        self.text(self.colors.text,self.width-s(260),s(29),self.tr("Extensions","扩展"));
         self.outline(if self.package_open{self.colors.accent}else{self.colors.line},self.width-s(136),s(10),s(118),s(27));
-        self.text(self.colors.text,self.width-s(119),s(29),"Package  v");
+        self.text(self.colors.text,self.width-s(119),s(29),self.tr("Package v","打包 v"));
     }
 
     unsafe fn draw_workspace(&self) {
@@ -493,15 +531,19 @@ impl App {
         let width = (self.width as f32 * 0.17) as i32;
         self.rect(self.colors.panel,0,s(46),width,self.height-s(70));
         self.line(self.colors.line,1,(width,s(46)),(width,self.height-s(24)));
-        self.text(self.colors.muted,s(14),s(71),"PROJECT");
+        self.text(self.colors.muted,s(14),s(71),self.tr("PROJECT","项目"));
         self.text(self.colors.bright,s(15),s(101),&format!("v  {}",self.project_name));
-        self.rect(self.colors.bg,s(10),s(112),width-s(20),s(32));self.outline(if self.workspace_search_focused{self.colors.accent}else{self.colors.line},s(10),s(112),width-s(20),s(32));self.text(self.colors.muted,s(22),s(134),if self.workspace_search.is_empty(){"Search files"}else{&self.workspace_search});
+        self.rect(self.colors.bg,s(10),s(112),width-s(20),s(32));self.outline(if self.workspace_search_focused{self.colors.accent}else{self.colors.line},s(10),s(112),width-s(20),s(32));self.text(self.colors.muted,s(22),s(134),if self.workspace_search.is_empty(){self.tr("Search files","搜索文件")}else{&self.workspace_search});
         let mut row_y=176;for folder in &self.folders{self.text(self.colors.text,s(16),s(row_y),&format!("  v  {folder}"));row_y+=28;}
         let needle=self.workspace_search.to_ascii_lowercase();for (index,file) in self.files.iter().enumerate().filter(|(_,file)|needle.is_empty()||file.name.to_ascii_lowercase().contains(&needle)){let y=row_y+index as i32*29;if s(y)>self.height-s(65){break;}if index==self.selected_file{self.rect(self.colors.panel_2,s(7),s(y-21),width-s(14),s(27));}let color=if index==self.selected_file{self.colors.bright}else{self.colors.muted};self.text(color,s(16),s(y),&format!("       {}",file.name));
         }
     }
 
-    unsafe fn draw_new_menu(&self){let s=|v|self.s(v);let x=s(112);let y=s(43);let w=s(220);let h=s(126);self.rect(self.colors.panel_2,x,y,w,h);self.outline(self.colors.line,x,y,w,h);self.text(self.colors.muted,x+s(15),y+s(23),"CREATE");for (index,label) in ["New Project","New File","New Folder"].iter().enumerate(){let row=y+s(50+index as i32*30);self.text(self.colors.text,x+s(18),row,label);self.text(self.colors.muted,x+w-s(28),row,"+");}}
+    unsafe fn draw_workspace_context_menu(&self){let Some((x,y))=self.workspace_context_menu else{return;};let s=|v|self.s(v);let w=s(190);let h=s(92);self.rect(self.colors.panel_2,x,y,w,h);self.outline(self.colors.accent,x,y,w,h);self.text(self.colors.muted,x+s(14),y+s(22),self.tr("CREATE HERE","在此新建"));self.text(self.colors.text,x+s(16),y+s(51),self.tr("New File","新建文件"));self.text(self.colors.text,x+s(16),y+s(79),self.tr("New Folder","新建文件夹"));}
+
+    unsafe fn draw_settings_menu(&self){let s=|v|self.s(v);let x=self.width-s(410);let y=s(43);let w=s(260);let h=s(132);self.rect(self.colors.panel_2,x,y,w,h);self.outline(self.colors.line,x,y,w,h);self.text(self.colors.bright,x+s(16),y+s(27),self.tr("SETTINGS","设置"));self.text(self.colors.muted,x+s(16),y+s(55),self.tr("Interface language","界面语言"));for (index,(label,active)) in [("English",!self.ui_chinese),("简体中文",self.ui_chinese)].iter().enumerate(){let row=y+s(82+index as i32*30);if *active{self.rect(self.colors.project,x+s(10),row-s(20),w-s(20),s(26));}self.text(if *active{self.colors.bright}else{self.colors.text},x+s(20),row,label);if *active{self.text(self.colors.accent,x+w-s(28),row,"o");}}}
+
+    unsafe fn draw_new_menu(&self){let s=|v|self.s(v);let x=s(112);let y=s(43);let w=s(220);let h=s(126);self.rect(self.colors.panel_2,x,y,w,h);self.outline(self.colors.line,x,y,w,h);self.text(self.colors.muted,x+s(15),y+s(23),self.tr("CREATE","新建"));let labels=if self.ui_chinese{["新建项目","新建文件","新建文件夹"]}else{["New Project","New File","New Folder"]};for (index,label) in labels.iter().enumerate(){let row=y+s(50+index as i32*30);self.text(self.colors.text,x+s(18),row,label);self.text(self.colors.muted,x+w-s(28),row,"+");}}
 
     unsafe fn draw_edit_menu(&self){let s=|v|self.s(v);let x=s(207);let y=s(43);let w=s(260);let h=s(190);self.rect(self.colors.panel_2,x,y,w,h);self.outline(self.colors.line,x,y,w,h);for (index,(label,key)) in [("Save","Ctrl+S"),("Select All","Ctrl+A"),("Copy","Ctrl+C"),("Paste","Ctrl+V"),("Larger Code","Ctrl++"),("Smaller Code","Ctrl+-")].iter().enumerate(){let row=y+s(30+index as i32*27);self.text(self.colors.text,x+s(16),row,label);self.text(self.colors.muted,x+w-s(80),row,key);}}
 
@@ -524,7 +566,8 @@ impl App {
             self.text(self.colors.line,left+s(15),y,&(index+1).to_string());
             let color=if line.contains("fn "){self.colors.accent}else if line.contains("struct ")||line.starts_with("impl"){self.colors.bright}else{self.colors.text};
             if let (Some(a),Some(b))=(self.selection_anchor,self.selection_head){let (start,end)=if a<=b{(a,b)}else{(b,a)};if index>=start.0&&index<=end.0{let from=if index==start.0{start.1}else{0};let to=if index==end.0{end.1}else{line.len()};let sx=left+s(52)+self.code_text_width(&line[..from]);let sw=self.code_text_width(&line[from..to]).max(s(4));self.rect(self.colors.project,sx,y-s(20),sw,s(25));}}
-            if let Some(comment)=self.comment_parts(line){self.highlighted_text(left+s(52),y,comment.code,detected);let raw_anchor=left+s(62)+self.code_text_width(comment.code);let bubble_x=if comment.code.trim().is_empty(){left+s(350)}else{raw_anchor};if show_bubbles{let expanded=self.expanded_comments.contains(&(self.selected_file,index));let editing=self.editor_focused&&self.caret_line==index&&self.caret_column>=comment.content_column;self.comment_bubble(bubble_x,y,comment.text,expanded,editing,left+s(18));}else{self.text(self.colors.accent,raw_anchor,y,"[comment]");}}else{let _=color;self.highlighted_text(left+s(52),y,line,detected);}
+            if let Some((hover_line,start,end))=self.hovered_code_span{if hover_line==index{let (bx,by,bw,bh)=self.code_symbol_bounds(index,start,end);self.rect(self.colors.project,bx,by,bw,bh);self.outline(self.colors.bright,bx,by,bw,bh);}}
+            if let Some(comment)=self.comment_parts(line){self.highlighted_text(left+s(52),y,comment.code,detected);let raw_anchor=left+s(58)+self.code_text_width(comment.code);if show_bubbles{let expanded=self.expanded_comments.contains(&(self.selected_file,index));let editing=self.editor_focused&&self.caret_line==index&&self.caret_column>=comment.content_column;self.comment_bubble(raw_anchor,y,comment.text,expanded,editing,right-s(18));}else{self.text(self.colors.accent,raw_anchor,y,"[comment]");}}else{let _=color;self.highlighted_text(left+s(52),y,line,detected);}
             if self.editor_focused&&index==self.caret_line&&(self.started.elapsed().as_millis()/500)%2==0 {
                 let caret_x=left+s(52)+self.code_text_width(&self.files[self.selected_file].lines[index][..self.caret_column]);
                 self.line(self.colors.bright,1,(caret_x,y-s(18)),(caret_x,y+s(4)));
@@ -542,7 +585,7 @@ impl App {
         self.rect(self.colors.panel,x,s(46),w,self.height-s(70));
         self.line(self.colors.line,1,(x,s(46)),(x,self.height-s(24)));
         self.line(self.colors.line,1,(x,s(84)),(self.width,s(84)));
-        self.text(self.colors.text,x+s(14),s(71),"Semantic Project Graph");
+        self.text(self.colors.text,x+s(14),s(71),self.tr("Semantic Project Graph","项目语义关系图"));
         if !self.graph_current{let cx=x+w/2;let cy=y+h/2;self.circle(self.colors.project,self.colors.accent,cx,cy,s(15));self.text(self.colors.bright,cx+s(24),cy-s(2),&self.project_name);self.text(self.colors.muted,cx+s(24),cy+s(18),"new project - semantic index is empty");self.text(self.colors.muted,x+s(14),y+h-s(10),"Graph cleared when the active project changed");return;}
         let mode = self.hovered.map(|i| match NODES[i].level { Level::Project=>"PROJECT",Level::File=>"FILE",Level::Class=>"CLASS",Level::Function=>"FUNCTION" }).unwrap_or("AUTO");
         self.text(self.colors.muted,self.width-s(112),s(71),mode);
@@ -571,7 +614,7 @@ impl App {
         self.text(self.colors.muted,x+s(14),y+h-s(10),"wheel: zoom - project -> file -> class -> function / call");
     }
 
-    unsafe fn draw_code_relations(&self){if !self.graph_current{return;}let Some(active)=self.hovered else{return;};let s=|v|self.s(v);let editor_right=(self.width as f32*0.61) as i32;let start=(self.mouse_x.max((self.width as f32*0.17) as i32+s(50)),self.mouse_y);let junction=(editor_right-s(18),start.1);self.circle(self.colors.panel_2,self.colors.bright,start.0,start.1,s(4));self.line(self.colors.accent,2,start,junction);let mut targets=vec![active];for &(from,to) in EDGES{if from==active&&!targets.contains(&to){targets.push(to);}}for target in targets{let end=self.node_position(&NODES[target]);let bend=(editor_right+s(18),end.1);self.line(self.colors.accent,2,junction,bend);self.line(self.colors.accent,2,bend,(end.0-s(8),end.1));let mut arrow=[XPoint{x:end.0 as i16,y:end.1 as i16},XPoint{x:(end.0-s(10)) as i16,y:(end.1-s(5)) as i16},XPoint{x:(end.0-s(10)) as i16,y:(end.1+s(5)) as i16}];self.set_color(self.colors.accent);XFillPolygon(self.display,self.canvas,self.gc,arrow.as_mut_ptr(),3,0,0);}let travel=((self.started.elapsed().as_secs_f32()*1.8)%1.0).clamp(0.0,1.0);let pulse_x=start.0+((junction.0-start.0) as f32*travel) as i32;self.circle(self.colors.bright,self.colors.accent,pulse_x,start.1,s(3));}
+    unsafe fn draw_code_relations(&self){if !self.graph_current{return;}let Some(active)=self.hovered else{return;};let Some((line,start_byte,end_byte))=self.hovered_code_span else{return;};let s=|v|self.s(v);let editor_right=(self.width as f32*0.61) as i32;let (box_x,box_y,box_w,box_h)=self.code_symbol_bounds(line,start_byte,end_byte);let start=(box_x+box_w,box_y+box_h/2);let junction=(editor_right-s(18),start.1);self.circle(self.colors.panel_2,self.colors.bright,start.0,start.1,s(4));self.line(self.colors.accent,2,start,junction);let mut targets=vec![active];for &(from,to) in EDGES{if from==active&&!targets.contains(&to){targets.push(to);}}for target in targets{let end=self.node_position(&NODES[target]);let bend=(editor_right+s(18),end.1);self.line(self.colors.accent,2,junction,bend);self.line(self.colors.accent,2,bend,(end.0-s(8),end.1));let mut arrow=[XPoint{x:end.0 as i16,y:end.1 as i16},XPoint{x:(end.0-s(10)) as i16,y:(end.1-s(5)) as i16},XPoint{x:(end.0-s(10)) as i16,y:(end.1+s(5)) as i16}];self.set_color(self.colors.accent);XFillPolygon(self.display,self.canvas,self.gc,arrow.as_mut_ptr(),3,0,0);}let travel=((self.started.elapsed().as_secs_f32()*1.8)%1.0).clamp(0.0,1.0);let pulse_x=start.0+((junction.0-start.0) as f32*travel) as i32;self.circle(self.colors.bright,self.colors.accent,pulse_x,start.1,s(3));}
 
     unsafe fn draw_status(&self) {
         let s=|v|self.s(v);let panel_h=if self.terminal_open{s(230)}else{s(28)};let top=self.height-panel_h;self.rect(self.colors.panel_2,0,top,self.width,panel_h);self.line(self.colors.line,1,(0,top),(self.width,top));self.text(self.colors.bright,s(14),top+s(20),if self.terminal_open{"v  TERMINAL"}else{">  TERMINAL"});self.text(self.colors.muted,s(130),top+s(20),self.project_path.as_ref().map(|path|path.to_string_lossy()).as_deref().unwrap_or("No active project"));
@@ -646,17 +689,20 @@ impl App {
     fn handle_click(&mut self,x:i32,y:i32,button:u32,state:c_uint){
         let scale=self.scale();let s=move|v:i32|(v as f32*scale).round() as i32;
         let graph_left=(self.width as f32*0.61) as i32;
+        if let Some((menu_x,menu_y))=self.workspace_context_menu{if button==1&&x>=menu_x&&x<=menu_x+s(190)&&y>=menu_y&&y<=menu_y+s(92){let kind=if y<menu_y+s(65){CreateKind::File}else{CreateKind::Folder};self.create_kind=Some(kind);self.new_file_name.clear();self.create_caret=0;self.workspace_context_menu=None;return;}if button!=3{self.workspace_context_menu=None;}}
         if let Some(kind)=self.create_kind {let project=kind==CreateKind::Project;let w=s(if project{680}else{520});let h=s(if project{450}else{176});let dx=(self.width-w)/2;let dy=(self.height-h)/2;if x>=dx+s(22)&&x<=dx+w-s(22)&&y>=dy+s(82)&&y<=dy+s(122){self.project_location_focused=false;let visual=((x-dx-s(35))/s(10).max(1)).max(0) as usize;self.create_caret=char_to_byte_index(&self.new_file_name,visual);return;}if project {if self.project_language_menu {for visible in 0..8.min(self.languages.len()){let row=dy+s(238+visible as i32*34);if (y-row).abs()<s(16){self.project_language=visible;self.project_environment=0;self.project_language_menu=false;return;}}}if self.project_environment_menu {let envs=project_environments(self.languages[self.project_language].name);for index in 0..envs.len(){let row=dy+s(238+index as i32*34);if (y-row).abs()<s(16){self.project_environment=index;self.project_environment_menu=false;return;}}}if x>=dx+s(22)&&x<=dx+s(322)&&y>=dy+s(171)&&y<=dy+s(211){self.project_language_menu=!self.project_language_menu;self.project_environment_menu=false;return;}if x>=dx+s(350)&&x<=dx+s(658)&&y>=dy+s(171)&&y<=dy+s(211){self.project_environment_menu=!self.project_environment_menu;self.project_language_menu=false;return;}if x>=dx+s(22)&&x<=dx+s(658)&&y>=dy+s(260)&&y<=dy+s(300){self.project_location_focused=true;return;}}return;}
         if self.extensions_open&&self.extension_category==0&&(button==4||button==5){let filtered=self.filtered_language_indices();let visible=10;let maximum=filtered.len().saturating_sub(visible);if button==4{self.extension_scroll=self.extension_scroll.saturating_sub(1);}else{self.extension_scroll=(self.extension_scroll+1).min(maximum);}return;}
         if state&CONTROL_MASK!=0&&(button==4||button==5){if button==4{self.code_zoom=(self.code_zoom+1).min(8);}else{self.code_zoom=(self.code_zoom-1).max(-4);}unsafe{self.reload_code_font();}return;}
         if x>=graph_left&&button==4 {self.graph_zoom=(self.graph_zoom*1.1).min(1.55);return;}
         if x>=graph_left&&button==5 {self.graph_zoom=(self.graph_zoom/1.1).max(0.65);return;}
-        if x>=s(112)&&x<=s(200)&&y<s(46){self.new_menu_open=!self.new_menu_open;self.edit_menu_open=false;self.extensions_open=false;self.package_open=false;self.editor_focused=false;return;}
-        if x>=s(207)&&x<=s(295)&&y<s(46){self.edit_menu_open=!self.edit_menu_open;self.new_menu_open=false;self.extensions_open=false;self.package_open=false;return;}
+        if x>=s(112)&&x<=s(200)&&y<s(46){self.new_menu_open=!self.new_menu_open;self.edit_menu_open=false;self.settings_open=false;self.extensions_open=false;self.package_open=false;self.editor_focused=false;return;}
+        if x>=s(207)&&x<=s(295)&&y<s(46){self.edit_menu_open=!self.edit_menu_open;self.new_menu_open=false;self.settings_open=false;self.extensions_open=false;self.package_open=false;return;}
         if self.edit_menu_open{let menu_x=s(207);let menu_y=s(43);if x>=menu_x&&x<=menu_x+s(260)&&y>=menu_y&&y<=menu_y+s(190){let index=((y-menu_y-s(17))/s(27).max(1)).clamp(0,5);match index{0=>self.save_current_file(),1=>{let last=self.files[self.selected_file].lines.len()-1;self.selection_anchor=Some((0,0));self.selection_head=Some((last,self.files[self.selected_file].lines[last].len()));},2=>self.copy_selection(),3=>self.paste_clipboard(),4=>{self.code_zoom=(self.code_zoom+1).min(8);unsafe{self.reload_code_font();}},_=>{self.code_zoom=(self.code_zoom-1).max(-4);unsafe{self.reload_code_font();}}}self.edit_menu_open=false;return;}self.edit_menu_open=false;}
         if self.new_menu_open{let menu_x=s(112);let menu_y=s(43);if x>=menu_x&&x<=menu_x+s(220)&&y>=menu_y&&y<=menu_y+s(126){for (index,kind) in [CreateKind::Project,CreateKind::File,CreateKind::Folder].iter().enumerate(){let row=menu_y+s(50+index as i32*30);if (y-row).abs()<=s(14){self.create_kind=Some(*kind);self.new_file_name.clear();self.create_caret=0;self.project_location_focused=false;self.new_menu_open=false;return;}}return;}self.new_menu_open=false;}
-        if x>self.width-s(290)&&x<self.width-s(145)&&y<s(46){self.extensions_open=!self.extensions_open;self.new_menu_open=false;self.edit_menu_open=false;self.package_open=false;self.editor_focused=false;return;}
-        if x>self.width-s(150)&&y<s(46){self.package_open=!self.package_open;self.new_menu_open=false;self.edit_menu_open=false;self.extensions_open=false;self.editor_focused=false;return;}
+        if x>=self.width-s(410)&&x<=self.width-s(290)&&y<s(46){self.settings_open=!self.settings_open;self.new_menu_open=false;self.edit_menu_open=false;self.extensions_open=false;self.package_open=false;self.editor_focused=false;return;}
+        if self.settings_open{let menu_x=self.width-s(410);let menu_y=s(43);if button==1&&x>=menu_x&&x<=menu_x+s(260)&&y>=menu_y+s(58)&&y<=menu_y+s(128){self.ui_chinese=y>=menu_y+s(92);save_ui_language(self.ui_chinese);self.status_message=if self.ui_chinese{"界面语言已切换为简体中文".into()}else{"Interface language changed to English".into()};return;}self.settings_open=false;}
+        if x>self.width-s(290)&&x<self.width-s(145)&&y<s(46){self.extensions_open=!self.extensions_open;self.new_menu_open=false;self.edit_menu_open=false;self.settings_open=false;self.package_open=false;self.editor_focused=false;return;}
+        if x>self.width-s(150)&&y<s(46){self.package_open=!self.package_open;self.new_menu_open=false;self.edit_menu_open=false;self.settings_open=false;self.extensions_open=false;self.editor_focused=false;return;}
         if self.extensions_open {
             let w=s(950);let h=s(680);let menu_x=self.width-w-s(20);let menu_y=s(52);
             if x>=menu_x&&x<=menu_x+w&&y>=menu_y&&y<=menu_y+h {for category in 0..5{let row=menu_y+s(101+category as i32*43);if x<=menu_x+s(175)&&(y-row).abs()<s(19){self.extension_category=category;self.extension_search_focused=false;self.version_menu_open=false;return;}}if self.extension_category!=0{return;}let list_x=menu_x+s(195);if x>=list_x&&x<=list_x+s(310)&&y>=menu_y+s(82)&&y<=menu_y+s(120){self.extension_search_focused=true;return;}let filtered=self.filtered_language_indices();for visible in 0..10{let position=self.extension_scroll+visible;if position>=filtered.len(){break;}let index=filtered[position];let row=menu_y+s(153+visible as i32*47);if x>=list_x&&x<=list_x+s(310)&&(y-row).abs()<s(20){self.selected_language=Some(index);self.version_menu_open=false;self.extension_search_focused=false;return;}}if let Some(index)=self.selected_language{let dx=menu_x+s(555);if self.version_menu_open{let versions=self.languages[index].versions;for version in 0..versions.len(){let row=menu_y+s(274+version as i32*34);if x>=dx&&x<=dx+s(355)&&(y-row).abs()<s(16){if self.languages[index].selected_version!=version&&self.languages[index].installed{self.languages[index].installed=false;save_language_settings(&self.languages);self.status_message="Version changed; download the selected language extension".into();}self.languages[index].selected_version=version;self.version_menu_open=false;return;}}}if x>=dx&&x<=dx+s(355)&&y>=menu_y+s(207)&&y<=menu_y+s(247){self.version_menu_open=!self.version_menu_open;return;}if x>=dx&&x<=dx+s(355)&&y>=menu_y+s(282)&&y<=menu_y+s(320){if self.languages[index].installed{self.languages[index].installed=false;self.status_message=format!("{} language extension removed; built-in completion remains active",self.languages[index].name);save_language_settings(&self.languages);}else{self.downloading=Some((index,Instant::now()));self.status_message=format!("Downloading {} {} tooling...",self.languages[index].name,self.languages[index].versions[self.languages[index].selected_version]);}return;}}return;}
@@ -673,7 +719,8 @@ impl App {
         }
         let workspace_right=(self.width as f32*0.17) as i32;
         let terminal_top=if self.terminal_open{self.height-s(230)}else{self.height-s(28)};if y>=terminal_top{if !self.terminal_open{self.terminal_open=true;self.terminal_focused=true;return;}if y<=terminal_top+s(30){if x<s(120){self.terminal_open=false;self.terminal_focused=false;return;}let first=self.width-s(520);if x>=first{let index=((x-first)/(s(134).max(1))) as usize;if index<self.terminals.len(){self.terminal_active=index;self.terminal_focused=true;}else{let number=self.terminals.len()+1;self.terminals.push(TerminalSession{name:format!("Terminal {number}"),input:String::new(),output:Arc::new(Mutex::new(vec!["terminal ready".into()]))});self.terminal_active=self.terminals.len()-1;}return;}}self.terminal_focused=true;self.editor_focused=false;return;}
-        if x>=workspace_right&&x<graph_left&&button==1{let base=s(119);let step=s(28);for index in 0..self.files[self.selected_file].lines.len(){let y_line=base+index as i32*step;let Some(comment)=self.comment_parts(&self.files[self.selected_file].lines[index]) else{continue;};let text=comment.text.to_string();let content_column=comment.content_column;let raw_anchor=workspace_right+s(62)+self.code_text_width(comment.code);let anchor=if comment.code.trim().is_empty(){workspace_right+s(350)}else{raw_anchor};let expanded=self.expanded_comments.contains(&(self.selected_file,index));let layout=self.comment_bubble_layout(anchor,y_line,&text,expanded,workspace_right+s(18));if x>=layout.left&&x<=layout.left+layout.width&&y>=layout.top&&y<=layout.top+layout.height{if y<=layout.top+s(27)&&x<=layout.left+s(28){let key=(self.selected_file,index);if !self.expanded_comments.remove(&key){self.expanded_comments.insert(key);}return;}self.expanded_comments.insert((self.selected_file,index));self.editor_focused=true;self.caret_line=index;if y>layout.top+s(27){let visual_line=((y-layout.top-s(38))/s(22).max(1)).max(0) as usize;let visual_column=((x-layout.left-s(12))/s(11).max(1)).max(0) as usize;let char_offset=(visual_line*layout.chars_per_line+visual_column).min(text.chars().count());self.caret_column=content_column+char_to_byte_index(&text,char_offset);}else{self.caret_column=content_column+text.len();}self.status_message="Comment editing active - click text to place the caret".into();return;}}}
+        if x<workspace_right&&button==3&&y>=s(145)&&y<terminal_top{let menu_w=s(190);let menu_h=s(92);self.workspace_context_menu=Some((x.min(workspace_right-menu_w-s(4)).max(s(4)),y.min(terminal_top-menu_h-s(4)).max(s(48))));self.editor_focused=false;return;}
+        if x>=workspace_right&&x<graph_left&&button==1{let base=s(119);let step=self.code_line_step();for index in 0..self.files[self.selected_file].lines.len(){let y_line=base+index as i32*step;let Some(comment)=self.comment_parts(&self.files[self.selected_file].lines[index]) else{continue;};let text=comment.text.to_string();let content_column=comment.content_column;let anchor=workspace_right+s(58)+self.code_text_width(comment.code);let expanded=self.expanded_comments.contains(&(self.selected_file,index));let layout=self.comment_bubble_layout(anchor,y_line,&text,expanded,graph_left-s(18));if x>=layout.left&&x<=layout.left+layout.width&&y>=layout.top&&y<=layout.top+layout.height{if y<=layout.top+s(27)&&x<=layout.left+s(28){let key=(self.selected_file,index);if !self.expanded_comments.remove(&key){self.expanded_comments.insert(key);}return;}self.expanded_comments.insert((self.selected_file,index));self.editor_focused=true;self.caret_line=index;if y>layout.top+s(27){let visual_line=((y-layout.top-s(38))/s(22).max(1)).max(0) as usize;let visual_column=((x-layout.left-s(12))/s(11).max(1)).max(0) as usize;let char_offset=(visual_line*layout.chars_per_line+visual_column).min(text.chars().count());self.caret_column=content_column+char_to_byte_index(&text,char_offset);}else{self.caret_column=content_column+text.len();}self.status_message="Comment editing active - click text to place the caret".into();return;}}}
         if x<workspace_right {
             if y>=s(112)&&y<=s(144){self.workspace_search_focused=true;self.editor_focused=false;return;}let file_start=176+self.folders.len() as i32*28;let needle=self.workspace_search.to_ascii_lowercase();for (index,file) in self.files.iter().enumerate(){if !needle.is_empty()&&!file.name.to_ascii_lowercase().contains(&needle){continue;}let center=file_start+index as i32*29;if (y-s(center)).abs()<s(15){self.selected_file=index;self.caret_line=0;self.caret_column=0;self.editor_focused=false;self.selection_anchor=None;self.selection_head=None;self.hovered=if self.graph_current&&index<3{Some(index+1)}else{None};self.hovered_from_code=false;return;}}
         }
@@ -690,17 +737,17 @@ impl App {
         if self.workspace_search_focused{if keysym==ESCAPE_KEYSYM||keysym==RETURN_KEYSYM{self.workspace_search_focused=false;return true;}if keysym==BACKSPACE_KEYSYM{self.workspace_search.pop();return true;}if count>0&&!input.chars().any(char::is_control){self.workspace_search.push_str(input);}return true;}
         if self.extension_search_focused {if keysym==ESCAPE_KEYSYM{self.extension_search_focused=false;return true;}if keysym==BACKSPACE_KEYSYM{self.extension_search.pop();self.extension_scroll=0;return true;}if keysym==RETURN_KEYSYM{self.extension_search_focused=false;return true;}if count>0{let bytes=buffer[..count as usize].iter().map(|v|*v as u8).collect::<Vec<_>>();if let Ok(input)=std::str::from_utf8(&bytes){if !input.chars().any(char::is_control){self.extension_search.push_str(input);self.extension_scroll=0;}}}return true;}
         if self.create_kind.is_some() {if keysym==ESCAPE_KEYSYM{if self.project_language_menu||self.project_environment_menu{self.project_language_menu=false;self.project_environment_menu=false;}else{self.create_kind=None;}return true;}if self.project_location_focused{if keysym==BACKSPACE_KEYSYM{self.project_location.pop();return true;}if keysym==TAB_KEYSYM||keysym==RETURN_KEYSYM{self.project_location_focused=false;return true;}if count>0&&!input.chars().any(char::is_control){self.project_location.push_str(input);}return true;}if keysym==LEFT_KEYSYM{self.create_caret=previous_char_boundary(&self.new_file_name,self.create_caret);return true;}if keysym==RIGHT_KEYSYM{self.create_caret=next_char_boundary(&self.new_file_name,self.create_caret);return true;}if keysym==BACKSPACE_KEYSYM{if self.create_caret>0{let previous=previous_char_boundary(&self.new_file_name,self.create_caret);self.new_file_name.replace_range(previous..self.create_caret,"");self.create_caret=previous;}return true;}if keysym==RETURN_KEYSYM{self.create_requested_item();return true;}if count>0&&!input.chars().any(char::is_control){self.new_file_name.insert_str(self.create_caret,input);self.create_caret+=input.len();}return true;}
-        if keysym==ESCAPE_KEYSYM {if self.extensions_open||self.new_menu_open||self.edit_menu_open||self.package_open||self.build_started.is_some(){self.extensions_open=false;self.new_menu_open=false;self.edit_menu_open=false;self.version_menu_open=false;self.package_open=false;self.build_started=None;return true;}return false;}
+        if keysym==ESCAPE_KEYSYM {if self.extensions_open||self.new_menu_open||self.edit_menu_open||self.settings_open||self.workspace_context_menu.is_some()||self.package_open||self.build_started.is_some(){self.extensions_open=false;self.new_menu_open=false;self.edit_menu_open=false;self.settings_open=false;self.workspace_context_menu=None;self.version_menu_open=false;self.package_open=false;self.build_started=None;return true;}return false;}
         if control{match input.to_ascii_lowercase().as_str(){"s"=>self.save_current_file(),"a"=>{let last=self.files[self.selected_file].lines.len()-1;self.selection_anchor=Some((0,0));self.selection_head=Some((last,self.files[self.selected_file].lines[last].len()));},"c"=>self.copy_selection(),"x"=>{self.copy_selection();self.delete_selection();},"v"=>self.paste_clipboard(),"+"|"="=>{self.code_zoom=(self.code_zoom+1).min(8);self.reload_code_font();self.status_message=format!("Code font size +{}",self.code_zoom);},"-"=>{self.code_zoom=(self.code_zoom-1).max(-4);self.reload_code_font();self.status_message=format!("Code font size {}",self.code_zoom);},_=>{}}return true;}
         if !self.editor_focused{return true;}
         match keysym {
             TAB_KEYSYM=>self.accept_completion(),
             BACKSPACE_KEYSYM=>{if !self.delete_selection(){if self.caret_column>0 {let line=&mut self.files[self.selected_file].lines[self.caret_line];let previous=previous_char_boundary(line,self.caret_column);line.replace_range(previous..self.caret_column,"");self.caret_column=previous;}else if self.caret_line>0{let current=self.files[self.selected_file].lines.remove(self.caret_line);self.caret_line-=1;self.caret_column=self.files[self.selected_file].lines[self.caret_line].len();self.files[self.selected_file].lines[self.caret_line].push_str(&current);}}},
             RETURN_KEYSYM=>{self.delete_selection();let tail=self.files[self.selected_file].lines[self.caret_line].split_off(self.caret_column);self.caret_line+=1;self.caret_column=0;self.files[self.selected_file].lines.insert(self.caret_line,tail);},
-            LEFT_KEYSYM=>self.caret_column=previous_char_boundary(&self.files[self.selected_file].lines[self.caret_line],self.caret_column),
-            RIGHT_KEYSYM=>self.caret_column=next_char_boundary(&self.files[self.selected_file].lines[self.caret_line],self.caret_column),
-            UP_KEYSYM=>{let visual=self.files[self.selected_file].lines[self.caret_line][..self.caret_column].chars().count();self.caret_line=self.caret_line.saturating_sub(1);self.caret_column=char_to_byte_index(&self.files[self.selected_file].lines[self.caret_line],visual);},
-            DOWN_KEYSYM=>{let visual=self.files[self.selected_file].lines[self.caret_line][..self.caret_column].chars().count();self.caret_line=(self.caret_line+1).min(self.files[self.selected_file].lines.len()-1);self.caret_column=char_to_byte_index(&self.files[self.selected_file].lines[self.caret_line],visual);},
+            LEFT_KEYSYM=>{if self.caret_column>0{self.caret_column=previous_char_boundary(&self.files[self.selected_file].lines[self.caret_line],self.caret_column);}else if self.caret_line>0{self.caret_line-=1;self.caret_column=self.files[self.selected_file].lines[self.caret_line].len();}self.selection_anchor=None;self.selection_head=None;},
+            RIGHT_KEYSYM=>{let len=self.files[self.selected_file].lines[self.caret_line].len();if self.caret_column<len{self.caret_column=next_char_boundary(&self.files[self.selected_file].lines[self.caret_line],self.caret_column);}else if self.caret_line+1<self.files[self.selected_file].lines.len(){self.caret_line+=1;self.caret_column=0;}self.selection_anchor=None;self.selection_head=None;},
+            UP_KEYSYM=>{let visual=self.files[self.selected_file].lines[self.caret_line][..self.caret_column].chars().count();self.caret_line=self.caret_line.saturating_sub(1);self.caret_column=char_to_byte_index(&self.files[self.selected_file].lines[self.caret_line],visual);self.selection_anchor=None;self.selection_head=None;},
+            DOWN_KEYSYM=>{let visual=self.files[self.selected_file].lines[self.caret_line][..self.caret_column].chars().count();self.caret_line=(self.caret_line+1).min(self.files[self.selected_file].lines.len()-1);self.caret_column=char_to_byte_index(&self.files[self.selected_file].lines[self.caret_line],visual);self.selection_anchor=None;self.selection_head=None;},
             _=>if count>0&&!input.chars().any(char::is_control){self.delete_selection();self.files[self.selected_file].lines[self.caret_line].insert_str(self.caret_column,input);self.caret_column+=input.len();}
         }
         true
@@ -710,8 +757,9 @@ impl App {
 
     fn update_hover(&mut self) {
         let scale=self.scale();let s=move|v:i32|(v as f32*scale).round() as i32;let left=(self.width as f32*0.17) as i32;let graph=(self.width as f32*0.61) as i32;
-        if self.mouse_x>=left&&self.mouse_x<graph&&self.mouse_y>s(90){let row=((self.mouse_y-s(119)+s(14))/s(28).max(1)).max(0) as usize;if let Some(line)=self.files[self.selected_file].lines.get(row){self.hovered=if line.contains("build_graph"){Some(5)}else if line.contains("analyze_workspace"){Some(6)}else if line.contains("resolve_symbols"){Some(7)}else if line.contains("render_graph"){Some(8)}else{None};self.hovered_from_code=self.hovered.is_some();return;}}
+        if self.mouse_x>=left&&self.mouse_x<graph&&self.mouse_y>s(90){let row=((self.mouse_y-s(119)+self.code_line_step()/2)/self.code_line_step().max(1)).max(0) as usize;if let Some(line)=self.files[self.selected_file].lines.get(row){for (symbol,node) in [("GraphController",4),("build_graph",5),("analyze_workspace",6),("resolve_symbols",7),("render_graph",8)]{for (start,_) in line.match_indices(symbol){let end=start+symbol.len();let symbol_x=left+s(52)+self.code_text_width(&line[..start]);let symbol_right=symbol_x+self.code_text_width(&line[start..end]);if self.mouse_x>=symbol_x-s(3)&&self.mouse_x<=symbol_right+s(3){self.hovered=Some(node);self.hovered_from_code=true;self.hovered_code_span=Some((row,start,end));return;}}}}}
         self.hovered_from_code=false;
+        self.hovered_code_span=None;
         let mut best=None;
         let mut distance=self.s(40) as i64*self.s(40) as i64;
         for (index,node) in NODES.iter().enumerate() {
@@ -742,6 +790,12 @@ fn initial_files() -> Vec<FileBuffer> {
 }
 
 fn language_settings_path()->PathBuf {std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(||std::env::var_os("HOME").map(|home|PathBuf::from(home).join(".config"))).unwrap_or_else(||PathBuf::from(".")).join("tc-ide/languages.conf")}
+
+fn ui_settings_path()->PathBuf {std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(||std::env::var_os("HOME").map(|home|PathBuf::from(home).join(".config"))).unwrap_or_else(||PathBuf::from(".")).join("tc-ide/interface-language.conf")}
+
+fn load_ui_language()->bool {fs::read_to_string(ui_settings_path()).map(|value|value.trim()=="zh-CN").unwrap_or(false)}
+
+fn save_ui_language(chinese:bool){let path=ui_settings_path();if let Some(parent)=path.parent(){let _=fs::create_dir_all(parent);}let _=fs::write(path,if chinese{"zh-CN\n"}else{"en\n"});}
 
 fn projects_root()->PathBuf {std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(||PathBuf::from(".")).join("TC-IDE-Projects")}
 
@@ -783,6 +837,8 @@ fn save_language_settings(languages:&[LanguagePack]){let path=language_settings_
 
 fn main() {
     unsafe {
+        let locale=CString::new("").unwrap();
+        setlocale(LC_ALL,locale.as_ptr());
         let display=XOpenDisplay(ptr::null());
         if display.is_null() {
             eprintln!("TC-IDE: cannot open X11 display. Run inside a desktop session.");
@@ -810,6 +866,9 @@ fn main() {
         let fallback_font=CString::new("fixed").unwrap();
         if font.is_null(){font=XLoadQueryFont(display,fallback_font.as_ptr());}
         let mut code_font=XLoadQueryFont(display,font_name.as_ptr());if code_font.is_null(){code_font=XLoadQueryFont(display,fallback_font.as_ptr());}
+        let font_set_pattern=CString::new("-*-sans-medium-r-normal--18-*-*-*-*-*-*-*").unwrap();
+        let mut missing: *mut *mut c_char=ptr::null_mut();let mut missing_count=0;let mut default_string: *mut c_char=ptr::null_mut();
+        let font_set=XCreateFontSet(display,font_set_pattern.as_ptr(),&mut missing,&mut missing_count,&mut default_string);
         if !font.is_null(){XSetFont(display,gc,(*font).fid);}
         let depth=XDefaultDepth(display,screen);
         let canvas=XCreatePixmap(display,window,width as u32,height as u32,depth as u32);
@@ -824,7 +883,7 @@ fn main() {
             accent:color(display,map,"#9bbbc2"),
             project:color(display,map,"#29353a"),
         };
-        let mut app=App { display,window,gc,canvas,depth,font,code_font,code_font_base:if width>2200{24}else{18},colors,width,height,mouse_x:-100,mouse_y:-100,hovered:None,hovered_from_code:false,selected_file:0,files:initial_files(),folders:vec!["src".into(),"src/editor".into()],project_name:"TC-IDE".into(),project_path:None,project_location:"~/TC-IDE-Projects".into(),project_location_focused:false,create_caret:0,editor_focused:false,caret_line:0,caret_column:0,selection_anchor:None,selection_head:None,clipboard:String::new(),code_zoom:0,edit_menu_open:false,workspace_search:String::new(),workspace_search_focused:false,terminal_open:false,terminal_focused:false,terminal_active:0,terminals:default_terminals(),graph_current:true,graph_zoom:1.0,package_open:false,package_targets:[true,true,true,true],build_started:None,new_menu_open:false,extensions_open:false,languages:initial_languages(),downloading:None,extension_scroll:0,extension_category:0,extension_search:String::new(),extension_search_focused:false,selected_language:Some(1),version_menu_open:false,create_kind:None,new_file_name:String::new(),project_language:1,project_environment:0,project_language_menu:false,project_environment_menu:false,expanded_comments:BTreeSet::new(),status_message:"Ready".into(),started:Instant::now() };
+        let mut app=App { display,window,gc,canvas,depth,font,font_set,code_font,code_font_base:if width>2200{24}else{18},colors,width,height,mouse_x:-100,mouse_y:-100,hovered:None,hovered_from_code:false,hovered_code_span:None,selected_file:0,files:initial_files(),folders:vec!["src".into(),"src/editor".into()],project_name:"TC-IDE".into(),project_path:None,project_location:"~/TC-IDE-Projects".into(),project_location_focused:false,create_caret:0,editor_focused:false,caret_line:0,caret_column:0,selection_anchor:None,selection_head:None,clipboard:String::new(),code_zoom:0,edit_menu_open:false,workspace_search:String::new(),workspace_search_focused:false,terminal_open:false,terminal_focused:false,terminal_active:0,terminals:default_terminals(),graph_current:true,graph_zoom:1.0,package_open:false,package_targets:[true,true,true,true],build_started:None,new_menu_open:false,workspace_context_menu:None,extensions_open:false,settings_open:false,ui_chinese:load_ui_language(),languages:initial_languages(),downloading:None,extension_scroll:0,extension_category:0,extension_search:String::new(),extension_search_focused:false,selected_language:Some(1),version_menu_open:false,create_kind:None,new_file_name:String::new(),project_language:1,project_environment:0,project_language_menu:false,project_environment_menu:false,expanded_comments:BTreeSet::new(),status_message:"Ready".into(),started:Instant::now() };
         let frame=Duration::from_micros(16_667);
         let mut running=true;
         while running {
@@ -849,6 +908,7 @@ fn main() {
         }
         XFreePixmap(display,app.canvas);
         if !app.font.is_null(){XFreeFont(display,app.font);}
+        if !app.font_set.is_null(){XFreeFontSet(display,app.font_set);}
         if !app.code_font.is_null(){XFreeFont(display,app.code_font);}
         XFreeGC(display,gc);
         XDestroyWindow(display,window);
