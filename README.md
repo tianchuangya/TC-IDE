@@ -1,6 +1,6 @@
 # TC-IDE
 
-![TC-IDE TC ID icon](assets/tc-ide-icon.png)
+![TC-IDE TCIDE icon](assets/tc-ide-icon.png)
 
 TC-IDE 是一个 Rust 原生、低色彩噪声、强调空间关系与丝滑动效的 IDE 实验项目。它沿用 Zed 的核心产品方向：原生窗口、每帧统一绘制、后台语义分析，以及不依赖 HTML/CSS 的界面。
 

@@ -512,7 +512,7 @@ impl App {
         self.line(self.colors.line,1,(0,header-1),(self.width,header-1));
         self.circle(self.colors.project,self.colors.bright,s(27),s(23),s(13));
         self.text(self.colors.bright,s(15),s(29),"TC");
-        self.text(self.colors.accent,s(31),s(29),"id");
+        self.text(self.colors.accent,s(31),s(29),"ide");
         self.text(self.colors.text,s(48),s(29),"TC-IDE");
         self.outline(if self.new_menu_open{self.colors.accent}else{self.colors.line},s(112),s(10),s(88),s(27));
         self.text(self.colors.text,s(124),s(29),self.tr("New  v","新建 v"));
