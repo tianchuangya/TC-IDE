@@ -4,6 +4,7 @@ use std::ffi::{c_void, CString};
 use std::fs;
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong};
 use std::path::PathBuf;
+use std::process::Command;
 use std::ptr;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -227,8 +228,13 @@ struct FileBuffer {
 struct LanguagePack {
     name: &'static str,
     extensions: &'static [&'static str],
+    versions: &'static [&'static str],
+    selected_version: usize,
     installed: bool,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CreateKind { Project, Folder, File }
 
 const NODES: &[Node] = &[
     Node { label: "TC-IDE", detail: "project", level: Level::Project, nx: 0.50, ny: 0.48 },
@@ -277,6 +283,9 @@ struct App {
     hovered: Option<usize>,
     selected_file: usize,
     files: Vec<FileBuffer>,
+    folders: Vec<String>,
+    project_name: String,
+    project_path: Option<PathBuf>,
     editor_focused: bool,
     caret_line: usize,
     caret_column: usize,
@@ -288,8 +297,16 @@ struct App {
     languages: Vec<LanguagePack>,
     downloading: Option<(usize, Instant)>,
     extension_scroll: usize,
-    new_file_open: bool,
+    extension_search: String,
+    extension_search_focused: bool,
+    selected_language: Option<usize>,
+    version_menu_open: bool,
+    create_kind: Option<CreateKind>,
     new_file_name: String,
+    project_language: usize,
+    project_environment: usize,
+    project_language_menu: bool,
+    project_environment_menu: bool,
     status_message: String,
     started: Instant,
 }
@@ -308,7 +325,7 @@ impl App {
 
     fn language_pack_index_for_file(&self,name:&str)->Option<usize>{let extension=name.rsplit('.').next()?.to_ascii_lowercase();self.languages.iter().position(|pack|pack.extensions.iter().any(|item|*item==extension))}
 
-    fn completion_words(&self)->&'static [&'static str]{let language=self.language_for_file(&self.files[self.selected_file].name);if language.starts_with("Rust"){&["async","await","const","enum","fn","impl","let","match","mod","pub","Result","self","struct","trait","use"]}else if language.starts_with("Python"){&["async","await","class","def","elif","else","from","import","lambda","None","return","self","try","with"]}else if language.starts_with("TypeScript")||language.starts_with("Web"){&["async","await","class","const","export","extends","function","import","interface","return","type"]}else if language.starts_with("C /"){&["auto","class","const","constexpr","enum","include","namespace","return","struct","template","void"]}else if language.starts_with("Go"){&["chan","defer","func","go","import","interface","map","package","range","return","struct"]}else if language.starts_with("Java")||language.starts_with("Kotlin"){&["class","extends","fun","import","interface","new","package","private","public","return","static"]}else{&["class","const","function","import","return","struct","type","value"]}}
+    fn completion_words(&self)->&'static [&'static str]{let language=self.language_for_file(&self.files[self.selected_file].name);if language.starts_with("Rust"){&["async","await","const","enum","fn","impl","let","match","mod","pub","Result","self","struct","trait","use"]}else if language.starts_with("Python"){&["async","await","class","def","elif","else","from","import","lambda","None","return","self","try","with"]}else if language.starts_with("TypeScript")||language.starts_with("Web"){&["async","await","class","const","export","extends","function","import","interface","return","type"]}else if language=="C"||language.starts_with("C++"){&["auto","class","const","constexpr","enum","include","namespace","return","struct","template","void"]}else if language.starts_with("Go"){&["chan","defer","func","go","import","interface","map","package","range","return","struct"]}else if language.starts_with("Java")||language.starts_with("Kotlin"){&["class","extends","fun","import","interface","new","package","private","public","return","static"]}else{&["class","const","function","import","return","struct","type","value"]}}
 
     fn current_prefix(&self)->String{let line=&self.files[self.selected_file].lines[self.caret_line];let upto=&line[..self.caret_column.min(line.len())];upto.chars().rev().take_while(|ch|ch.is_ascii_alphanumeric()||*ch=='_').collect::<String>().chars().rev().collect()}
 
@@ -317,6 +334,8 @@ impl App {
     fn accept_completion(&mut self){if let Some(candidate)=self.completions().first().cloned(){let prefix=self.current_prefix();let suffix=&candidate[prefix.len()..];self.files[self.selected_file].lines[self.caret_line].insert_str(self.caret_column,suffix);self.caret_column+=suffix.len();self.status_message=format!("Completed {candidate}");}}
 
     fn comment_parts<'a>(&self,line:&'a str)->Option<(&'a str,&'a str)>{["//","#","--"].iter().filter_map(|marker|line.find(marker).map(|index|(index,*marker))).min_by_key(|(index,_)|*index).map(|(index,marker)|(&line[..index],line[index+marker.len()..].trim()))}
+
+    fn filtered_language_indices(&self)->Vec<usize>{let needle=self.extension_search.to_ascii_lowercase();self.languages.iter().enumerate().filter(|(_,pack)|needle.is_empty()||pack.name.to_ascii_lowercase().contains(&needle)||pack.extensions.iter().any(|ext|ext.contains(&needle))).map(|(index,_)|index).collect()}
 
     unsafe fn set_color(&self, color: c_ulong) {
         XSetForeground(self.display, self.gc, color);
@@ -382,7 +401,7 @@ impl App {
         self.draw_graph();
         if self.package_open { self.draw_package_menu(); }
         if self.extensions_open { self.draw_extensions(); }
-        if self.new_file_open { self.draw_new_file_dialog(); }
+        if self.create_kind.is_some() { self.draw_create_dialog(); }
         if self.build_started.is_some() { self.draw_build_animation(); }
         self.draw_status();
         XCopyArea(self.display,self.canvas,self.window,self.gc,0,0,self.width as u32,self.height as u32,0,0);
@@ -409,12 +428,10 @@ impl App {
         self.rect(self.colors.panel,0,s(46),width,self.height-s(70));
         self.line(self.colors.line,1,(width,s(46)),(width,self.height-s(24)));
         self.text(self.colors.muted,s(14),s(71),"PROJECT");
-        self.text(self.colors.bright,s(15),s(101),"v  TC-IDE");
-        self.outline(self.colors.line,s(12),s(113),width-s(24),s(26));
-        self.text(self.colors.text,s(24),s(132),"+ New file");
-        self.text(self.colors.text,s(16),s(164),"  v  src");
-        self.text(self.colors.text,s(16),s(191),"    v  editor");
-        for (index,file) in self.files.iter().enumerate(){let y=218+index as i32*29;if s(y)>self.height-s(65){break;}if index==self.selected_file{self.rect(self.colors.panel_2,s(7),s(y-21),width-s(14),s(27));}let color=if index==self.selected_file{self.colors.bright}else{self.colors.muted};self.text(color,s(16),s(y),&format!("       {}",file.name));
+        self.text(self.colors.bright,s(15),s(101),&format!("v  {}",self.project_name));
+        let button_w=(width-s(32))/3;for (index,label) in ["+ Project","+ Folder","+ File"].iter().enumerate(){let x=s(8)+index as i32*(button_w+s(8));self.outline(self.colors.line,x,s(113),button_w,s(27));self.text(self.colors.text,x+s(9),s(133),label);}
+        let mut row_y=174;for folder in &self.folders{self.text(self.colors.text,s(16),s(row_y),&format!("  v  {folder}"));row_y+=28;}
+        for (index,file) in self.files.iter().enumerate(){let y=row_y+index as i32*29;if s(y)>self.height-s(65){break;}if index==self.selected_file{self.rect(self.colors.panel_2,s(7),s(y-21),width-s(14),s(27));}let color=if index==self.selected_file{self.colors.bright}else{self.colors.muted};self.text(color,s(16),s(y),&format!("       {}",file.name));
         }
     }
 
@@ -496,22 +513,27 @@ impl App {
     }
 
     unsafe fn draw_extensions(&self) {
-        let s=|v|self.s(v);let w=s(610);let h=s(650);let x=self.width-w-s(20);let y=s(52);
+        let s=|v|self.s(v);let w=s(780);let h=s(680);let x=self.width-w-s(20);let y=s(52);
         self.rect(self.colors.panel_2,x,y,w,h);self.outline(self.colors.line,x,y,w,h);
         self.text(self.colors.bright,x+s(22),y+s(34),"EXTENSIONS");
         self.text(self.colors.accent,x+s(22),y+s(67),"Programming Languages");
-        self.text(self.colors.muted,x+s(230),y+s(67),"Language packs are installed per user");
-        for (visible,(index,pack)) in self.languages.iter().enumerate().skip(self.extension_scroll).take(12).enumerate(){let row=y+s(103+visible as i32*43);self.line(self.colors.line,1,(x+s(18),row+s(11)),(x+w-s(18),row+s(11)));self.text(self.colors.text,x+s(24),row,pack.name);self.text(self.colors.muted,x+s(165),row,&pack.extensions.iter().take(5).map(|ext|format!(".{ext}")).collect::<Vec<_>>().join("  "));let downloading=self.downloading.map(|(active,_)|active==index).unwrap_or(false);let label=if downloading{"DOWNLOADING..."}else if pack.installed{"INSTALLED"}else{"DOWNLOAD"};let color=if pack.installed{self.colors.accent}else{self.colors.bright};self.outline(color,x+w-s(150),row-s(20),s(126),s(27));self.text(color,x+w-s(137),row,label);}
-        self.text(self.colors.muted,x+s(22),y+h-s(18),"Wheel: more packs - unknown extensions use Plain Text");
+        self.rect(self.colors.bg,x+s(20),y+s(82),s(330),s(38));self.outline(if self.extension_search_focused{self.colors.accent}else{self.colors.line},x+s(20),y+s(82),s(330),s(38));self.text(self.colors.text,x+s(35),y+s(108),if self.extension_search.is_empty(){"Search languages or extensions"}else{&self.extension_search});
+        let filtered=self.filtered_language_indices();let visible_count=10;let start=self.extension_scroll.min(filtered.len().saturating_sub(1));
+        for (visible,index) in filtered.iter().skip(start).take(visible_count).enumerate(){let row=y+s(153+visible as i32*47);let selected=self.selected_language==Some(*index);if selected{self.rect(self.colors.project,x+s(20),row-s(27),s(318),s(39));}self.text(if selected{self.colors.bright}else{self.colors.text},x+s(32),row,self.languages[*index].name);if self.languages[*index].installed{self.text(self.colors.accent,x+s(250),row,"INSTALLED");}}
+        let track_x=x+s(344);let track_y=y+s(135);let track_h=s(472);self.rect(self.colors.line,track_x,track_y,s(3),track_h);if !filtered.is_empty(){let thumb_h=(track_h*visible_count as i32/filtered.len().max(visible_count) as i32).max(s(34));let max_scroll=filtered.len().saturating_sub(visible_count).max(1) as i32;let thumb_y=track_y+(track_h-thumb_h)*self.extension_scroll.min(max_scroll as usize) as i32/max_scroll;self.rect(self.colors.accent,track_x-s(2),thumb_y,s(7),thumb_h);}
+        self.line(self.colors.line,1,(x+s(365),y+s(74)),(x+s(365),y+h-s(24)));
+        if let Some(index)=self.selected_language {let pack=&self.languages[index];let dx=x+s(392);self.text(self.colors.bright,dx,y+s(112),pack.name);self.text(self.colors.muted,dx,y+s(145),&format!("Files: {}",pack.extensions.iter().map(|ext|format!(".{ext}")).collect::<Vec<_>>().join("  ")));self.text(self.colors.muted,dx,y+s(190),"VERSION");self.rect(self.colors.bg,dx,y+s(207),s(330),s(40));self.outline(if self.version_menu_open{self.colors.accent}else{self.colors.line},dx,y+s(207),s(330),s(40));self.text(self.colors.text,dx+s(14),y+s(234),pack.versions[pack.selected_version]);self.text(self.colors.muted,dx+s(300),y+s(234),"v");let downloading=self.downloading.map(|(active,_)|active==index).unwrap_or(false);let action=if downloading{"DOWNLOADING..."}else if pack.installed{"REMOVE"}else{"DOWNLOAD"};self.rect(self.colors.bright,dx,y+s(282),s(330),s(38));self.text(self.colors.bg,dx+s(105),y+s(308),action);let state=if pack.installed{format!("Installed: {} {}",pack.name,pack.versions[pack.selected_version])}else{"Select a version, then download this language pack".into()};self.text(self.colors.muted,dx,y+s(353),&state);self.text(self.colors.muted,dx,y+s(395),"Language pack layers:");self.text(self.colors.text,dx+s(16),y+s(425),"- syntax grammar and file detection");self.text(self.colors.text,dx+s(16),y+s(455),"- completion and formatter adapter");self.text(self.colors.text,dx+s(16),y+s(485),"- LSP / debugger integration point");if self.version_menu_open{self.rect(self.colors.panel,dx,y+s(250),s(330),s(34)*pack.versions.len() as i32);for (version,value) in pack.versions.iter().enumerate(){let vy=y+s(274+version as i32*34);self.text(if version==pack.selected_version{self.colors.accent}else{self.colors.text},dx+s(14),vy,value);}}}else{self.text(self.colors.muted,x+s(420),y+s(180),"Choose a language from the first layer.");}
+        self.text(self.colors.muted,x+s(22),y+h-s(18),"Search + wheel scrolling - unknown extensions use Plain Text");
     }
 
-    unsafe fn draw_new_file_dialog(&self) {
-        let s=|v|self.s(v);let w=s(520);let h=s(176);let x=(self.width-w)/2;let y=(self.height-h)/2;
+    unsafe fn draw_create_dialog(&self) {
+        let s=|v|self.s(v);let project=self.create_kind==Some(CreateKind::Project);let w=s(if project{680}else{520});let h=s(if project{390}else{176});let x=(self.width-w)/2;let y=(self.height-h)/2;
         self.rect(self.colors.panel_2,x,y,w,h);self.outline(self.colors.accent,x,y,w,h);
-        self.text(self.colors.bright,x+s(22),y+s(36),"CREATE NEW FILE");
-        self.text(self.colors.muted,x+s(22),y+s(66),"Extension selects an installed language pack");
+        let title=match self.create_kind.unwrap(){CreateKind::Project=>"CREATE NEW PROJECT",CreateKind::Folder=>"CREATE NEW FOLDER",CreateKind::File=>"CREATE NEW FILE"};self.text(self.colors.bright,x+s(22),y+s(36),title);
+        self.text(self.colors.muted,x+s(22),y+s(66),if project{"Choose a language and isolated environment"}else if self.create_kind==Some(CreateKind::File){"Extension automatically selects its language pack"}else{"Folder will be created inside the active project"});
         self.rect(self.colors.bg,x+s(22),y+s(82),w-s(44),s(40));self.outline(self.colors.line,x+s(22),y+s(82),w-s(44),s(40));
-        self.text(self.colors.text,x+s(35),y+s(109),if self.new_file_name.is_empty(){"filename.ext"}else{&self.new_file_name});
+        let placeholder=if project{"project-name"}else if self.create_kind==Some(CreateKind::File){"filename.ext"}else{"folder-name"};self.text(self.colors.text,x+s(35),y+s(109),if self.new_file_name.is_empty(){placeholder}else{&self.new_file_name});
+        if project {let pack=&self.languages[self.project_language];let envs=project_environments(pack.name);self.text(self.colors.muted,x+s(22),y+s(157),"LANGUAGE");self.rect(self.colors.bg,x+s(22),y+s(171),s(300),s(40));self.outline(if self.project_language_menu{self.colors.accent}else{self.colors.line},x+s(22),y+s(171),s(300),s(40));self.text(self.colors.text,x+s(36),y+s(198),pack.name);self.text(self.colors.muted,x+s(294),y+s(198),"v");self.text(self.colors.muted,x+s(350),y+s(157),"ENVIRONMENT / TOOLCHAIN");self.rect(self.colors.bg,x+s(350),y+s(171),s(308),s(40));self.outline(if self.project_environment_menu{self.colors.accent}else{self.colors.line},x+s(350),y+s(171),s(308),s(40));self.text(self.colors.text,x+s(364),y+s(198),envs[self.project_environment.min(envs.len()-1)]);self.text(self.colors.muted,x+s(630),y+s(198),"v");self.text(self.colors.muted,x+s(22),y+s(250),&format!("Location: ~/TC-IDE-Projects/{}",if self.new_file_name.is_empty(){"project-name"}else{&self.new_file_name}));self.text(self.colors.text,x+s(22),y+s(286),"Python venv creates a real .venv; other choices store their toolchain preset.");if self.project_language_menu{self.rect(self.colors.panel,x+s(22),y+s(214),s(300),s(34)*8);for (visible,index) in self.languages.iter().enumerate().take(8){self.text(if visible==self.project_language{self.colors.accent}else{self.colors.text},x+s(36),y+s(238+visible as i32*34),index.name);}}if self.project_environment_menu{self.rect(self.colors.panel,x+s(350),y+s(214),s(308),s(34)*envs.len() as i32);for (index,env) in envs.iter().enumerate(){self.text(if index==self.project_environment{self.colors.accent}else{self.colors.text},x+s(364),y+s(238+index as i32*34),env);}}}
         self.text(self.colors.muted,x+s(22),y+h-s(18),"Enter: create   Esc: cancel");
     }
 
@@ -529,21 +551,28 @@ impl App {
         self.update_hover();
     }
 
-    fn update_background(&mut self){if let Some((index,started))=self.downloading{if started.elapsed()>Duration::from_millis(900){self.languages[index].installed=true;self.status_message=format!("{} language pack installed",self.languages[index].name);save_language_settings(&self.languages);self.downloading=None;}}}
+    fn update_background(&mut self){if let Some((index,started))=self.downloading{if started.elapsed()>Duration::from_millis(900){self.languages[index].installed=true;self.status_message=format!("{} {} language pack installed",self.languages[index].name,self.languages[index].versions[self.languages[index].selected_version]);save_language_settings(&self.languages);self.downloading=None;}}}
+
+    fn active_root(&mut self)->PathBuf {if let Some(path)=&self.project_path{return path.clone();}let base=projects_root().join("TC-IDE-Scratch");let _=fs::create_dir_all(&base);self.project_path=Some(base.clone());base}
+
+    fn create_requested_item(&mut self){let name=self.new_file_name.trim().to_string();if name.is_empty()||name.contains('/')||name.contains('\\')||name=="."||name==".."{self.status_message="Use a safe non-empty name".into();return;}match self.create_kind.unwrap(){CreateKind::File=>{if self.files.iter().any(|file|file.name==name){self.status_message="A file with that name already exists".into();return;}let root=self.active_root();let _=fs::create_dir_all(&root);let _=fs::write(root.join(&name),"");let pack_index=self.language_pack_index_for_file(&name);self.files.push(FileBuffer{name:name.clone(),lines:vec![String::new()]});self.selected_file=self.files.len()-1;self.caret_line=0;self.caret_column=0;self.editor_focused=true;if let Some(index)=pack_index{let language=self.languages[index].name;if self.languages[index].installed{self.status_message=format!("Created {name} - selected {language} {}",self.languages[index].versions[self.languages[index].selected_version]);}else{self.downloading=Some((index,Instant::now()));self.status_message=format!("Detected {language} - downloading selected language pack...");}}else{self.status_message=format!("Created {name} - Plain Text fallback");}},CreateKind::Folder=>{if !self.folders.contains(&name){let root=self.active_root();match fs::create_dir_all(root.join(&name)){Ok(_)=>{self.folders.push(name.clone());self.status_message=format!("Created folder {name}");},Err(error)=>self.status_message=format!("Could not create folder: {error}")}}},CreateKind::Project=>self.create_project(&name)}self.create_kind=None;self.project_language_menu=false;self.project_environment_menu=false;}
+
+    fn create_project(&mut self,name:&str){let root=projects_root().join(name);if root.exists(){self.status_message=format!("Project {name} already exists; choose another name");return;}if let Err(error)=fs::create_dir_all(&root){self.status_message=format!("Could not create project: {error}");return;}let language=self.languages[self.project_language].name;let envs=project_environments(language);let environment=envs[self.project_environment.min(envs.len()-1)];let version=self.languages[self.project_language].versions[self.languages[self.project_language].selected_version];let manifest=format!("name={name}\nlanguage={language}\nversion={version}\nenvironment={environment}\n");let _=fs::write(root.join(".tc-ide-project"),manifest);let (file_name,content,folders):(String,String,Vec<String>)=if language=="Python"{if environment=="venv"{let _=Command::new("python3").args(["-m","venv",".venv"]).current_dir(&root).spawn();}("main.py".into(),format!("# {name} - {environment}\n\nprint(\"Hello from TC-IDE\")\n"),vec![".venv".to_string()])}else if language=="Rust"{let src=root.join("src");let _=fs::create_dir_all(&src);let _=fs::write(root.join("Cargo.toml"),format!("[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",name.to_ascii_lowercase().replace(' ',"-")));let content="fn main() {\n    println!(\"Hello from TC-IDE\");\n}\n".to_string();let _=fs::write(src.join("main.rs"),&content);("main.rs".into(),content,vec!["src".to_string()])}else{let extension=self.languages[self.project_language].extensions.first().copied().unwrap_or("txt");let file=if language=="Java"{"Main.java".to_string()}else{format!("main.{extension}")};let content=format!("// {name} - {language} {version} - {environment}\n");let _=fs::write(root.join(&file),&content);(file,content,Vec::new())};if language=="Python"{let _=fs::write(root.join(&file_name),&content);}self.project_name=name.to_string();self.project_path=Some(root.clone());self.folders=folders;self.files=vec![FileBuffer{name:file_name,lines:content.lines().map(str::to_string).chain(std::iter::once(String::new())).collect()}];self.selected_file=0;self.caret_line=0;self.caret_column=0;self.status_message=format!("Project {name} created with {language} {version} / {environment}");}
 
     fn handle_click(&mut self,x:i32,y:i32,button:u32){
         let scale=self.scale();let s=move|v:i32|(v as f32*scale).round() as i32;
         let graph_left=(self.width as f32*0.61) as i32;
-        if self.new_file_open{return;}
-        if self.extensions_open&&(button==4||button==5){let visible=12;let maximum=self.languages.len().saturating_sub(visible);if button==4{self.extension_scroll=self.extension_scroll.saturating_sub(1);}else{self.extension_scroll=(self.extension_scroll+1).min(maximum);}return;}
+        if let Some(kind)=self.create_kind {if kind==CreateKind::Project {let w=s(680);let h=s(390);let dx=(self.width-w)/2;let dy=(self.height-h)/2;if self.project_language_menu {for visible in 0..8.min(self.languages.len()){let row=dy+s(238+visible as i32*34);if (y-row).abs()<s(16){self.project_language=visible;self.project_environment=0;self.project_language_menu=false;return;}}}if self.project_environment_menu {let envs=project_environments(self.languages[self.project_language].name);for index in 0..envs.len(){let row=dy+s(238+index as i32*34);if (y-row).abs()<s(16){self.project_environment=index;self.project_environment_menu=false;return;}}}if x>=dx+s(22)&&x<=dx+s(322)&&y>=dy+s(171)&&y<=dy+s(211){self.project_language_menu=!self.project_language_menu;self.project_environment_menu=false;return;}if x>=dx+s(350)&&x<=dx+s(658)&&y>=dy+s(171)&&y<=dy+s(211){self.project_environment_menu=!self.project_environment_menu;self.project_language_menu=false;return;}}return;}
+        if self.extensions_open&&(button==4||button==5){let filtered=self.filtered_language_indices();let visible=10;let maximum=filtered.len().saturating_sub(visible);if button==4{self.extension_scroll=self.extension_scroll.saturating_sub(1);}else{self.extension_scroll=(self.extension_scroll+1).min(maximum);}return;}
         if x>=graph_left&&button==4 {self.graph_zoom=(self.graph_zoom*1.1).min(1.55);return;}
         if x>=graph_left&&button==5 {self.graph_zoom=(self.graph_zoom/1.1).max(0.65);return;}
         if x>self.width-s(290)&&x<self.width-s(145)&&y<s(46){self.extensions_open=!self.extensions_open;self.package_open=false;self.editor_focused=false;return;}
         if x>self.width-s(150)&&y<s(46){self.package_open=!self.package_open;self.extensions_open=false;self.editor_focused=false;return;}
         if self.extensions_open {
-            let w=s(610);let h=s(650);let menu_x=self.width-w-s(20);let menu_y=s(52);
-            if x>=menu_x&&x<=menu_x+w&&y>=menu_y&&y<=menu_y+h {for visible in 0..12{let index=self.extension_scroll+visible;if index>=self.languages.len(){break;}let row=menu_y+s(103+visible as i32*43);if (y-row).abs()<s(19)&&x>menu_x+w-s(170){if self.languages[index].installed{self.languages[index].installed=false;self.status_message=format!("{} language pack removed",self.languages[index].name);save_language_settings(&self.languages);}else{self.downloading=Some((index,Instant::now()));self.status_message=format!("Downloading {} language pack...",self.languages[index].name);}return;}}return;}
+            let w=s(780);let h=s(680);let menu_x=self.width-w-s(20);let menu_y=s(52);
+            if x>=menu_x&&x<=menu_x+w&&y>=menu_y&&y<=menu_y+h {if x>=menu_x+s(20)&&x<=menu_x+s(350)&&y>=menu_y+s(82)&&y<=menu_y+s(120){self.extension_search_focused=true;return;}let filtered=self.filtered_language_indices();for visible in 0..10{let position=self.extension_scroll+visible;if position>=filtered.len(){break;}let index=filtered[position];let row=menu_y+s(153+visible as i32*47);if x<menu_x+s(350)&&(y-row).abs()<s(20){self.selected_language=Some(index);self.version_menu_open=false;self.extension_search_focused=false;return;}}if let Some(index)=self.selected_language{let dx=menu_x+s(392);if self.version_menu_open{let versions=self.languages[index].versions;for version in 0..versions.len(){let row=menu_y+s(274+version as i32*34);if x>=dx&&x<=dx+s(330)&&(y-row).abs()<s(16){if self.languages[index].selected_version!=version&&self.languages[index].installed{self.languages[index].installed=false;save_language_settings(&self.languages);self.status_message="Version changed; download the selected language pack".into();}self.languages[index].selected_version=version;self.version_menu_open=false;return;}}}if x>=dx&&x<=dx+s(330)&&y>=menu_y+s(207)&&y<=menu_y+s(247){self.version_menu_open=!self.version_menu_open;return;}if x>=dx&&x<=dx+s(330)&&y>=menu_y+s(282)&&y<=menu_y+s(320){if self.languages[index].installed{self.languages[index].installed=false;self.status_message=format!("{} language pack removed",self.languages[index].name);save_language_settings(&self.languages);}else{self.downloading=Some((index,Instant::now()));self.status_message=format!("Downloading {} {}...",self.languages[index].name,self.languages[index].versions[self.languages[index].selected_version]);}return;}}return;}
             self.extensions_open=false;
+            self.extension_search_focused=false;
         }
         if self.package_open {
             let menu_x=self.width-s(270);let menu_y=s(48);
@@ -555,8 +584,8 @@ impl App {
         }
         let workspace_right=(self.width as f32*0.17) as i32;
         if x<workspace_right {
-            if y>=s(113)&&y<=s(142){self.new_file_open=true;self.new_file_name.clear();self.editor_focused=false;return;}
-            for index in 0..self.files.len(){let center=218+index as i32*29;if (y-s(center)).abs()<s(15){self.selected_file=index;self.caret_line=0;self.caret_column=0;self.editor_focused=false;self.hovered=if index<3{Some(index+1)}else{None};return;}}
+            if y>=s(113)&&y<=s(142){let button_w=(workspace_right-s(32))/3;if x<s(8)+button_w{self.create_kind=Some(CreateKind::Project);}else if x<s(16)+button_w*2{self.create_kind=Some(CreateKind::Folder);}else{self.create_kind=Some(CreateKind::File);}self.new_file_name.clear();self.editor_focused=false;return;}
+            let file_start=174+self.folders.len() as i32*28;for index in 0..self.files.len(){let center=file_start+index as i32*29;if (y-s(center)).abs()<s(15){self.selected_file=index;self.caret_line=0;self.caret_column=0;self.editor_focused=false;self.hovered=if index<3{Some(index+1)}else{None};return;}}
         }
         if x>=workspace_right&&x<graph_left&&y>s(85)&&y<self.height-s(60){
             self.editor_focused=true;let base=s(119);let step=s(28);let line=((y-base+step/2)/step).max(0) as usize;self.caret_line=line.min(self.files[self.selected_file].lines.len().saturating_sub(1));let text_x=workspace_right+s(52);self.caret_column=(((x-text_x).max(0))/s(10).max(1)) as usize;self.caret_column=self.caret_column.min(self.files[self.selected_file].lines[self.caret_line].len());return;
@@ -566,8 +595,9 @@ impl App {
 
     unsafe fn handle_key(&mut self,event:&mut XKeyEvent)->bool {
         let mut keysym=0;let mut buffer=[0_i8;32];let count=XLookupString(event,buffer.as_mut_ptr(),buffer.len() as i32,&mut keysym,ptr::null_mut());
-        if self.new_file_open {if keysym==ESCAPE_KEYSYM{self.new_file_open=false;return true;}if keysym==BACKSPACE_KEYSYM{self.new_file_name.pop();return true;}if keysym==RETURN_KEYSYM{let name=self.new_file_name.trim().to_string();if !name.is_empty()&&!name.contains('/')&&!self.files.iter().any(|file|file.name==name){let pack_index=self.language_pack_index_for_file(&name);self.files.push(FileBuffer{name:name.clone(),lines:vec![String::new()]});self.selected_file=self.files.len()-1;self.caret_line=0;self.caret_column=0;self.editor_focused=true;self.new_file_open=false;if let Some(index)=pack_index{let language=self.languages[index].name;if self.languages[index].installed{self.status_message=format!("Created {name} - selected {language}");}else{self.downloading=Some((index,Instant::now()));self.status_message=format!("Detected {language} from {name} - downloading language pack...");}}else{self.status_message=format!("Created {name} - Plain Text fallback");}}else{self.status_message="Choose a unique filename without '/'".into();}return true;}if count>0{let bytes=buffer[..count as usize].iter().map(|v|*v as u8).collect::<Vec<_>>();if let Ok(input)=std::str::from_utf8(&bytes){if !input.chars().any(char::is_control){self.new_file_name.push_str(input);}}}return true;}
-        if keysym==ESCAPE_KEYSYM {if self.extensions_open||self.package_open||self.build_started.is_some(){self.extensions_open=false;self.package_open=false;self.build_started=None;return true;}return false;}
+        if self.extension_search_focused {if keysym==ESCAPE_KEYSYM{self.extension_search_focused=false;return true;}if keysym==BACKSPACE_KEYSYM{self.extension_search.pop();self.extension_scroll=0;return true;}if keysym==RETURN_KEYSYM{self.extension_search_focused=false;return true;}if count>0{let bytes=buffer[..count as usize].iter().map(|v|*v as u8).collect::<Vec<_>>();if let Ok(input)=std::str::from_utf8(&bytes){if !input.chars().any(char::is_control){self.extension_search.push_str(input);self.extension_scroll=0;}}}return true;}
+        if self.create_kind.is_some() {if keysym==ESCAPE_KEYSYM{if self.project_language_menu||self.project_environment_menu{self.project_language_menu=false;self.project_environment_menu=false;}else{self.create_kind=None;}return true;}if keysym==BACKSPACE_KEYSYM{self.new_file_name.pop();return true;}if keysym==RETURN_KEYSYM{self.create_requested_item();return true;}if count>0{let bytes=buffer[..count as usize].iter().map(|v|*v as u8).collect::<Vec<_>>();if let Ok(input)=std::str::from_utf8(&bytes){if !input.chars().any(char::is_control){self.new_file_name.push_str(input);}}}return true;}
+        if keysym==ESCAPE_KEYSYM {if self.extensions_open||self.package_open||self.build_started.is_some(){self.extensions_open=false;self.version_menu_open=false;self.package_open=false;self.build_started=None;return true;}return false;}
         if !self.editor_focused{return true;}
         match keysym {
             TAB_KEYSYM=>self.accept_completion(),
@@ -616,13 +646,17 @@ fn initial_files() -> Vec<FileBuffer> {
 
 fn language_settings_path()->PathBuf {std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(||std::env::var_os("HOME").map(|home|PathBuf::from(home).join(".config"))).unwrap_or_else(||PathBuf::from(".")).join("tc-ide/languages.conf")}
 
+fn projects_root()->PathBuf {std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(||PathBuf::from(".")).join("TC-IDE-Projects")}
+
+fn project_environments(language:&str)->&'static [&'static str]{match language{"Python"=>&["venv","uv","conda","poetry"],"C"=>&["GCC","Clang","CMake"],"C++"=>&["CMake + GCC","CMake + Clang","Meson","Conan"],"Java"=>&["JDK 25","JDK 21 LTS","Gradle","Maven"],"Rust"=>&["cargo stable","cargo nightly","Nix shell"],"TypeScript / JavaScript"=>&["pnpm","npm","yarn","bun"],"Go"=>&["Go modules","GVM","container"],_=>&["system toolchain","container","custom"]}}
+
 fn initial_languages()->Vec<LanguagePack>{
     let installed=fs::read_to_string(language_settings_path()).unwrap_or_else(|_|"Rust\n".into());
-    let enabled=installed.lines().collect::<Vec<_>>();
-    [("Rust",&["rs"][..]),("Python",&["py","pyw"][..]),("TypeScript / JavaScript",&["ts","tsx","js","jsx","mjs"][..]),("C / C++",&["c","h","cc","cpp","hpp"][..]),("Go",&["go"][..]),("Java",&["java"][..]),("C#",&["cs"][..]),("Kotlin",&["kt","kts"][..]),("Swift",&["swift"][..]),("Zig",&["zig"][..]),("Lua",&["lua"][..]),("Ruby",&["rb"][..]),("Web / HTML / CSS",&["html","htm","css","scss","sass"][..]),("PHP",&["php"][..]),("Dart",&["dart"][..]),("Shell",&["sh","bash","zsh","fish"][..]),("SQL",&["sql"][..]),("R",&["r"][..]),("Elixir",&["ex","exs"][..]),("Haskell",&["hs","lhs"][..]),("OCaml",&["ml","mli"][..]),("Scala",&["scala","sc"][..]),("Clojure",&["clj","cljs","cljc"][..]),("Julia",&["jl"][..]),("Perl",&["pl","pm"][..]),("Objective-C",&["m","mm"][..]),("Markdown",&["md","mdx"][..]),("Data / Config",&["json","yaml","yml","toml","xml"][..]),("Vue / Svelte",&["vue","svelte"][..])].iter().map(|(name,extensions)|LanguagePack{name,extensions,installed:enabled.contains(name)}).collect()
+    let specs=[("C",&["c","h"][..],&["C23","C17","C11"][..]),("Python",&["py","pyw"][..],&["3.13","3.12","3.11","3.10","3.9"][..]),("C++",&["cc","cpp","cxx","hpp"][..],&["C++23","C++20","C++17","C++14"][..]),("Java",&["java"][..],&["25","21 LTS","17 LTS","11 LTS"][..]),("Rust",&["rs"][..],&["stable","beta","nightly"][..]),("TypeScript / JavaScript",&["ts","tsx","js","jsx","mjs"][..],&["ES2025","ES2024","ES2023"][..]),("Go",&["go"][..],&["1.25","1.24","1.23"][..]),("C#",&["cs"][..],&["14 / .NET 10","13 / .NET 9","12 / .NET 8"][..]),("Kotlin",&["kt","kts"][..],&["2.2","2.1","2.0"][..]),("Swift",&["swift"][..],&["6.2","6.1","6.0"][..]),("Zig",&["zig"][..],&["0.15","0.14","master"][..]),("Lua",&["lua"][..],&["5.4","5.3","LuaJIT"][..]),("Ruby",&["rb"][..],&["3.4","3.3","3.2"][..]),("Web / HTML / CSS",&["html","htm","css","scss","sass"][..],&["Living Standard","HTML5"][..]),("PHP",&["php"][..],&["8.4","8.3","8.2"][..]),("Dart",&["dart"][..],&["3.9","3.8","3.7"][..]),("Shell",&["sh","bash","zsh","fish"][..],&["Bash 5","POSIX sh","Zsh"][..]),("SQL",&["sql"][..],&["PostgreSQL","SQLite","MySQL"][..]),("R",&["r"][..],&["4.5","4.4","4.3"][..]),("Elixir",&["ex","exs"][..],&["1.19","1.18","1.17"][..]),("Haskell",&["hs","lhs"][..],&["GHC 9.12","GHC 9.10","GHC 9.8"][..]),("OCaml",&["ml","mli"][..],&["5.3","5.2","5.1"][..]),("Scala",&["scala","sc"][..],&["3.7","3.6","2.13"][..]),("Clojure",&["clj","cljs","cljc"][..],&["1.12","1.11"][..]),("Julia",&["jl"][..],&["1.11","1.10 LTS"][..]),("Perl",&["pl","pm"][..],&["5.40","5.38"][..]),("Objective-C",&["m","mm"][..],&["Clang 20","Clang 19"][..]),("Markdown",&["md","mdx"][..],&["CommonMark","GFM","MDX"][..]),("Data / Config",&["json","yaml","yml","toml","xml"][..],&["Current","Legacy"][..]),("Vue / Svelte",&["vue","svelte"][..],&["Vue 3 / Svelte 5","Vue 2 / Svelte 4"][..])];
+    specs.iter().map(|(name,extensions,versions)|{let saved=installed.lines().find_map(|line|{let (saved_name,version)=line.split_once('|').unwrap_or((line,""));(saved_name==*name).then_some(version)});let selected_version=saved.and_then(|value|versions.iter().position(|candidate|*candidate==value)).unwrap_or(0);LanguagePack{name,extensions,versions,selected_version,installed:saved.is_some()}}).collect()
 }
 
-fn save_language_settings(languages:&[LanguagePack]){let path=language_settings_path();if let Some(parent)=path.parent(){let _=fs::create_dir_all(parent);}let content=languages.iter().filter(|pack|pack.installed).map(|pack|pack.name).collect::<Vec<_>>().join("\n");let _=fs::write(path,format!("{content}\n"));}
+fn save_language_settings(languages:&[LanguagePack]){let path=language_settings_path();if let Some(parent)=path.parent(){let _=fs::create_dir_all(parent);}let content=languages.iter().filter(|pack|pack.installed).map(|pack|format!("{}|{}",pack.name,pack.versions[pack.selected_version])).collect::<Vec<_>>().join("\n");let _=fs::write(path,format!("{content}\n"));}
 
 fn main() {
     unsafe {
@@ -666,7 +700,7 @@ fn main() {
             accent:color(display,map,"#9bbbc2"),
             project:color(display,map,"#29353a"),
         };
-        let mut app=App { display,window,gc,canvas,depth,font,colors,width,height,mouse_x:-100,mouse_y:-100,hovered:None,selected_file:0,files:initial_files(),editor_focused:false,caret_line:0,caret_column:0,graph_zoom:1.0,package_open:false,package_targets:[true,true,true],build_started:None,extensions_open:false,languages:initial_languages(),downloading:None,extension_scroll:0,new_file_open:false,new_file_name:String::new(),status_message:"Rust / X11 - 60 FPS double-buffered scene".into(),started:Instant::now() };
+        let mut app=App { display,window,gc,canvas,depth,font,colors,width,height,mouse_x:-100,mouse_y:-100,hovered:None,selected_file:0,files:initial_files(),folders:vec!["src".into(),"src/editor".into()],project_name:"TC-IDE".into(),project_path:None,editor_focused:false,caret_line:0,caret_column:0,graph_zoom:1.0,package_open:false,package_targets:[true,true,true],build_started:None,extensions_open:false,languages:initial_languages(),downloading:None,extension_scroll:0,extension_search:String::new(),extension_search_focused:false,selected_language:Some(1),version_menu_open:false,create_kind:None,new_file_name:String::new(),project_language:1,project_environment:0,project_language_menu:false,project_environment_menu:false,status_message:"Rust / X11 - 60 FPS double-buffered scene".into(),started:Instant::now() };
         let frame=Duration::from_micros(16_667);
         let mut running=true;
         while running {
@@ -720,5 +754,19 @@ mod tests {
         assert!(languages.len()>=25);
         assert!(languages.iter().any(|pack|pack.name=="Python"&&pack.extensions.contains(&"py")));
         assert!(languages.iter().any(|pack|pack.name=="Data / Config"&&pack.extensions.contains(&"json")));
+    }
+
+    #[test]
+    fn primary_language_layer_and_versions_are_available() {
+        let languages=initial_languages();
+        assert_eq!(languages.iter().take(4).map(|pack|pack.name).collect::<Vec<_>>(),vec!["C","Python","C++","Java"]);
+        let python=languages.iter().find(|pack|pack.name=="Python").unwrap();
+        assert!(python.versions.contains(&"3.13"));
+        assert!(python.versions.contains(&"3.12"));
+    }
+
+    #[test]
+    fn python_projects_offer_real_venv_option() {
+        assert_eq!(project_environments("Python").first(),Some(&"venv"));
     }
 }
