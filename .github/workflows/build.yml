@@ -4,14 +4,25 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   linux:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - name: Install native X11 development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libx11-dev
       - uses: dtolnay/rust-toolchain@stable
       - name: Check
         run: cargo check --all-targets
       - name: Test
-        run: cargo test
-
+        run: cargo test --all-targets
+      - name: Build release binary
+        run: cargo build --release
+      - name: Verify release binary
+        run: test -x target/release/tc-ide
