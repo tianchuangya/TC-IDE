@@ -11,10 +11,17 @@ type Drawable = c_ulong;
 type Colormap = c_ulong;
 type Atom = c_ulong;
 type Gc = *mut c_void;
+type Pixmap = c_ulong;
 
 #[repr(C)]
 struct Display {
     _private: [u8; 0],
+}
+
+#[repr(C)]
+struct XFontStruct {
+    ext_data: *mut c_void,
+    fid: c_ulong,
 }
 
 #[repr(C)]
@@ -70,6 +77,26 @@ struct XMotionEvent {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct XButtonEvent {
+    type_: c_int,
+    serial: c_ulong,
+    send_event: c_int,
+    display: *mut Display,
+    window: Window,
+    root: Window,
+    subwindow: Window,
+    time: c_ulong,
+    x: c_int,
+    y: c_int,
+    x_root: c_int,
+    y_root: c_int,
+    state: c_uint,
+    button: c_uint,
+    same_screen: c_int,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct XConfigureEvent {
     type_: c_int,
     serial: c_ulong,
@@ -91,6 +118,7 @@ union XEvent {
     type_: c_int,
     key: XKeyEvent,
     motion: XMotionEvent,
+    button: XButtonEvent,
     configure: XConfigureEvent,
     pad: [c_long; 24],
 }
@@ -99,6 +127,9 @@ union XEvent {
 extern "C" {
     fn XOpenDisplay(name: *const c_char) -> *mut Display;
     fn XDefaultScreen(display: *mut Display) -> c_int;
+    fn XDisplayWidth(display: *mut Display, screen: c_int) -> c_int;
+    fn XDisplayHeight(display: *mut Display, screen: c_int) -> c_int;
+    fn XDefaultDepth(display: *mut Display, screen: c_int) -> c_int;
     fn XRootWindow(display: *mut Display, screen: c_int) -> Window;
     fn XDefaultColormap(display: *mut Display, screen: c_int) -> Colormap;
     fn XCreateSimpleWindow(
@@ -116,6 +147,9 @@ extern "C" {
     fn XSelectInput(display: *mut Display, window: Window, mask: c_long) -> c_int;
     fn XMapWindow(display: *mut Display, window: Window) -> c_int;
     fn XCreateGC(display: *mut Display, drawable: Drawable, mask: c_ulong, values: *mut c_void) -> Gc;
+    fn XCreatePixmap(display: *mut Display, drawable: Drawable, width: c_uint, height: c_uint, depth: c_uint) -> Pixmap;
+    fn XFreePixmap(display: *mut Display, pixmap: Pixmap) -> c_int;
+    fn XCopyArea(display: *mut Display, source: Drawable, destination: Drawable, gc: Gc, source_x: c_int, source_y: c_int, width: c_uint, height: c_uint, destination_x: c_int, destination_y: c_int) -> c_int;
     fn XFreeGC(display: *mut Display, gc: Gc) -> c_int;
     fn XSetForeground(display: *mut Display, gc: Gc, foreground: c_ulong) -> c_int;
     fn XSetLineAttributes(display: *mut Display, gc: Gc, width: c_uint, style: c_int, cap: c_int, join: c_int) -> c_int;
@@ -125,10 +159,13 @@ extern "C" {
     fn XFillArc(display: *mut Display, drawable: Drawable, gc: Gc, x: c_int, y: c_int, width: c_uint, height: c_uint, angle1: c_int, angle2: c_int) -> c_int;
     fn XDrawArc(display: *mut Display, drawable: Drawable, gc: Gc, x: c_int, y: c_int, width: c_uint, height: c_uint, angle1: c_int, angle2: c_int) -> c_int;
     fn XDrawString(display: *mut Display, drawable: Drawable, gc: Gc, x: c_int, y: c_int, text: *const c_char, length: c_int) -> c_int;
+    fn XLoadQueryFont(display: *mut Display, name: *const c_char) -> *mut XFontStruct;
+    fn XSetFont(display: *mut Display, gc: Gc, font: c_ulong) -> c_int;
+    fn XFreeFont(display: *mut Display, font: *mut XFontStruct) -> c_int;
     fn XAllocNamedColor(display: *mut Display, map: Colormap, name: *const c_char, screen: *mut XColor, exact: *mut XColor) -> c_int;
     fn XPending(display: *mut Display) -> c_int;
     fn XNextEvent(display: *mut Display, event: *mut XEvent) -> c_int;
-    fn XLookupKeysym(event: *mut XKeyEvent, index: c_int) -> c_ulong;
+    fn XLookupString(event: *mut XKeyEvent, buffer: *mut c_char, length: c_int, keysym: *mut c_ulong, compose: *mut c_void) -> c_int;
     fn XInternAtom(display: *mut Display, name: *const c_char, only_if_exists: c_int) -> Atom;
     fn XSetWMProtocols(display: *mut Display, window: Window, protocols: *mut Atom, count: c_int) -> c_int;
     fn XFlush(display: *mut Display) -> c_int;
@@ -137,15 +174,23 @@ extern "C" {
 }
 
 const KEY_PRESS: c_int = 2;
+const BUTTON_PRESS: c_int = 4;
 const MOTION_NOTIFY: c_int = 6;
 const EXPOSE: c_int = 12;
 const CONFIGURE_NOTIFY: c_int = 22;
 const CLIENT_MESSAGE: c_int = 33;
 const KEY_PRESS_MASK: c_long = 1;
+const BUTTON_PRESS_MASK: c_long = 1 << 2;
 const POINTER_MOTION_MASK: c_long = 1 << 6;
 const EXPOSURE_MASK: c_long = 1 << 15;
 const STRUCTURE_NOTIFY_MASK: c_long = 1 << 17;
 const ESCAPE_KEYSYM: c_ulong = 0xff1b;
+const BACKSPACE_KEYSYM: c_ulong = 0xff08;
+const RETURN_KEYSYM: c_ulong = 0xff0d;
+const LEFT_KEYSYM: c_ulong = 0xff51;
+const UP_KEYSYM: c_ulong = 0xff52;
+const RIGHT_KEYSYM: c_ulong = 0xff53;
+const DOWN_KEYSYM: c_ulong = 0xff54;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Level {
@@ -169,10 +214,10 @@ const NODES: &[Node] = &[
     Node { label: "workspace.rs", detail: "src", level: Level::File, nx: 0.72, ny: 0.22 },
     Node { label: "render.rs", detail: "src", level: Level::File, nx: 0.77, ny: 0.70 },
     Node { label: "GraphController", detail: "class", level: Level::Class, nx: 0.15, ny: 0.51 },
-    Node { label: "build_graph()", detail: "fn · L42", level: Level::Function, nx: 0.30, ny: 0.76 },
-    Node { label: "analyze_workspace()", detail: "fn · L18", level: Level::Function, nx: 0.90, ny: 0.39 },
-    Node { label: "resolve_symbols()", detail: "fn · L67", level: Level::Function, nx: 0.58, ny: 0.08 },
-    Node { label: "render_graph()", detail: "fn · L12", level: Level::Function, nx: 0.93, ny: 0.86 },
+    Node { label: "build_graph()", detail: "fn - L42", level: Level::Function, nx: 0.30, ny: 0.76 },
+    Node { label: "analyze_workspace()", detail: "fn - L18", level: Level::Function, nx: 0.90, ny: 0.39 },
+    Node { label: "resolve_symbols()", detail: "fn - L67", level: Level::Function, nx: 0.58, ny: 0.08 },
+    Node { label: "render_graph()", detail: "fn - L12", level: Level::Function, nx: 0.93, ny: 0.86 },
 ];
 
 const EDGES: &[(usize, usize)] = &[
@@ -199,16 +244,34 @@ struct App {
     display: *mut Display,
     window: Window,
     gc: Gc,
+    canvas: Pixmap,
+    depth: c_int,
+    font: *mut XFontStruct,
     colors: Palette,
     width: i32,
     height: i32,
     mouse_x: i32,
     mouse_y: i32,
     hovered: Option<usize>,
+    selected_file: usize,
+    files: Vec<Vec<String>>,
+    editor_focused: bool,
+    caret_line: usize,
+    caret_column: usize,
+    graph_zoom: f32,
+    package_open: bool,
+    package_targets: [bool; 3],
+    build_started: Option<Instant>,
     started: Instant,
 }
 
 impl App {
+    fn scale(&self) -> f32 {
+        (self.width as f32 / 1440.0).min(self.height as f32 / 900.0).clamp(0.85, 2.0)
+    }
+
+    fn s(&self, value: i32) -> i32 { (value as f32 * self.scale()).round() as i32 }
+
     unsafe fn set_color(&self, color: c_ulong) {
         XSetForeground(self.display, self.gc, color);
     }
@@ -216,43 +279,44 @@ impl App {
     unsafe fn rect(&self, color: c_ulong, x: i32, y: i32, width: i32, height: i32) {
         if width <= 0 || height <= 0 { return; }
         self.set_color(color);
-        XFillRectangle(self.display, self.window, self.gc, x, y, width as u32, height as u32);
+        XFillRectangle(self.display, self.canvas, self.gc, x, y, width as u32, height as u32);
     }
 
     unsafe fn outline(&self, color: c_ulong, x: i32, y: i32, width: i32, height: i32) {
         self.set_color(color);
-        XDrawRectangle(self.display, self.window, self.gc, x, y, width.max(1) as u32, height.max(1) as u32);
+        XDrawRectangle(self.display, self.canvas, self.gc, x, y, width.max(1) as u32, height.max(1) as u32);
     }
 
     unsafe fn line(&self, color: c_ulong, width: u32, a: (i32, i32), b: (i32, i32)) {
         self.set_color(color);
         XSetLineAttributes(self.display, self.gc, width, 0, 1, 1);
-        XDrawLine(self.display, self.window, self.gc, a.0, a.1, b.0, b.1);
+        XDrawLine(self.display, self.canvas, self.gc, a.0, a.1, b.0, b.1);
     }
 
     unsafe fn circle(&self, fill: c_ulong, stroke: c_ulong, x: i32, y: i32, radius: i32) {
         self.set_color(fill);
-        XFillArc(self.display, self.window, self.gc, x-radius, y-radius, (radius*2) as u32, (radius*2) as u32, 0, 360*64);
+        XFillArc(self.display, self.canvas, self.gc, x-radius, y-radius, (radius*2) as u32, (radius*2) as u32, 0, 360*64);
         self.set_color(stroke);
         XSetLineAttributes(self.display, self.gc, 1, 0, 1, 1);
-        XDrawArc(self.display, self.window, self.gc, x-radius, y-radius, (radius*2) as u32, (radius*2) as u32, 0, 360*64);
+        XDrawArc(self.display, self.canvas, self.gc, x-radius, y-radius, (radius*2) as u32, (radius*2) as u32, 0, 360*64);
     }
 
     unsafe fn text(&self, color: c_ulong, x: i32, y: i32, value: &str) {
         let clean = value.replace('\0', "");
         let value = CString::new(clean).expect("text contains no NUL");
         self.set_color(color);
-        XDrawString(self.display, self.window, self.gc, x, y, value.as_ptr(), value.as_bytes().len() as i32);
+        XDrawString(self.display, self.canvas, self.gc, x, y, value.as_ptr(), value.as_bytes().len() as i32);
     }
 
     fn graph_bounds(&self) -> (i32, i32, i32, i32) {
         let left = (self.width as f32 * 0.61) as i32;
-        (left, 82, self.width-left, self.height-112)
+        (left, self.s(82), self.width-left, self.height-self.s(112))
     }
 
     fn node_position(&self, node: &Node) -> (i32, i32) {
         let (x, y, w, h) = self.graph_bounds();
-        (x + (node.nx*w as f32) as i32, y + (node.ny*h as f32) as i32)
+        let cx=x+w/2;let cy=y+h/2;
+        (cx+((node.nx-0.5)*w as f32*self.graph_zoom) as i32,cy+((node.ny-0.5)*h as f32*self.graph_zoom) as i32)
     }
 
     fn is_related(&self, index: usize) -> bool {
@@ -268,78 +332,77 @@ impl App {
         self.draw_workspace();
         self.draw_editor();
         self.draw_graph();
+        if self.package_open { self.draw_package_menu(); }
+        if self.build_started.is_some() { self.draw_build_animation(); }
         self.draw_status();
+        XCopyArea(self.display,self.canvas,self.window,self.gc,0,0,self.width as u32,self.height as u32,0,0);
         XFlush(self.display);
     }
 
     unsafe fn draw_header(&self) {
-        self.rect(self.colors.panel_2, 0, 0, self.width, 46);
-        self.line(self.colors.line, 1, (0,45), (self.width,45));
-        self.rect(self.colors.bright, 14, 12, 22, 22);
-        self.text(self.colors.bg, 20, 28, "T");
-        self.text(self.colors.text, 46, 28, "TC-IDE");
-        self.text(self.colors.muted, 122, 28, "motion-core / src / editor / graph.rs");
-        self.outline(self.colors.line, self.width-116, 11, 98, 24);
-        self.text(self.colors.text, self.width-101, 28, "Package  v");
+        let s=|v|self.s(v);let header=s(46);
+        self.rect(self.colors.panel_2,0,0,self.width,header);
+        self.line(self.colors.line,1,(0,header-1),(self.width,header-1));
+        self.rect(self.colors.bright,s(14),s(12),s(22),s(22));
+        self.text(self.colors.bg,s(20),s(29),"T");
+        self.text(self.colors.text,s(46),s(29),"TC-IDE");
+        self.text(self.colors.muted,s(122),s(29),"motion-core / src / editor / graph.rs");
+        self.outline(if self.package_open{self.colors.accent}else{self.colors.line},self.width-s(136),s(10),s(118),s(27));
+        self.text(self.colors.text,self.width-s(119),s(29),"Package  v");
     }
 
     unsafe fn draw_workspace(&self) {
+        let s=|v|self.s(v);
         let width = (self.width as f32 * 0.17) as i32;
-        self.rect(self.colors.panel, 0, 46, width, self.height-70);
-        self.line(self.colors.line, 1, (width,46), (width,self.height-24));
-        self.text(self.colors.muted, 14, 70, "PROJECT");
-        self.text(self.colors.bright, 15, 99, "v  TC-IDE");
+        self.rect(self.colors.panel,0,s(46),width,self.height-s(70));
+        self.line(self.colors.line,1,(width,s(46)),(width,self.height-s(24)));
+        self.text(self.colors.muted,s(14),s(71),"PROJECT");
+        self.text(self.colors.bright,s(15),s(101),"v  TC-IDE");
         let rows = [
-            ("  v  src", 126, self.colors.text),
-            ("    v  editor", 151, self.colors.text),
-            ("       graph.rs", 176, self.colors.bright),
-            ("       workspace.rs", 201, self.colors.muted),
-            ("       render.rs", 226, self.colors.muted),
-            ("     Cargo.toml", 258, self.colors.muted),
-            ("     README.md", 283, self.colors.muted),
+            ("  v  src",126,None),("    v  editor",153,None),
+            ("       graph.rs",180,Some(0)),("       workspace.rs",207,Some(1)),("       render.rs",234,Some(2)),
+            ("     Cargo.toml",268,None),("     README.md",295,None),
         ];
-        for (label,y,color) in rows { self.text(color, 16, y, label); }
+        for (label,y,file) in rows {
+            if file==Some(self.selected_file){self.rect(self.colors.panel_2,s(7),s(y-20),width-s(14),s(26));}
+            let color=if file==Some(self.selected_file){self.colors.bright}else if file.is_some(){self.colors.muted}else{self.colors.text};
+            self.text(color,s(16),s(y),label);
+        }
     }
 
     unsafe fn draw_editor(&self) {
+        let s=|v|self.s(v);
         let left = (self.width as f32 * 0.17) as i32;
         let right = (self.width as f32 * 0.61) as i32;
-        self.rect(self.colors.bg, left+1, 46, right-left-1, self.height-70);
-        self.rect(self.colors.panel_2, left+1, 46, right-left-1, 38);
-        self.line(self.colors.line, 1, (left,84), (right,84));
-        self.text(self.colors.bright, left+18, 70, "graph.rs");
-        let code = [
-            ("use tc_graph::{Project, Relation};", self.colors.muted),
-            ("", self.colors.text),
-            ("pub struct GraphController {", self.colors.bright),
-            ("    project: Project,", self.colors.text),
-            ("}", self.colors.bright),
-            ("", self.colors.text),
-            ("impl GraphController {", self.colors.bright),
-            ("    pub fn build_graph(&mut self) {", self.colors.accent),
-            ("        let files = analyze_workspace(&self.project);", self.colors.text),
-            ("        let symbols = resolve_symbols(files);", self.colors.text),
-            ("        render_graph(self.project.root(), symbols);", self.colors.text),
-            ("    }", self.colors.bright),
-            ("}", self.colors.bright),
-        ];
-        let mut y=116;
-        for (index,(line,color)) in code.iter().enumerate() {
-            self.text(self.colors.line, left+15, y, &(index+1).to_string());
-            self.text(*color, left+48, y, line);
-            y+=25;
+        self.rect(self.colors.bg,left+1,s(46),right-left-1,self.height-s(70));
+        self.rect(self.colors.panel_2,left+1,s(46),right-left-1,s(38));
+        self.line(self.colors.line,1,(left,s(84)),(right,s(84)));
+        let names=["graph.rs","workspace.rs","render.rs"];
+        self.text(self.colors.bright,left+s(18),s(71),names[self.selected_file]);
+        let base_y=s(119);let step=s(28);
+        for (index,line) in self.files[self.selected_file].iter().enumerate() {
+            let y=base_y+index as i32*step;if y>self.height-s(65){break;}
+            self.text(self.colors.line,left+s(15),y,&(index+1).to_string());
+            let color=if line.contains("fn "){self.colors.accent}else if line.contains("struct ")||line.starts_with("impl"){self.colors.bright}else{self.colors.text};
+            self.text(color,left+s(52),y,line);
+            if self.editor_focused&&index==self.caret_line&&(self.started.elapsed().as_millis()/500)%2==0 {
+                let char_width=s(10);let caret_x=left+s(52)+self.caret_column as i32*char_width;
+                self.line(self.colors.bright,1,(caret_x,y-s(18)),(caret_x,y+s(4)));
+            }
         }
-        self.text(self.colors.muted, left+20, self.height-50, "Hover graph nodes: scope changes automatically");
+        let hint=if self.editor_focused{"EDITOR ACTIVE · type, Backspace, Enter, arrows"}else{"Click editor to type · hover symbols to trace"};
+        self.text(self.colors.muted,left+s(20),self.height-s(50),hint);
     }
 
     unsafe fn draw_graph(&self) {
+        let s=|v|self.s(v);
         let (x,y,w,h)=self.graph_bounds();
-        self.rect(self.colors.panel, x, 46, w, self.height-70);
-        self.line(self.colors.line, 1, (x,46), (x,self.height-24));
-        self.line(self.colors.line, 1, (x,84), (self.width,84));
-        self.text(self.colors.text, x+14, 70, "Semantic Project Graph");
+        self.rect(self.colors.panel,x,s(46),w,self.height-s(70));
+        self.line(self.colors.line,1,(x,s(46)),(x,self.height-s(24)));
+        self.line(self.colors.line,1,(x,s(84)),(self.width,s(84)));
+        self.text(self.colors.text,x+s(14),s(71),"Semantic Project Graph");
         let mode = self.hovered.map(|i| match NODES[i].level { Level::Project=>"PROJECT",Level::File=>"FILE",Level::Class=>"CLASS",Level::Function=>"FUNCTION" }).unwrap_or("AUTO");
-        self.text(self.colors.muted, self.width-100, 70, mode);
+        self.text(self.colors.muted,self.width-s(112),s(71),mode);
 
         for &(a,b) in EDGES {
             let related = self.hovered.map(|active| active==a || active==b).unwrap_or(true);
@@ -352,30 +415,95 @@ impl App {
             let (nx,ny)=self.node_position(node);
             let active=self.hovered==Some(index);
             let related=self.is_related(index);
-            let base=match node.level { Level::Project=>14,Level::File=>9,Level::Class=>7,Level::Function=>5 };
-            let pulse=if active { ((elapsed*5.0).sin().abs()*4.0) as i32 } else { 0 };
+            let base=s(match node.level { Level::Project=>14,Level::File=>9,Level::Class=>7,Level::Function=>5 });
+            let pulse=if active { ((elapsed*5.0).sin().abs()*s(4) as f32) as i32 } else { 0 };
             if active { self.circle(self.colors.panel, self.colors.accent, nx, ny, base+pulse+5); }
             let stroke=if active { self.colors.bright } else if related { self.colors.accent } else { self.colors.line };
             let fill=if node.level==Level::Project { self.colors.project } else { self.colors.panel_2 };
             self.circle(fill, stroke, nx, ny, base);
             let label_color=if related { self.colors.text } else { self.colors.muted };
-            self.text(label_color, nx+base+6, ny-2, node.label);
-            self.text(self.colors.muted, nx+base+6, ny+11, node.detail);
+            self.text(label_color,nx+base+s(6),ny-s(2),node.label);
+            self.text(self.colors.muted,nx+base+s(6),ny+s(14),node.detail);
         }
-        self.text(self.colors.muted, x+14, y+h-10, "project  ->  file  ->  class  ->  function / call");
+        self.text(self.colors.muted,x+s(14),y+h-s(10),"wheel: zoom · project -> file -> class -> function / call");
     }
 
     unsafe fn draw_status(&self) {
-        self.rect(self.colors.panel_2, 0, self.height-24, self.width, 24);
-        self.line(self.colors.line, 1, (0,self.height-24), (self.width,self.height-24));
-        self.text(self.colors.muted, 12, self.height-8, "TC-IDE native prototype");
-        let status=self.hovered.map(|i| format!("Focused: {} · {}",NODES[i].label,NODES[i].detail)).unwrap_or_else(||"Rust / X11 · 60 FPS scene clock".into());
-        self.text(self.colors.text, self.width/2-90, self.height-8, &status);
+        let s=|v|self.s(v);self.rect(self.colors.panel_2,0,self.height-s(24),self.width,s(24));
+        self.line(self.colors.line,1,(0,self.height-s(24)),(self.width,self.height-s(24)));
+        self.text(self.colors.muted,s(12),self.height-s(7),"TC-IDE native prototype");
+        let status=self.hovered.map(|i| format!("Focused: {} - {}",NODES[i].label,NODES[i].detail)).unwrap_or_else(||"Rust / X11 - 60 FPS double-buffered scene".into());
+        self.text(self.colors.text,self.width/2-s(100),self.height-s(7),&status);
+    }
+
+    unsafe fn draw_package_menu(&self) {
+        let s=|v|self.s(v);let x=self.width-s(270);let y=s(48);let w=s(250);let h=s(176);
+        self.rect(self.colors.panel_2,x,y,w,h);self.outline(self.colors.line,x,y,w,h);
+        self.text(self.colors.muted,x+s(15),y+s(25),"BUILD TARGETS");
+        let labels=["Windows  .exe","Linux    .deb","Linux    .AppImage"];
+        for (index,label) in labels.iter().enumerate(){let row_y=y+s(51+index as i32*31);self.outline(if self.package_targets[index]{self.colors.accent}else{self.colors.line},x+s(15),row_y-s(15),s(16),s(16));if self.package_targets[index]{self.rect(self.colors.accent,x+s(19),row_y-s(11),s(8),s(8));}self.text(self.colors.text,x+s(42),row_y,label);}
+        self.rect(self.colors.bright,x+s(15),y+h-s(37),w-s(30),s(25));self.text(self.colors.bg,x+s(72),y+h-s(19),"BUILD SELECTED");
+    }
+
+    unsafe fn draw_build_animation(&self) {
+        let s=|v|self.s(v);let elapsed=self.build_started.unwrap().elapsed().as_secs_f32();
+        let cx=self.width/2;let cy=self.height/2;let radius=s((32.0+(elapsed.min(1.0)*30.0)) as i32);
+        self.rect(self.colors.bg,cx-s(230),cy-s(140),s(460),s(280));self.outline(self.colors.line,cx-s(230),cy-s(140),s(460),s(280));
+        if elapsed<2.2 {self.circle(self.colors.bg,self.colors.accent,cx,cy,radius);self.circle(self.colors.bg,self.colors.line,cx,cy,radius+s(18));self.text(self.colors.text,cx-s(70),cy+s(105),"CODE COLLAPSING INTO BUILD CORE");}
+        else {self.circle(self.colors.bright,self.colors.accent,cx,cy,radius);self.circle(self.colors.panel,self.colors.bright,cx,cy,radius+s(18));self.text(self.colors.bright,cx-s(70),cy+s(105),"BUILD COMPLETE - PACKAGES EMITTED");}
+    }
+
+    unsafe fn resize(&mut self,width:i32,height:i32){
+        self.width=width.max(900);self.height=height.max(600);XFreePixmap(self.display,self.canvas);
+        self.canvas=XCreatePixmap(self.display,self.window,self.width as u32,self.height as u32,self.depth as u32);
+        self.update_hover();
+    }
+
+    fn handle_click(&mut self,x:i32,y:i32,button:u32){
+        let scale=self.scale();let s=move|v:i32|(v as f32*scale).round() as i32;
+        let graph_left=(self.width as f32*0.61) as i32;
+        if x>=graph_left&&button==4 {self.graph_zoom=(self.graph_zoom*1.1).min(1.55);return;}
+        if x>=graph_left&&button==5 {self.graph_zoom=(self.graph_zoom/1.1).max(0.65);return;}
+        if x>self.width-s(150)&&y<s(46){self.package_open=!self.package_open;self.editor_focused=false;return;}
+        if self.package_open {
+            let menu_x=self.width-s(270);let menu_y=s(48);
+            if x>=menu_x&&x<=self.width-s(20)&&y>=menu_y {
+                for index in 0..3 {let center=menu_y+s(51+index as i32*31);if (y-center).abs()<s(15){self.package_targets[index]=!self.package_targets[index];return;}}
+                if y>menu_y+s(139)&&self.package_targets.iter().any(|v|*v){self.build_started=Some(Instant::now());self.package_open=false;return;}
+            }
+            self.package_open=false;
+        }
+        let workspace_right=(self.width as f32*0.17) as i32;
+        if x<workspace_right {
+            for (index,center) in [180,207,234].iter().enumerate(){if (y-s(*center)).abs()<s(15){self.selected_file=index;self.caret_line=0;self.caret_column=0;self.editor_focused=false;self.hovered=Some(index+1);return;}}
+        }
+        if x>=workspace_right&&x<graph_left&&y>s(85)&&y<self.height-s(60){
+            self.editor_focused=true;let base=s(119);let step=s(28);let line=((y-base+step/2)/step).max(0) as usize;self.caret_line=line.min(self.files[self.selected_file].len().saturating_sub(1));let text_x=workspace_right+s(52);self.caret_column=(((x-text_x).max(0))/s(10).max(1)) as usize;self.caret_column=self.caret_column.min(self.files[self.selected_file][self.caret_line].len());return;
+        }
+        self.editor_focused=false;
+    }
+
+    unsafe fn handle_key(&mut self,event:&mut XKeyEvent)->bool {
+        let mut keysym=0;let mut buffer=[0_i8;32];let count=XLookupString(event,buffer.as_mut_ptr(),buffer.len() as i32,&mut keysym,ptr::null_mut());
+        if keysym==ESCAPE_KEYSYM {if self.package_open||self.build_started.is_some(){self.package_open=false;self.build_started=None;return true;}return false;}
+        if !self.editor_focused{return true;}
+        match keysym {
+            BACKSPACE_KEYSYM=>{if self.caret_column>0 {let line=&mut self.files[self.selected_file][self.caret_line];self.caret_column-=1;line.remove(self.caret_column);}else if self.caret_line>0{let current=self.files[self.selected_file].remove(self.caret_line);self.caret_line-=1;self.caret_column=self.files[self.selected_file][self.caret_line].len();self.files[self.selected_file][self.caret_line].push_str(&current);}},
+            RETURN_KEYSYM=>{let tail=self.files[self.selected_file][self.caret_line].split_off(self.caret_column);self.caret_line+=1;self.caret_column=0;self.files[self.selected_file].insert(self.caret_line,tail);},
+            LEFT_KEYSYM=>self.caret_column=self.caret_column.saturating_sub(1),
+            RIGHT_KEYSYM=>self.caret_column=(self.caret_column+1).min(self.files[self.selected_file][self.caret_line].len()),
+            UP_KEYSYM=>{self.caret_line=self.caret_line.saturating_sub(1);self.caret_column=self.caret_column.min(self.files[self.selected_file][self.caret_line].len());},
+            DOWN_KEYSYM=>{self.caret_line=(self.caret_line+1).min(self.files[self.selected_file].len()-1);self.caret_column=self.caret_column.min(self.files[self.selected_file][self.caret_line].len());},
+            _=>if count>0 {let bytes=buffer[..count as usize].iter().map(|v|*v as u8).collect::<Vec<_>>();if let Ok(input)=std::str::from_utf8(&bytes){if !input.chars().any(char::is_control){self.files[self.selected_file][self.caret_line].insert_str(self.caret_column,input);self.caret_column+=input.len();}}}
+        }
+        true
     }
 
     fn update_hover(&mut self) {
+        let scale=self.scale();let s=move|v:i32|(v as f32*scale).round() as i32;let left=(self.width as f32*0.17) as i32;let graph=(self.width as f32*0.61) as i32;
+        if self.mouse_x>=left&&self.mouse_x<graph&&self.mouse_y>s(90){let row=((self.mouse_y-s(119)+s(14))/s(28).max(1)).max(0) as usize;if let Some(line)=self.files[self.selected_file].get(row){self.hovered=if line.contains("build_graph"){Some(5)}else if line.contains("analyze_workspace"){Some(6)}else if line.contains("resolve_symbols"){Some(7)}else if line.contains("render_graph"){Some(8)}else{None};return;}}
         let mut best=None;
-        let mut distance=34_i64*34;
+        let mut distance=self.s(40) as i64*self.s(40) as i64;
         for (index,node) in NODES.iter().enumerate() {
             let (x,y)=self.node_position(node);
             let dx=(self.mouse_x-x) as i64;
@@ -394,6 +522,14 @@ unsafe fn color(display: *mut Display, map: Colormap, value: &str) -> c_ulong {
     if XAllocNamedColor(display,map,name.as_ptr(),&mut screen,&mut exact)==0 { 0 } else { screen.pixel }
 }
 
+fn initial_files() -> Vec<Vec<String>> {
+    [
+        ["use tc_graph::{Project, Relation};","","pub struct GraphController {","    project: Project,","}","","impl GraphController {","    pub fn build_graph(&mut self) {","        let files = analyze_workspace(&self.project);","        let symbols = resolve_symbols(files);","        render_graph(self.project.root(), symbols);","    }","}"].as_slice(),
+        ["use crate::workspace::Project;","","pub fn analyze_workspace(project: &Project) {","    project.index_files();","}","","pub fn resolve_symbols(files: Vec<File>) {","    SemanticIndex::from(files);","}"].as_slice(),
+        ["use crate::graph::SymbolNode;","","pub struct GraphRenderer;","","impl GraphRenderer {","    pub fn render_graph(nodes: &[SymbolNode]) {","        scene.draw(nodes);","    }","}"].as_slice(),
+    ].iter().map(|lines|lines.iter().map(|line|line.to_string()).collect()).collect()
+}
+
 fn main() {
     unsafe {
         let display=XOpenDisplay(ptr::null());
@@ -402,18 +538,29 @@ fn main() {
             std::process::exit(1);
         }
         let screen=XDefaultScreen(display);
+        let screen_width=XDisplayWidth(display,screen);
+        let screen_height=XDisplayHeight(display,screen);
         let root=XRootWindow(display,screen);
         let map=XDefaultColormap(display,screen);
         let bg=color(display,map,"#0d0f11");
-        let window=XCreateSimpleWindow(display,root,70,60,1320,780,0,bg,bg);
+        let width=(screen_width as f32*0.94) as i32;let height=(screen_height as f32*0.90) as i32;
+        let window=XCreateSimpleWindow(display,root,(screen_width-width)/2,(screen_height-height)/2,width as u32,height as u32,0,bg,bg);
         let title=CString::new("TC-IDE · Native Semantic Workspace").unwrap();
         XStoreName(display,window,title.as_ptr());
-        XSelectInput(display,window,KEY_PRESS_MASK|POINTER_MOTION_MASK|EXPOSURE_MASK|STRUCTURE_NOTIFY_MASK);
+        XSelectInput(display,window,KEY_PRESS_MASK|BUTTON_PRESS_MASK|POINTER_MOTION_MASK|EXPOSURE_MASK|STRUCTURE_NOTIFY_MASK);
         let delete_name=CString::new("WM_DELETE_WINDOW").unwrap();
         let mut delete_atom=XInternAtom(display,delete_name.as_ptr(),0);
         XSetWMProtocols(display,window,&mut delete_atom,1);
         XMapWindow(display,window);
         let gc=XCreateGC(display,window,0,ptr::null_mut());
+        let font_pattern=if width>2200{"-misc-fixed-medium-r-normal--24-*-*-*-*-*-iso10646-1"}else{"-misc-fixed-medium-r-normal--18-*-*-*-*-*-iso10646-1"};
+        let font_name=CString::new(font_pattern).unwrap();
+        let mut font=XLoadQueryFont(display,font_name.as_ptr());
+        let fallback_font=CString::new("fixed").unwrap();
+        if font.is_null(){font=XLoadQueryFont(display,fallback_font.as_ptr());}
+        if !font.is_null(){XSetFont(display,gc,(*font).fid);}
+        let depth=XDefaultDepth(display,screen);
+        let canvas=XCreatePixmap(display,window,width as u32,height as u32,depth as u32);
         let colors=Palette {
             bg,
             panel:color(display,map,"#121518"),
@@ -425,7 +572,7 @@ fn main() {
             accent:color(display,map,"#9bbbc2"),
             project:color(display,map,"#29353a"),
         };
-        let mut app=App { display,window,gc,colors,width:1320,height:780,mouse_x:-100,mouse_y:-100,hovered:None,started:Instant::now() };
+        let mut app=App { display,window,gc,canvas,depth,font,colors,width,height,mouse_x:-100,mouse_y:-100,hovered:None,selected_file:0,files:initial_files(),editor_focused:false,caret_line:0,caret_column:0,graph_zoom:1.0,package_open:false,package_targets:[true,true,true],build_started:None,started:Instant::now() };
         let frame=Duration::from_micros(16_667);
         let mut running=true;
         while running {
@@ -434,9 +581,10 @@ fn main() {
                 let mut event=XEvent { pad:[0;24] };
                 XNextEvent(display,&mut event);
                 match event.type_ {
-                    KEY_PRESS => { let mut key=event.key;if XLookupKeysym(&mut key,0)==ESCAPE_KEYSYM { running=false; } }
+                    KEY_PRESS => { let mut key=event.key;running=app.handle_key(&mut key); }
+                    BUTTON_PRESS => {let button=event.button;app.handle_click(button.x,button.y,button.button);}
                     MOTION_NOTIFY => { let motion=event.motion;app.mouse_x=motion.x;app.mouse_y=motion.y;app.update_hover(); }
-                    CONFIGURE_NOTIFY => { let config=event.configure;app.width=config.width.max(760);app.height=config.height.max(520);app.update_hover(); }
+                    CONFIGURE_NOTIFY => { let config=event.configure;if config.width!=app.width||config.height!=app.height{app.resize(config.width,config.height);} }
                     CLIENT_MESSAGE => running=false,
                     EXPOSE => {},
                     _ => {},
@@ -446,6 +594,8 @@ fn main() {
             let used=began.elapsed();
             if used<frame { thread::sleep(frame-used); }
         }
+        XFreePixmap(display,app.canvas);
+        if !app.font.is_null(){XFreeFont(display,app.font);}
         XFreeGC(display,gc);
         XDestroyWindow(display,window);
         XCloseDisplay(display);
