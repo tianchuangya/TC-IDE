@@ -366,7 +366,7 @@ impl App {
         XDrawArc(self.display, self.canvas, self.gc, x-radius, y-radius, (radius*2) as u32, (radius*2) as u32, 0, 360*64);
     }
 
-    unsafe fn comment_bubble(&self,x:i32,y:i32,value:&str){let s=|v|self.s(v);let short=value.chars().take(34).collect::<String>();let width=(short.chars().count() as i32*s(11)+s(24)).max(s(58));let top=y-s(22);self.rect(self.colors.bright,x,top,width,s(28));let mut tail=[XPoint{x:(x-s(8)) as i16,y:(top+s(13)) as i16},XPoint{x:x as i16,y:(top+s(7)) as i16},XPoint{x:x as i16,y:(top+s(20)) as i16}];self.set_color(self.colors.bright);XFillPolygon(self.display,self.canvas,self.gc,tail.as_mut_ptr(),3,0,0);self.text(self.colors.bg,x+s(12),y-s(3),if short.is_empty(){"comment"}else{&short});}
+    unsafe fn comment_bubble(&self,anchor_x:i32,y:i32,value:&str){let s=|v|self.s(v);let right=anchor_x-s(9);let available=(right-s(4)).max(s(72));let chars_per_line=((available-s(24))/s(11).max(1)).clamp(6,30) as usize;let lines=wrap_bubble_text(value,chars_per_line,4);let longest=lines.iter().map(|line|line.chars().count()).max().unwrap_or(7) as i32;let width=(longest*s(11)+s(24)).max(s(72)).min(available);let height=s(12)+lines.len() as i32*s(22);let top=y-s(21);let left=right-width;self.rect(self.colors.bright,left,top,width,height);let tail_center=top+s(14);let mut tail=[XPoint{x:anchor_x as i16,y:tail_center as i16},XPoint{x:right as i16,y:(tail_center-s(7)) as i16},XPoint{x:right as i16,y:(tail_center+s(7)) as i16}];self.set_color(self.colors.bright);XFillPolygon(self.display,self.canvas,self.gc,tail.as_mut_ptr(),3,0,0);for (index,line) in lines.iter().enumerate(){self.text(self.colors.bg,left+s(12),top+s(22)+index as i32*s(22),line);}}
 
     unsafe fn text(&self, color: c_ulong, x: i32, y: i32, value: &str) {
         let clean = value.replace('\0', "");
@@ -648,6 +648,8 @@ fn language_settings_path()->PathBuf {std::env::var_os("XDG_CONFIG_HOME").map(Pa
 
 fn projects_root()->PathBuf {std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(||PathBuf::from(".")).join("TC-IDE-Projects")}
 
+fn wrap_bubble_text(value:&str,max_chars:usize,max_lines:usize)->Vec<String>{let source=if value.trim().is_empty(){"comment"}else{value.trim()};let mut lines=Vec::new();for paragraph in source.lines(){let chars=paragraph.chars().collect::<Vec<_>>();if chars.is_empty(){lines.push(String::new());continue;}for chunk in chars.chunks(max_chars.max(1)){lines.push(chunk.iter().collect());}}if lines.len()>max_lines{lines.truncate(max_lines);if let Some(last)=lines.last_mut(){if last.chars().count()>=3{let keep=last.chars().take(max_chars.saturating_sub(3)).collect::<String>();*last=format!("{keep}...");}}}lines}
+
 fn project_environments(language:&str)->&'static [&'static str]{match language{"Python"=>&["venv","uv","conda","poetry"],"C"=>&["GCC","Clang","CMake"],"C++"=>&["CMake + GCC","CMake + Clang","Meson","Conan"],"Java"=>&["JDK 25","JDK 21 LTS","Gradle","Maven"],"Rust"=>&["cargo stable","cargo nightly","Nix shell"],"TypeScript / JavaScript"=>&["pnpm","npm","yarn","bun"],"Go"=>&["Go modules","GVM","container"],_=>&["system toolchain","container","custom"]}}
 
 fn initial_languages()->Vec<LanguagePack>{
@@ -768,5 +770,12 @@ mod tests {
     #[test]
     fn python_projects_offer_real_venv_option() {
         assert_eq!(project_environments("Python").first(),Some(&"venv"));
+    }
+
+    #[test]
+    fn comment_bubbles_wrap_and_keep_explicit_lines() {
+        assert_eq!(wrap_bubble_text("first line\nsecond line",30,4),vec!["first line","second line"]);
+        assert_eq!(wrap_bubble_text("123456789",4,4),vec!["1234","5678","9"]);
+        assert!(wrap_bubble_text(&"x".repeat(100),10,3).last().unwrap().ends_with("..."));
     }
 }
