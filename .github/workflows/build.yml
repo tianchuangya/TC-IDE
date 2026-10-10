@@ -22,7 +22,3 @@ jobs:
         run: cargo check --all-targets
       - name: Test
         run: cargo test --all-targets
-      - name: Build release binary
-        run: cargo build --release
-      - name: Verify release binary
-        run: test -x target/release/tc-ide

@@ -1,9 +1,12 @@
-name: release
+name: release (manual only)
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Version tag to publish, for example v0.3.0"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -24,8 +27,10 @@ jobs:
       - name: Build release binary
         run: cargo build --release
       - name: Package Linux release
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          package_dir="TC-IDE-${GITHUB_REF_NAME}-linux-x86_64"
+          package_dir="TC-IDE-${RELEASE_TAG}-linux-x86_64"
           mkdir -p "dist/${package_dir}"
           install -m 755 target/release/tc-ide "dist/${package_dir}/tc-ide"
           install -m 644 README.md LICENSE "dist/${package_dir}/"
@@ -37,9 +42,11 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
+          gh release create "${RELEASE_TAG}" \
             dist/*.tar.gz \
             dist/*.sha256 \
-            --title "TC-IDE ${GITHUB_REF_NAME}" \
+            --target "${GITHUB_SHA}" \
+            --title "TC-IDE ${RELEASE_TAG}" \
             --generate-notes
