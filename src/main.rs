@@ -39,6 +39,13 @@ struct XColor {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct XPoint {
+    x: i16,
+    y: i16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct XKeyEvent {
     type_: c_int,
     serial: c_ulong,
@@ -159,6 +166,7 @@ extern "C" {
     fn XDrawRectangle(display: *mut Display, drawable: Drawable, gc: Gc, x: c_int, y: c_int, width: c_uint, height: c_uint) -> c_int;
     fn XDrawLine(display: *mut Display, drawable: Drawable, gc: Gc, x1: c_int, y1: c_int, x2: c_int, y2: c_int) -> c_int;
     fn XFillArc(display: *mut Display, drawable: Drawable, gc: Gc, x: c_int, y: c_int, width: c_uint, height: c_uint, angle1: c_int, angle2: c_int) -> c_int;
+    fn XFillPolygon(display: *mut Display, drawable: Drawable, gc: Gc, points: *mut XPoint, count: c_int, shape: c_int, mode: c_int) -> c_int;
     fn XDrawArc(display: *mut Display, drawable: Drawable, gc: Gc, x: c_int, y: c_int, width: c_uint, height: c_uint, angle1: c_int, angle2: c_int) -> c_int;
     fn XDrawString(display: *mut Display, drawable: Drawable, gc: Gc, x: c_int, y: c_int, text: *const c_char, length: c_int) -> c_int;
     fn XLoadQueryFont(display: *mut Display, name: *const c_char) -> *mut XFontStruct;
@@ -189,6 +197,7 @@ const STRUCTURE_NOTIFY_MASK: c_long = 1 << 17;
 const ESCAPE_KEYSYM: c_ulong = 0xff1b;
 const BACKSPACE_KEYSYM: c_ulong = 0xff08;
 const RETURN_KEYSYM: c_ulong = 0xff0d;
+const TAB_KEYSYM: c_ulong = 0xff09;
 const LEFT_KEYSYM: c_ulong = 0xff51;
 const UP_KEYSYM: c_ulong = 0xff52;
 const RIGHT_KEYSYM: c_ulong = 0xff53;
@@ -297,6 +306,18 @@ impl App {
         if let Some(pack)=self.languages.iter().find(|pack|pack.extensions.iter().any(|item|*item==extension)){if pack.installed{pack.name.to_string()}else{format!("Plain Text - {} available",pack.name)}}else{"Plain Text".into()}
     }
 
+    fn language_pack_index_for_file(&self,name:&str)->Option<usize>{let extension=name.rsplit('.').next()?.to_ascii_lowercase();self.languages.iter().position(|pack|pack.extensions.iter().any(|item|*item==extension))}
+
+    fn completion_words(&self)->&'static [&'static str]{let language=self.language_for_file(&self.files[self.selected_file].name);if language.starts_with("Rust"){&["async","await","const","enum","fn","impl","let","match","mod","pub","Result","self","struct","trait","use"]}else if language.starts_with("Python"){&["async","await","class","def","elif","else","from","import","lambda","None","return","self","try","with"]}else if language.starts_with("TypeScript")||language.starts_with("Web"){&["async","await","class","const","export","extends","function","import","interface","return","type"]}else if language.starts_with("C /"){&["auto","class","const","constexpr","enum","include","namespace","return","struct","template","void"]}else if language.starts_with("Go"){&["chan","defer","func","go","import","interface","map","package","range","return","struct"]}else if language.starts_with("Java")||language.starts_with("Kotlin"){&["class","extends","fun","import","interface","new","package","private","public","return","static"]}else{&["class","const","function","import","return","struct","type","value"]}}
+
+    fn current_prefix(&self)->String{let line=&self.files[self.selected_file].lines[self.caret_line];let upto=&line[..self.caret_column.min(line.len())];upto.chars().rev().take_while(|ch|ch.is_ascii_alphanumeric()||*ch=='_').collect::<String>().chars().rev().collect()}
+
+    fn completions(&self)->Vec<String>{let prefix=self.current_prefix();if prefix.is_empty(){return Vec::new();}self.completion_words().iter().filter(|word|word.starts_with(&prefix)&&**word!=prefix).take(4).map(|word|word.to_string()).collect()}
+
+    fn accept_completion(&mut self){if let Some(candidate)=self.completions().first().cloned(){let prefix=self.current_prefix();let suffix=&candidate[prefix.len()..];self.files[self.selected_file].lines[self.caret_line].insert_str(self.caret_column,suffix);self.caret_column+=suffix.len();self.status_message=format!("Completed {candidate}");}}
+
+    fn comment_parts<'a>(&self,line:&'a str)->Option<(&'a str,&'a str)>{["//","#","--"].iter().filter_map(|marker|line.find(marker).map(|index|(index,*marker))).min_by_key(|(index,_)|*index).map(|(index,marker)|(&line[..index],line[index+marker.len()..].trim()))}
+
     unsafe fn set_color(&self, color: c_ulong) {
         XSetForeground(self.display, self.gc, color);
     }
@@ -325,6 +346,8 @@ impl App {
         XSetLineAttributes(self.display, self.gc, 1, 0, 1, 1);
         XDrawArc(self.display, self.canvas, self.gc, x-radius, y-radius, (radius*2) as u32, (radius*2) as u32, 0, 360*64);
     }
+
+    unsafe fn comment_bubble(&self,x:i32,y:i32,value:&str){let s=|v|self.s(v);let short=value.chars().take(34).collect::<String>();let width=(short.chars().count() as i32*s(11)+s(24)).max(s(58));let top=y-s(22);self.rect(self.colors.bright,x,top,width,s(28));let mut tail=[XPoint{x:(x-s(8)) as i16,y:(top+s(13)) as i16},XPoint{x:x as i16,y:(top+s(7)) as i16},XPoint{x:x as i16,y:(top+s(20)) as i16}];self.set_color(self.colors.bright);XFillPolygon(self.display,self.canvas,self.gc,tail.as_mut_ptr(),3,0,0);self.text(self.colors.bg,x+s(12),y-s(3),if short.is_empty(){"comment"}else{&short});}
 
     unsafe fn text(&self, color: c_ulong, x: i32, y: i32, value: &str) {
         let clean = value.replace('\0', "");
@@ -410,14 +433,15 @@ impl App {
             let y=base_y+index as i32*step;if y>self.height-s(65){break;}
             self.text(self.colors.line,left+s(15),y,&(index+1).to_string());
             let color=if line.contains("fn "){self.colors.accent}else if line.contains("struct ")||line.starts_with("impl"){self.colors.bright}else{self.colors.text};
-            self.text(color,left+s(52),y,line);
+            if let Some((code,comment))=self.comment_parts(line){self.text(color,left+s(52),y,code);let bubble_x=left+s(62)+(code.chars().count() as i32*s(10));self.comment_bubble(bubble_x,y,comment);}else{self.text(color,left+s(52),y,line);}
             if self.editor_focused&&index==self.caret_line&&(self.started.elapsed().as_millis()/500)%2==0 {
                 let char_width=s(10);let caret_x=left+s(52)+self.caret_column as i32*char_width;
                 self.line(self.colors.bright,1,(caret_x,y-s(18)),(caret_x,y+s(4)));
             }
         }
-        let hint=if self.editor_focused{"EDITOR ACTIVE · type, Backspace, Enter, arrows"}else{"Click editor to type · hover symbols to trace"};
+        let hint=if self.editor_focused{"EDITOR ACTIVE - type, Backspace, Enter, arrows"}else{"Click editor to type - hover symbols to trace"};
         self.text(self.colors.muted,left+s(20),self.height-s(50),hint);
+        if self.editor_focused {let completions=self.completions();if !completions.is_empty(){let popup_x=left+s(52)+self.caret_column as i32*s(10);let popup_y=(base_y+(self.caret_line as i32+1)*step).min(self.height-s(180));let popup_w=s(210);let popup_h=s(30)*completions.len() as i32+self.s(10);self.rect(self.colors.panel_2,popup_x,popup_y,popup_w,popup_h);self.outline(self.colors.line,popup_x,popup_y,popup_w,popup_h);for (index,item) in completions.iter().enumerate(){if index==0{self.rect(self.colors.project,popup_x+s(3),popup_y+s(3),popup_w-s(6),s(27));}self.text(if index==0{self.colors.bright}else{self.colors.text},popup_x+s(12),popup_y+s(23)+index as i32*s(30),item);}self.text(self.colors.muted,popup_x+popup_w-s(44),popup_y+s(23),"TAB");}}
     }
 
     unsafe fn draw_graph(&self) {
@@ -451,7 +475,7 @@ impl App {
             self.text(label_color,nx+base+s(6),ny-s(2),node.label);
             self.text(self.colors.muted,nx+base+s(6),ny+s(14),node.detail);
         }
-        self.text(self.colors.muted,x+s(14),y+h-s(10),"wheel: zoom · project -> file -> class -> function / call");
+        self.text(self.colors.muted,x+s(14),y+h-s(10),"wheel: zoom - project -> file -> class -> function / call");
     }
 
     unsafe fn draw_status(&self) {
@@ -478,7 +502,7 @@ impl App {
         self.text(self.colors.accent,x+s(22),y+s(67),"Programming Languages");
         self.text(self.colors.muted,x+s(230),y+s(67),"Language packs are installed per user");
         for (visible,(index,pack)) in self.languages.iter().enumerate().skip(self.extension_scroll).take(12).enumerate(){let row=y+s(103+visible as i32*43);self.line(self.colors.line,1,(x+s(18),row+s(11)),(x+w-s(18),row+s(11)));self.text(self.colors.text,x+s(24),row,pack.name);self.text(self.colors.muted,x+s(165),row,&pack.extensions.iter().take(5).map(|ext|format!(".{ext}")).collect::<Vec<_>>().join("  "));let downloading=self.downloading.map(|(active,_)|active==index).unwrap_or(false);let label=if downloading{"DOWNLOADING..."}else if pack.installed{"INSTALLED"}else{"DOWNLOAD"};let color=if pack.installed{self.colors.accent}else{self.colors.bright};self.outline(color,x+w-s(150),row-s(20),s(126),s(27));self.text(color,x+w-s(137),row,label);}
-        self.text(self.colors.muted,x+s(22),y+h-s(18),"Wheel: more packs · unknown extensions use Plain Text");
+        self.text(self.colors.muted,x+s(22),y+h-s(18),"Wheel: more packs - unknown extensions use Plain Text");
     }
 
     unsafe fn draw_new_file_dialog(&self) {
@@ -542,10 +566,11 @@ impl App {
 
     unsafe fn handle_key(&mut self,event:&mut XKeyEvent)->bool {
         let mut keysym=0;let mut buffer=[0_i8;32];let count=XLookupString(event,buffer.as_mut_ptr(),buffer.len() as i32,&mut keysym,ptr::null_mut());
-        if self.new_file_open {if keysym==ESCAPE_KEYSYM{self.new_file_open=false;return true;}if keysym==BACKSPACE_KEYSYM{self.new_file_name.pop();return true;}if keysym==RETURN_KEYSYM{let name=self.new_file_name.trim().to_string();if !name.is_empty()&&!name.contains('/')&&!self.files.iter().any(|file|file.name==name){self.files.push(FileBuffer{name:name.clone(),lines:vec![String::new()]});self.selected_file=self.files.len()-1;self.caret_line=0;self.caret_column=0;self.editor_focused=true;self.new_file_open=false;self.status_message=format!("Created {name} - {}",self.language_for_file(&name));}else{self.status_message="Choose a unique filename without '/'".into();}return true;}if count>0{let bytes=buffer[..count as usize].iter().map(|v|*v as u8).collect::<Vec<_>>();if let Ok(input)=std::str::from_utf8(&bytes){if !input.chars().any(char::is_control){self.new_file_name.push_str(input);}}}return true;}
+        if self.new_file_open {if keysym==ESCAPE_KEYSYM{self.new_file_open=false;return true;}if keysym==BACKSPACE_KEYSYM{self.new_file_name.pop();return true;}if keysym==RETURN_KEYSYM{let name=self.new_file_name.trim().to_string();if !name.is_empty()&&!name.contains('/')&&!self.files.iter().any(|file|file.name==name){let pack_index=self.language_pack_index_for_file(&name);self.files.push(FileBuffer{name:name.clone(),lines:vec![String::new()]});self.selected_file=self.files.len()-1;self.caret_line=0;self.caret_column=0;self.editor_focused=true;self.new_file_open=false;if let Some(index)=pack_index{let language=self.languages[index].name;if self.languages[index].installed{self.status_message=format!("Created {name} - selected {language}");}else{self.downloading=Some((index,Instant::now()));self.status_message=format!("Detected {language} from {name} - downloading language pack...");}}else{self.status_message=format!("Created {name} - Plain Text fallback");}}else{self.status_message="Choose a unique filename without '/'".into();}return true;}if count>0{let bytes=buffer[..count as usize].iter().map(|v|*v as u8).collect::<Vec<_>>();if let Ok(input)=std::str::from_utf8(&bytes){if !input.chars().any(char::is_control){self.new_file_name.push_str(input);}}}return true;}
         if keysym==ESCAPE_KEYSYM {if self.extensions_open||self.package_open||self.build_started.is_some(){self.extensions_open=false;self.package_open=false;self.build_started=None;return true;}return false;}
         if !self.editor_focused{return true;}
         match keysym {
+            TAB_KEYSYM=>self.accept_completion(),
             BACKSPACE_KEYSYM=>{if self.caret_column>0 {let line=&mut self.files[self.selected_file].lines[self.caret_line];self.caret_column-=1;line.remove(self.caret_column);}else if self.caret_line>0{let current=self.files[self.selected_file].lines.remove(self.caret_line);self.caret_line-=1;self.caret_column=self.files[self.selected_file].lines[self.caret_line].len();self.files[self.selected_file].lines[self.caret_line].push_str(&current);}},
             RETURN_KEYSYM=>{let tail=self.files[self.selected_file].lines[self.caret_line].split_off(self.caret_column);self.caret_line+=1;self.caret_column=0;self.files[self.selected_file].lines.insert(self.caret_line,tail);},
             LEFT_KEYSYM=>self.caret_column=self.caret_column.saturating_sub(1),
@@ -582,7 +607,7 @@ unsafe fn color(display: *mut Display, map: Colormap, value: &str) -> c_ulong {
 
 fn initial_files() -> Vec<FileBuffer> {
     let sources=[
-        ("graph.rs",["use tc_graph::{Project, Relation};","","pub struct GraphController {","    project: Project,","}","","impl GraphController {","    pub fn build_graph(&mut self) {","        let files = analyze_workspace(&self.project);","        let symbols = resolve_symbols(files);","        render_graph(self.project.root(), symbols);","    }","}"].as_slice()),
+        ("graph.rs",["use tc_graph::{Project, Relation};","","// AI maps project relations in real time","pub struct GraphController {","    project: Project,","}","","impl GraphController {","    pub fn build_graph(&mut self) {","        let files = analyze_workspace(&self.project);","        let symbols = resolve_symbols(files);","        render_graph(self.project.root(), symbols);","    }","}"].as_slice()),
         ("workspace.rs",["use crate::workspace::Project;","","pub fn analyze_workspace(project: &Project) {","    project.index_files();","}","","pub fn resolve_symbols(files: Vec<File>) {","    SemanticIndex::from(files);","}"].as_slice()),
         ("render.rs",["use crate::graph::SymbolNode;","","pub struct GraphRenderer;","","impl GraphRenderer {","    pub fn render_graph(nodes: &[SymbolNode]) {","        scene.draw(nodes);","    }","}"].as_slice()),
     ];
@@ -614,7 +639,7 @@ fn main() {
         let bg=color(display,map,"#0d0f11");
         let width=(screen_width as f32*0.94) as i32;let height=(screen_height as f32*0.90) as i32;
         let window=XCreateSimpleWindow(display,root,(screen_width-width)/2,(screen_height-height)/2,width as u32,height as u32,0,bg,bg);
-        let title=CString::new("TC-IDE · Native Semantic Workspace").unwrap();
+        let title=CString::new("TC-IDE - Native Semantic Workspace").unwrap();
         XStoreName(display,window,title.as_ptr());
         XSelectInput(display,window,KEY_PRESS_MASK|BUTTON_PRESS_MASK|POINTER_MOTION_MASK|EXPOSURE_MASK|STRUCTURE_NOTIFY_MASK);
         let delete_name=CString::new("WM_DELETE_WINDOW").unwrap();
