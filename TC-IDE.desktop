@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=TC-IDE
+Comment=Native motion-first semantic IDE prototype
+Exec=/home/tianchuangya/桌面/TC-IDE/target/release/tc-ide
+Path=/home/tianchuangya/桌面/TC-IDE
+Terminal=false
+Categories=Development;IDE;
+StartupNotify=true

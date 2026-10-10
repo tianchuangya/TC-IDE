@@ -1,0 +1,13 @@
+[package]
+name = "tc-ide"
+version = "0.1.0"
+edition = "2021"
+description = "A native, motion-first IDE experiment inspired by Zed"
+license = "MIT"
+repository = "https://github.com/tianchuangya/TC-IDE"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
