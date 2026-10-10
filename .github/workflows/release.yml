@@ -20,7 +20,7 @@ jobs:
       - name: Install native X11 development libraries
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libx11-dev
+          sudo apt-get install --yes libx11-dev libcairo2-dev libpango1.0-dev
       - uses: dtolnay/rust-toolchain@stable
       - name: Test
         run: cargo test --all-targets
@@ -35,8 +35,7 @@ jobs:
           install -m 755 target/release/tc-ide "dist/${package_dir}/tc-ide"
           install -m 644 README.md LICENSE "dist/${package_dir}/"
           install -m 644 TC-IDE.desktop "dist/${package_dir}/"
-          mkdir -p "dist/${package_dir}/assets"
-          install -m 644 assets/tc-ide-icon.png "dist/${package_dir}/assets/"
+          cp -R assets "dist/${package_dir}/assets"
           tar -C dist -czf "dist/${package_dir}.tar.gz" "${package_dir}"
           sha256sum "dist/${package_dir}.tar.gz" > "dist/${package_dir}.tar.gz.sha256"
       - name: Create GitHub Release

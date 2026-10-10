@@ -7,7 +7,7 @@ TC-IDE 是一个 Rust 原生、低色彩噪声、强调空间关系与丝滑动�
 当前第一个可运行原型包含：
 
 - 原生 X11 窗口与 60 FPS 动画循环；
-- 根据显示器分辨率自动设置窗口尺寸与界面缩放，高分屏使用更大的原生字体；
+- 根据显示器分辨率自动设置窗口尺寸与界面缩放；文字由 Pango/Fontconfig 渲染，并随程序内置 JetBrains Mono；
 - 双缓冲场景绘制，减少持续动画时的闪烁；
 - 项目关系图的完整层级：`项目 → 文件 → Class → 函数`；
 - 鼠标经过节点时自动聚焦上下游关系，无需手动切换“函数/Class/路径”；只有指针落在函数名或类名上时才会触发，完整符号会先被边框框住，关系线再从边框右缘分支到语义节点；
@@ -16,7 +16,7 @@ TC-IDE 是一个 Rust 原生、低色彩噪声、强调空间关系与丝滑动�
 - 新文件会自动识别后缀；文件语言识别与外部工具扩展安装状态已解耦，未安装 LSP 时仍能正确区分 C 与 C++；
 - 编辑器按当前文件语言提供独立关键字补全，并从同语言项目文件中提取符号候选；关键字、字符串和数值已有原生语法高亮；
 - 注释语法按文件后缀区分（例如 C/C++ 的 `#include` 不会被当成注释）；注释气泡从注释锚点向右展开并在关系图边界前停止，支持多行、折叠/展开、`EDIT` 按钮和点击字符定位编辑，鼠标进入左侧项目树时自动隐藏；
-- 顶部 `Settings / 设置` 可在 English 与简体中文之间切换，选择会保存在用户配置目录；
+- 顶部 `Settings / 设置` 可在 English 与简体中文之间切换，也可选择编辑器字体和字号；选择会保存在用户配置目录；
 - `Extensions` 采用“类别 → 具体扩展 → 版本/配置”三级结构；当前提供 Languages，并为 Themes、Debuggers、Formatters 和 AI / Agents 预留独立入口；
 - 内置 C、Python、C++、Java、Rust、TypeScript/JavaScript、Go 等 30 个语言/格式入口，未知格式回退为 Plain Text；
 - 新建项目可编辑保存位置，环境可选 `None`；Python `venv` 会实际初始化，版本运行时元数据按版本缓存到 `~/.cache/tc-ide/runtimes/python/`以供新项目复用；
@@ -24,11 +24,17 @@ TC-IDE 是一个 Rust 原生、低色彩噪声、强调空间关系与丝滑动�
 - 切换/新建项目后会清空旧项目的语义关系图，避免把上一个项目的调用关系留在右侧；
 - 关系图支持滚轮缩放，Package 菜单支持 `.exe` / `.deb` / `.AppImage` / `.dmg` 多选；构建时代码被黑洞吸入、再由白洞吐出安装包，时间轴会自动结束；
 - 编辑区、项目树与语义图使用同一帧绘制；
-- 零网页运行时、零 CSS、零第三方 Rust 依赖。
+- 零网页运行时、零 CSS、零第三方 Rust crate；界面直接调用系统 X11、Cairo、Pango 与 Fontconfig。
 
 ## 运行
 
-Ubuntu/Debian 需要 X11 运行库：
+Ubuntu/Debian 首次编译需要原生图形库：
+
+```bash
+sudo apt install build-essential libx11-dev libcairo2-dev libpango1.0-dev
+```
+
+然后运行：
 
 ```bash
 cargo run --release
@@ -42,4 +48,4 @@ cargo run --release
 
 ## 路线
 
-此原型先验证 TC-IDE 的视觉语言与关系图交互。后续阶段会将窗口层替换/扩展为 Zed 的 GPUI 路线，加入 Tree-sitter、LSP、GPU 字形动画、项目索引器和多平台打包器。详见 [架构说明](docs/ARCHITECTURE.md)。
+此原型已验证 TC-IDE 的视觉语言和主要交互，但右侧语义图仍是演示数据，语言“下载”仍是界面状态，Python 缓存目前只记录运行时元数据，尚未实现完整的 LSP/编译器下载。后续阶段会加入真实项目索引、Tree-sitter、LSP、GPU 字形动画和多平台打包器。详见 [架构说明](docs/ARCHITECTURE.md)。
