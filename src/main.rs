@@ -3,10 +3,12 @@
 use std::ffi::{c_void, CString};
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Write;
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::ptr;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -171,6 +173,7 @@ extern "C" {
     fn XFillPolygon(display: *mut Display, drawable: Drawable, gc: Gc, points: *mut XPoint, count: c_int, shape: c_int, mode: c_int) -> c_int;
     fn XDrawArc(display: *mut Display, drawable: Drawable, gc: Gc, x: c_int, y: c_int, width: c_uint, height: c_uint, angle1: c_int, angle2: c_int) -> c_int;
     fn XDrawString(display: *mut Display, drawable: Drawable, gc: Gc, x: c_int, y: c_int, text: *const c_char, length: c_int) -> c_int;
+    fn XTextWidth(font: *mut XFontStruct, text: *const c_char, length: c_int) -> c_int;
     fn XLoadQueryFont(display: *mut Display, name: *const c_char) -> *mut XFontStruct;
     fn XSetFont(display: *mut Display, gc: Gc, font: c_ulong) -> c_int;
     fn XFreeFont(display: *mut Display, font: *mut XFontStruct) -> c_int;
@@ -196,6 +199,8 @@ const BUTTON_PRESS_MASK: c_long = 1 << 2;
 const POINTER_MOTION_MASK: c_long = 1 << 6;
 const EXPOSURE_MASK: c_long = 1 << 15;
 const STRUCTURE_NOTIFY_MASK: c_long = 1 << 17;
+const CONTROL_MASK: c_uint = 1 << 2;
+const BUTTON1_MASK: c_uint = 1 << 8;
 const ESCAPE_KEYSYM: c_ulong = 0xff1b;
 const BACKSPACE_KEYSYM: c_ulong = 0xff08;
 const RETURN_KEYSYM: c_ulong = 0xff0d;
@@ -223,7 +228,14 @@ struct Node {
 
 struct FileBuffer {
     name: String,
+    path: PathBuf,
     lines: Vec<String>,
+}
+
+struct TerminalSession {
+    name: String,
+    input: String,
+    output: Arc<Mutex<Vec<String>>>,
 }
 
 struct ParsedComment<'a> {
@@ -291,6 +303,8 @@ struct App {
     canvas: Pixmap,
     depth: c_int,
     font: *mut XFontStruct,
+    code_font: *mut XFontStruct,
+    code_font_base: i32,
     colors: Palette,
     width: i32,
     height: i32,
@@ -303,9 +317,24 @@ struct App {
     folders: Vec<String>,
     project_name: String,
     project_path: Option<PathBuf>,
+    project_location: String,
+    project_location_focused: bool,
+    create_caret: usize,
     editor_focused: bool,
     caret_line: usize,
     caret_column: usize,
+    selection_anchor: Option<(usize,usize)>,
+    selection_head: Option<(usize,usize)>,
+    clipboard: String,
+    code_zoom: i32,
+    edit_menu_open: bool,
+    workspace_search: String,
+    workspace_search_focused: bool,
+    terminal_open: bool,
+    terminal_focused: bool,
+    terminal_active: usize,
+    terminals: Vec<TerminalSession>,
+    graph_current: bool,
     graph_zoom: f32,
     package_open: bool,
     package_targets: [bool; 4],
@@ -337,6 +366,14 @@ impl App {
     }
 
     fn s(&self, value: i32) -> i32 { (value as f32 * self.scale()).round() as i32 }
+
+    fn code_line_step(&self)->i32{(self.s(28)+self.code_zoom*self.s(2)).max(self.s(20))}
+
+    fn code_text_width(&self,value:&str)->i32{let clean=value.replace('\0',"");let Ok(text)=CString::new(clean) else{return 0;};unsafe{XTextWidth(self.code_font,text.as_ptr(),text.as_bytes().len() as i32)}}
+
+    fn byte_index_at_code_x(&self,value:&str,pixels:i32)->usize{let mut best=0;for (index,_) in value.char_indices().chain(std::iter::once((value.len(),'\0'))){if self.code_text_width(&value[..index])<=pixels{best=index;}else{break;}}best}
+
+    unsafe fn reload_code_font(&mut self){let size=(self.code_font_base+self.code_zoom*2).clamp(12,40);let pattern=CString::new(format!("-misc-fixed-medium-r-normal--{size}-*-*-*-*-*-iso10646-1")).unwrap();let loaded=XLoadQueryFont(self.display,pattern.as_ptr());if !loaded.is_null(){if !self.code_font.is_null(){XFreeFont(self.display,self.code_font);}self.code_font=loaded;}}
 
     fn detected_language_for_file(&self,name:&str)->&'static str{self.language_pack_index_for_file(name).map(|index|self.languages[index].name).unwrap_or("Plain Text")}
 
@@ -396,6 +433,8 @@ impl App {
         XDrawString(self.display, self.canvas, self.gc, x, y, value.as_ptr(), value.as_bytes().len() as i32);
     }
 
+    unsafe fn highlighted_text(&self,x:i32,y:i32,value:&str,language:&str){let mut cursor=x;for (token,kind) in syntax_tokens(value,completion_words_for_language(language)){let color=match kind{1=>self.colors.accent,2=>self.colors.bright,3=>self.colors.project,_=>self.colors.text};self.text(color,cursor,y,&token);cursor+=self.code_text_width(&token);}}
+
     fn graph_bounds(&self) -> (i32, i32, i32, i32) {
         let left = (self.width as f32 * 0.61) as i32;
         (left, self.s(82), self.width-left, self.height-self.s(112))
@@ -422,6 +461,7 @@ impl App {
         self.draw_graph();
         if self.hovered_from_code { self.draw_code_relations(); }
         if self.new_menu_open { self.draw_new_menu(); }
+        if self.edit_menu_open { self.draw_edit_menu(); }
         if self.package_open { self.draw_package_menu(); }
         if self.extensions_open { self.draw_extensions(); }
         if self.create_kind.is_some() { self.draw_create_dialog(); }
@@ -435,11 +475,12 @@ impl App {
         let s=|v|self.s(v);let header=s(46);
         self.rect(self.colors.panel_2,0,0,self.width,header);
         self.line(self.colors.line,1,(0,header-1),(self.width,header-1));
-        self.rect(self.colors.bright,s(14),s(12),s(22),s(22));
-        self.text(self.colors.bg,s(20),s(29),"T");
+        self.rect(self.colors.bright,s(14),s(12),s(28),s(22));
+        self.text(self.colors.bg,s(17),s(29),"TCI");
         self.text(self.colors.text,s(46),s(29),"TC-IDE");
         self.outline(if self.new_menu_open{self.colors.accent}else{self.colors.line},s(112),s(10),s(88),s(27));
         self.text(self.colors.text,s(130),s(29),"New  v");
+        self.outline(if self.edit_menu_open{self.colors.accent}else{self.colors.line},s(207),s(10),s(88),s(27));self.text(self.colors.text,s(225),s(29),"Edit  v");
         let path=format!("{}  /  {}",self.project_name,self.files[self.selected_file].name);let path_x=self.width/2-path.chars().count() as i32*s(5);self.text(self.colors.muted,path_x.max(s(220)),s(29),&path);
         self.outline(if self.extensions_open{self.colors.accent}else{self.colors.line},self.width-s(275),s(10),s(126),s(27));
         self.text(self.colors.text,self.width-s(260),s(29),"Extensions");
@@ -454,12 +495,15 @@ impl App {
         self.line(self.colors.line,1,(width,s(46)),(width,self.height-s(24)));
         self.text(self.colors.muted,s(14),s(71),"PROJECT");
         self.text(self.colors.bright,s(15),s(101),&format!("v  {}",self.project_name));
-        let mut row_y=134;for folder in &self.folders{self.text(self.colors.text,s(16),s(row_y),&format!("  v  {folder}"));row_y+=28;}
-        for (index,file) in self.files.iter().enumerate(){let y=row_y+index as i32*29;if s(y)>self.height-s(65){break;}if index==self.selected_file{self.rect(self.colors.panel_2,s(7),s(y-21),width-s(14),s(27));}let color=if index==self.selected_file{self.colors.bright}else{self.colors.muted};self.text(color,s(16),s(y),&format!("       {}",file.name));
+        self.rect(self.colors.bg,s(10),s(112),width-s(20),s(32));self.outline(if self.workspace_search_focused{self.colors.accent}else{self.colors.line},s(10),s(112),width-s(20),s(32));self.text(self.colors.muted,s(22),s(134),if self.workspace_search.is_empty(){"Search files"}else{&self.workspace_search});
+        let mut row_y=176;for folder in &self.folders{self.text(self.colors.text,s(16),s(row_y),&format!("  v  {folder}"));row_y+=28;}
+        let needle=self.workspace_search.to_ascii_lowercase();for (index,file) in self.files.iter().enumerate().filter(|(_,file)|needle.is_empty()||file.name.to_ascii_lowercase().contains(&needle)){let y=row_y+index as i32*29;if s(y)>self.height-s(65){break;}if index==self.selected_file{self.rect(self.colors.panel_2,s(7),s(y-21),width-s(14),s(27));}let color=if index==self.selected_file{self.colors.bright}else{self.colors.muted};self.text(color,s(16),s(y),&format!("       {}",file.name));
         }
     }
 
     unsafe fn draw_new_menu(&self){let s=|v|self.s(v);let x=s(112);let y=s(43);let w=s(220);let h=s(126);self.rect(self.colors.panel_2,x,y,w,h);self.outline(self.colors.line,x,y,w,h);self.text(self.colors.muted,x+s(15),y+s(23),"CREATE");for (index,label) in ["New Project","New File","New Folder"].iter().enumerate(){let row=y+s(50+index as i32*30);self.text(self.colors.text,x+s(18),row,label);self.text(self.colors.muted,x+w-s(28),row,"+");}}
+
+    unsafe fn draw_edit_menu(&self){let s=|v|self.s(v);let x=s(207);let y=s(43);let w=s(260);let h=s(190);self.rect(self.colors.panel_2,x,y,w,h);self.outline(self.colors.line,x,y,w,h);for (index,(label,key)) in [("Save","Ctrl+S"),("Select All","Ctrl+A"),("Copy","Ctrl+C"),("Paste","Ctrl+V"),("Larger Code","Ctrl++"),("Smaller Code","Ctrl+-")].iter().enumerate(){let row=y+s(30+index as i32*27);self.text(self.colors.text,x+s(16),row,label);self.text(self.colors.muted,x+w-s(80),row,key);}}
 
     unsafe fn draw_editor(&self) {
         let s=|v|self.s(v);
@@ -471,21 +515,25 @@ impl App {
         self.text(self.colors.bright,left+s(18),s(71),&self.files[self.selected_file].name);
         let language=self.language_for_file(&self.files[self.selected_file].name);
         self.text(self.colors.muted,right-s(150),s(71),&language);
-        let base_y=s(119);let step=s(28);
+        XSetFont(self.display,self.gc,(*self.code_font).fid);
+        let detected=self.detected_language_for_file(&self.files[self.selected_file].name);
+        let base_y=s(119);let step=self.code_line_step();
         let show_bubbles=!(self.mouse_x>=0&&self.mouse_x<left);
         for (index,line) in self.files[self.selected_file].lines.iter().enumerate() {
             let y=base_y+index as i32*step;if y>self.height-s(65){break;}
             self.text(self.colors.line,left+s(15),y,&(index+1).to_string());
             let color=if line.contains("fn "){self.colors.accent}else if line.contains("struct ")||line.starts_with("impl"){self.colors.bright}else{self.colors.text};
-            if let Some(comment)=self.comment_parts(line){self.text(color,left+s(52),y,comment.code);let raw_anchor=left+s(62)+(comment.code.chars().count() as i32*s(10));let bubble_x=if comment.code.trim().is_empty(){left+s(350)}else{raw_anchor};if show_bubbles{let expanded=self.expanded_comments.contains(&(self.selected_file,index));let editing=self.editor_focused&&self.caret_line==index&&self.caret_column>=comment.content_column;self.comment_bubble(bubble_x,y,comment.text,expanded,editing,left+s(18));}else{self.text(self.colors.accent,raw_anchor,y,"[comment]");}}else{self.text(color,left+s(52),y,line);}
+            if let (Some(a),Some(b))=(self.selection_anchor,self.selection_head){let (start,end)=if a<=b{(a,b)}else{(b,a)};if index>=start.0&&index<=end.0{let from=if index==start.0{start.1}else{0};let to=if index==end.0{end.1}else{line.len()};let sx=left+s(52)+self.code_text_width(&line[..from]);let sw=self.code_text_width(&line[from..to]).max(s(4));self.rect(self.colors.project,sx,y-s(20),sw,s(25));}}
+            if let Some(comment)=self.comment_parts(line){self.highlighted_text(left+s(52),y,comment.code,detected);let raw_anchor=left+s(62)+self.code_text_width(comment.code);let bubble_x=if comment.code.trim().is_empty(){left+s(350)}else{raw_anchor};if show_bubbles{let expanded=self.expanded_comments.contains(&(self.selected_file,index));let editing=self.editor_focused&&self.caret_line==index&&self.caret_column>=comment.content_column;self.comment_bubble(bubble_x,y,comment.text,expanded,editing,left+s(18));}else{self.text(self.colors.accent,raw_anchor,y,"[comment]");}}else{let _=color;self.highlighted_text(left+s(52),y,line,detected);}
             if self.editor_focused&&index==self.caret_line&&(self.started.elapsed().as_millis()/500)%2==0 {
-                let char_width=s(10);let visual_column=self.files[self.selected_file].lines[index][..self.caret_column].chars().count() as i32;let caret_x=left+s(52)+visual_column*char_width;
+                let caret_x=left+s(52)+self.code_text_width(&self.files[self.selected_file].lines[index][..self.caret_column]);
                 self.line(self.colors.bright,1,(caret_x,y-s(18)),(caret_x,y+s(4)));
             }
         }
+        XSetFont(self.display,self.gc,(*self.font).fid);
         let hint=if self.editor_focused{"EDITOR ACTIVE - type, Backspace, Enter, arrows"}else{"Click editor to type - hover symbols to trace"};
         self.text(self.colors.muted,left+s(20),self.height-s(50),hint);
-        if self.editor_focused {let completions=self.completions();if !completions.is_empty(){let popup_x=left+s(52)+self.caret_column as i32*s(10);let popup_y=(base_y+(self.caret_line as i32+1)*step).min(self.height-s(180));let popup_w=s(210);let popup_h=s(30)*completions.len() as i32+self.s(10);self.rect(self.colors.panel_2,popup_x,popup_y,popup_w,popup_h);self.outline(self.colors.line,popup_x,popup_y,popup_w,popup_h);for (index,item) in completions.iter().enumerate(){if index==0{self.rect(self.colors.project,popup_x+s(3),popup_y+s(3),popup_w-s(6),s(27));}self.text(if index==0{self.colors.bright}else{self.colors.text},popup_x+s(12),popup_y+s(23)+index as i32*s(30),item);}self.text(self.colors.muted,popup_x+popup_w-s(44),popup_y+s(23),"TAB");}}
+        if self.editor_focused {let completions=self.completions();if !completions.is_empty(){let popup_x=left+s(52)+self.code_text_width(&self.files[self.selected_file].lines[self.caret_line][..self.caret_column]);let popup_y=(base_y+(self.caret_line as i32+1)*step).min(self.height-s(180));let popup_w=s(210);let popup_h=s(30)*completions.len() as i32+self.s(10);self.rect(self.colors.panel_2,popup_x,popup_y,popup_w,popup_h);self.outline(self.colors.line,popup_x,popup_y,popup_w,popup_h);for (index,item) in completions.iter().enumerate(){if index==0{self.rect(self.colors.project,popup_x+s(3),popup_y+s(3),popup_w-s(6),s(27));}self.text(if index==0{self.colors.bright}else{self.colors.text},popup_x+s(12),popup_y+s(23)+index as i32*s(30),item);}self.text(self.colors.muted,popup_x+popup_w-s(44),popup_y+s(23),"TAB");}}
     }
 
     unsafe fn draw_graph(&self) {
@@ -495,6 +543,7 @@ impl App {
         self.line(self.colors.line,1,(x,s(46)),(x,self.height-s(24)));
         self.line(self.colors.line,1,(x,s(84)),(self.width,s(84)));
         self.text(self.colors.text,x+s(14),s(71),"Semantic Project Graph");
+        if !self.graph_current{let cx=x+w/2;let cy=y+h/2;self.circle(self.colors.project,self.colors.accent,cx,cy,s(15));self.text(self.colors.bright,cx+s(24),cy-s(2),&self.project_name);self.text(self.colors.muted,cx+s(24),cy+s(18),"new project - semantic index is empty");self.text(self.colors.muted,x+s(14),y+h-s(10),"Graph cleared when the active project changed");return;}
         let mode = self.hovered.map(|i| match NODES[i].level { Level::Project=>"PROJECT",Level::File=>"FILE",Level::Class=>"CLASS",Level::Function=>"FUNCTION" }).unwrap_or("AUTO");
         self.text(self.colors.muted,self.width-s(112),s(71),mode);
 
@@ -522,14 +571,11 @@ impl App {
         self.text(self.colors.muted,x+s(14),y+h-s(10),"wheel: zoom - project -> file -> class -> function / call");
     }
 
-    unsafe fn draw_code_relations(&self){let Some(active)=self.hovered else{return;};let s=|v|self.s(v);let editor_right=(self.width as f32*0.61) as i32;let start=(self.mouse_x.max((self.width as f32*0.17) as i32+s(50)),self.mouse_y);let junction=(editor_right-s(18),start.1);self.circle(self.colors.panel_2,self.colors.bright,start.0,start.1,s(4));self.line(self.colors.accent,2,start,junction);let mut targets=vec![active];for &(from,to) in EDGES{if from==active&&!targets.contains(&to){targets.push(to);}}for target in targets{let end=self.node_position(&NODES[target]);let bend=(editor_right+s(18),end.1);self.line(self.colors.accent,2,junction,bend);self.line(self.colors.accent,2,bend,(end.0-s(8),end.1));let mut arrow=[XPoint{x:end.0 as i16,y:end.1 as i16},XPoint{x:(end.0-s(10)) as i16,y:(end.1-s(5)) as i16},XPoint{x:(end.0-s(10)) as i16,y:(end.1+s(5)) as i16}];self.set_color(self.colors.accent);XFillPolygon(self.display,self.canvas,self.gc,arrow.as_mut_ptr(),3,0,0);}let travel=((self.started.elapsed().as_secs_f32()*1.8)%1.0).clamp(0.0,1.0);let pulse_x=start.0+((junction.0-start.0) as f32*travel) as i32;self.circle(self.colors.bright,self.colors.accent,pulse_x,start.1,s(3));}
+    unsafe fn draw_code_relations(&self){if !self.graph_current{return;}let Some(active)=self.hovered else{return;};let s=|v|self.s(v);let editor_right=(self.width as f32*0.61) as i32;let start=(self.mouse_x.max((self.width as f32*0.17) as i32+s(50)),self.mouse_y);let junction=(editor_right-s(18),start.1);self.circle(self.colors.panel_2,self.colors.bright,start.0,start.1,s(4));self.line(self.colors.accent,2,start,junction);let mut targets=vec![active];for &(from,to) in EDGES{if from==active&&!targets.contains(&to){targets.push(to);}}for target in targets{let end=self.node_position(&NODES[target]);let bend=(editor_right+s(18),end.1);self.line(self.colors.accent,2,junction,bend);self.line(self.colors.accent,2,bend,(end.0-s(8),end.1));let mut arrow=[XPoint{x:end.0 as i16,y:end.1 as i16},XPoint{x:(end.0-s(10)) as i16,y:(end.1-s(5)) as i16},XPoint{x:(end.0-s(10)) as i16,y:(end.1+s(5)) as i16}];self.set_color(self.colors.accent);XFillPolygon(self.display,self.canvas,self.gc,arrow.as_mut_ptr(),3,0,0);}let travel=((self.started.elapsed().as_secs_f32()*1.8)%1.0).clamp(0.0,1.0);let pulse_x=start.0+((junction.0-start.0) as f32*travel) as i32;self.circle(self.colors.bright,self.colors.accent,pulse_x,start.1,s(3));}
 
     unsafe fn draw_status(&self) {
-        let s=|v|self.s(v);self.rect(self.colors.panel_2,0,self.height-s(24),self.width,s(24));
-        self.line(self.colors.line,1,(0,self.height-s(24)),(self.width,self.height-s(24)));
-        self.text(self.colors.muted,s(12),self.height-s(7),"TC-IDE native prototype");
-        let status=self.hovered.map(|i| format!("Focused: {} - {}",NODES[i].label,NODES[i].detail)).unwrap_or_else(||self.status_message.clone());
-        self.text(self.colors.text,self.width/2-s(100),self.height-s(7),&status);
+        let s=|v|self.s(v);let panel_h=if self.terminal_open{s(230)}else{s(28)};let top=self.height-panel_h;self.rect(self.colors.panel_2,0,top,self.width,panel_h);self.line(self.colors.line,1,(0,top),(self.width,top));self.text(self.colors.bright,s(14),top+s(20),if self.terminal_open{"v  TERMINAL"}else{">  TERMINAL"});self.text(self.colors.muted,s(130),top+s(20),self.project_path.as_ref().map(|path|path.to_string_lossy()).as_deref().unwrap_or("No active project"));
+        if self.terminal_open{let mut tab_x=self.width-s(520);for (index,terminal) in self.terminals.iter().enumerate(){let width=s(130);if index==self.terminal_active{self.rect(self.colors.project,tab_x,top+s(4),width,s(25));}self.text(if index==self.terminal_active{self.colors.bright}else{self.colors.muted},tab_x+s(10),top+s(21),&terminal.name);tab_x+=width+s(4);}self.outline(self.colors.line,tab_x,top+s(4),s(28),s(25));self.text(self.colors.text,tab_x+s(9),top+s(21),"+");let terminal=&self.terminals[self.terminal_active.min(self.terminals.len()-1)];if let Ok(lines)=terminal.output.lock(){let visible=lines.iter().rev().take(6).collect::<Vec<_>>();for (offset,line) in visible.iter().rev().enumerate(){self.text(self.colors.text,s(24),top+s(55+offset as i32*24),line);}}self.text(self.colors.accent,s(24),self.height-s(18),"$");self.text(self.colors.bright,s(44),self.height-s(18),&terminal.input);if self.terminal_focused&&(self.started.elapsed().as_millis()/500)%2==0{let x=s(44)+terminal.input.chars().count() as i32*s(10);self.line(self.colors.bright,1,(x,self.height-s(36)),(x,self.height-s(12)));}}
     }
 
     unsafe fn draw_package_menu(&self) {
@@ -551,13 +597,13 @@ impl App {
     }
 
     unsafe fn draw_create_dialog(&self) {
-        let s=|v|self.s(v);let project=self.create_kind==Some(CreateKind::Project);let w=s(if project{680}else{520});let h=s(if project{390}else{176});let x=(self.width-w)/2;let y=(self.height-h)/2;
+        let s=|v|self.s(v);let project=self.create_kind==Some(CreateKind::Project);let w=s(if project{680}else{520});let h=s(if project{450}else{176});let x=(self.width-w)/2;let y=(self.height-h)/2;
         self.rect(self.colors.panel_2,x,y,w,h);self.outline(self.colors.accent,x,y,w,h);
         let title=match self.create_kind.unwrap(){CreateKind::Project=>"CREATE NEW PROJECT",CreateKind::Folder=>"CREATE NEW FOLDER",CreateKind::File=>"CREATE NEW FILE"};self.text(self.colors.bright,x+s(22),y+s(36),title);
         self.text(self.colors.muted,x+s(22),y+s(66),if project{"Choose a language and isolated environment"}else if self.create_kind==Some(CreateKind::File){"Extension automatically selects its language pack"}else{"Folder will be created inside the active project"});
         self.rect(self.colors.bg,x+s(22),y+s(82),w-s(44),s(40));self.outline(self.colors.line,x+s(22),y+s(82),w-s(44),s(40));
-        let placeholder=if project{"project-name"}else if self.create_kind==Some(CreateKind::File){"filename.ext"}else{"folder-name"};self.text(self.colors.text,x+s(35),y+s(109),if self.new_file_name.is_empty(){placeholder}else{&self.new_file_name});
-        if project {let pack=&self.languages[self.project_language];let envs=project_environments(pack.name);self.text(self.colors.muted,x+s(22),y+s(157),"LANGUAGE");self.rect(self.colors.bg,x+s(22),y+s(171),s(300),s(40));self.outline(if self.project_language_menu{self.colors.accent}else{self.colors.line},x+s(22),y+s(171),s(300),s(40));self.text(self.colors.text,x+s(36),y+s(198),pack.name);self.text(self.colors.muted,x+s(294),y+s(198),"v");self.text(self.colors.muted,x+s(350),y+s(157),"ENVIRONMENT / TOOLCHAIN");self.rect(self.colors.bg,x+s(350),y+s(171),s(308),s(40));self.outline(if self.project_environment_menu{self.colors.accent}else{self.colors.line},x+s(350),y+s(171),s(308),s(40));self.text(self.colors.text,x+s(364),y+s(198),envs[self.project_environment.min(envs.len()-1)]);self.text(self.colors.muted,x+s(630),y+s(198),"v");self.text(self.colors.muted,x+s(22),y+s(250),&format!("Location: ~/TC-IDE-Projects/{}",if self.new_file_name.is_empty(){"project-name"}else{&self.new_file_name}));self.text(self.colors.text,x+s(22),y+s(286),"Python venv creates a real .venv; other choices store their toolchain preset.");if self.project_language_menu{self.rect(self.colors.panel,x+s(22),y+s(214),s(300),s(34)*8);for (visible,index) in self.languages.iter().enumerate().take(8){self.text(if visible==self.project_language{self.colors.accent}else{self.colors.text},x+s(36),y+s(238+visible as i32*34),index.name);}}if self.project_environment_menu{self.rect(self.colors.panel,x+s(350),y+s(214),s(308),s(34)*envs.len() as i32);for (index,env) in envs.iter().enumerate(){self.text(if index==self.project_environment{self.colors.accent}else{self.colors.text},x+s(364),y+s(238+index as i32*34),env);}}}
+        let placeholder=if project{"project-name"}else if self.create_kind==Some(CreateKind::File){"filename.ext"}else{"folder-name"};self.text(self.colors.text,x+s(35),y+s(109),if self.new_file_name.is_empty(){placeholder}else{&self.new_file_name});if !self.project_location_focused&&(self.started.elapsed().as_millis()/500)%2==0{let chars=self.new_file_name[..self.create_caret.min(self.new_file_name.len())].chars().count() as i32;let caret=x+s(35)+chars*s(10);self.line(self.colors.bright,1,(caret,y+s(91)),(caret,y+s(114)));}
+        if project {let pack=&self.languages[self.project_language];let envs=project_environments(pack.name);self.text(self.colors.muted,x+s(22),y+s(157),"PROGRAMMING LANGUAGE");self.rect(self.colors.bg,x+s(22),y+s(171),s(300),s(40));self.outline(if self.project_language_menu{self.colors.accent}else{self.colors.line},x+s(22),y+s(171),s(300),s(40));self.text(self.colors.text,x+s(36),y+s(198),&format!("{}  {}",pack.name,pack.versions[pack.selected_version]));self.text(self.colors.muted,x+s(294),y+s(198),"v");self.text(self.colors.muted,x+s(350),y+s(157),"ENVIRONMENT / TOOLCHAIN");self.rect(self.colors.bg,x+s(350),y+s(171),s(308),s(40));self.outline(if self.project_environment_menu{self.colors.accent}else{self.colors.line},x+s(350),y+s(171),s(308),s(40));self.text(self.colors.text,x+s(364),y+s(198),envs[self.project_environment.min(envs.len()-1)]);self.text(self.colors.muted,x+s(630),y+s(198),"v");self.text(self.colors.muted,x+s(22),y+s(247),"PROJECT LOCATION");self.rect(self.colors.bg,x+s(22),y+s(260),s(636),s(40));self.outline(if self.project_location_focused{self.colors.accent}else{self.colors.line},x+s(22),y+s(260),s(636),s(40));self.text(self.colors.text,x+s(36),y+s(287),&self.project_location);if self.project_location_focused&&(self.started.elapsed().as_millis()/500)%2==0{let caret=x+s(36)+self.project_location.chars().count() as i32*s(10);self.line(self.colors.bright,1,(caret,y+s(268)),(caret,y+s(292)));}self.text(self.colors.text,x+s(22),y+s(333),"None skips environments. Python runtimes are cached by version and reused.");self.text(self.colors.muted,x+s(22),y+s(362),&format!("Final path: {}/{}",self.project_location.trim_end_matches('/'),if self.new_file_name.is_empty(){"project-name"}else{&self.new_file_name}));if self.project_language_menu{self.rect(self.colors.panel,x+s(22),y+s(214),s(300),s(34)*8);for (visible,index) in self.languages.iter().enumerate().take(8){self.text(if visible==self.project_language{self.colors.accent}else{self.colors.text},x+s(36),y+s(238+visible as i32*34),index.name);}}if self.project_environment_menu{self.rect(self.colors.panel,x+s(350),y+s(214),s(308),s(34)*envs.len() as i32);for (index,env) in envs.iter().enumerate(){self.text(if index==self.project_environment{self.colors.accent}else{self.colors.text},x+s(364),y+s(238+index as i32*34),env);}}}
         self.text(self.colors.muted,x+s(22),y+h-s(18),"Enter: create   Esc: cancel");
     }
 
@@ -577,21 +623,40 @@ impl App {
 
     fn active_root(&mut self)->PathBuf {if let Some(path)=&self.project_path{return path.clone();}let base=projects_root().join("TC-IDE-Scratch");let _=fs::create_dir_all(&base);self.project_path=Some(base.clone());base}
 
-    fn create_requested_item(&mut self){let name=self.new_file_name.trim().to_string();if name.is_empty()||name.contains('/')||name.contains('\\')||name=="."||name==".."{self.status_message="Use a safe non-empty name".into();return;}match self.create_kind.unwrap(){CreateKind::File=>{if self.files.iter().any(|file|file.name==name){self.status_message="A file with that name already exists".into();return;}let root=self.active_root();let _=fs::create_dir_all(&root);let _=fs::write(root.join(&name),"");let pack_index=self.language_pack_index_for_file(&name);self.files.push(FileBuffer{name:name.clone(),lines:vec![String::new()]});self.selected_file=self.files.len()-1;self.caret_line=0;self.caret_column=0;self.editor_focused=true;if let Some(index)=pack_index{let language=self.languages[index].name;if self.languages[index].installed{self.status_message=format!("Created {name} - selected {language} {}",self.languages[index].versions[self.languages[index].selected_version]);}else{self.downloading=Some((index,Instant::now()));self.status_message=format!("Detected {language} - downloading selected language pack...");}}else{self.status_message=format!("Created {name} - Plain Text fallback");}},CreateKind::Folder=>{if !self.folders.contains(&name){let root=self.active_root();match fs::create_dir_all(root.join(&name)){Ok(_)=>{self.folders.push(name.clone());self.status_message=format!("Created folder {name}");},Err(error)=>self.status_message=format!("Could not create folder: {error}")}}},CreateKind::Project=>self.create_project(&name)}self.create_kind=None;self.project_language_menu=false;self.project_environment_menu=false;}
+    fn save_current_file(&mut self){if self.project_path.is_none(){self.status_message="Create or open a project before saving the demo buffer".into();return;}let file=&self.files[self.selected_file];let content=file.lines.join("\n");match fs::write(&file.path,content){Ok(_)=>self.status_message=format!("Saved {}",file.path.display()),Err(error)=>self.status_message=format!("Save failed: {error}")}}
 
-    fn create_project(&mut self,name:&str){let root=projects_root().join(name);if root.exists(){self.status_message=format!("Project {name} already exists; choose another name");return;}if let Err(error)=fs::create_dir_all(&root){self.status_message=format!("Could not create project: {error}");return;}let language=self.languages[self.project_language].name;let envs=project_environments(language);let environment=envs[self.project_environment.min(envs.len()-1)];let version=self.languages[self.project_language].versions[self.languages[self.project_language].selected_version];let manifest=format!("name={name}\nlanguage={language}\nversion={version}\nenvironment={environment}\n");let _=fs::write(root.join(".tc-ide-project"),manifest);let (file_name,content,folders):(String,String,Vec<String>)=if language=="Python"{if environment=="venv"{let _=Command::new("python3").args(["-m","venv",".venv"]).current_dir(&root).spawn();}("main.py".into(),format!("# {name} - {environment}\n\nprint(\"Hello from TC-IDE\")\n"),vec![".venv".to_string()])}else if language=="Rust"{let src=root.join("src");let _=fs::create_dir_all(&src);let _=fs::write(root.join("Cargo.toml"),format!("[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",name.to_ascii_lowercase().replace(' ',"-")));let content="fn main() {\n    println!(\"Hello from TC-IDE\");\n}\n".to_string();let _=fs::write(src.join("main.rs"),&content);("main.rs".into(),content,vec!["src".to_string()])}else{let extension=self.languages[self.project_language].extensions.first().copied().unwrap_or("txt");let file=if language=="Java"{"Main.java".to_string()}else{format!("main.{extension}")};let content=format!("// {name} - {language} {version} - {environment}\n");let _=fs::write(root.join(&file),&content);(file,content,Vec::new())};if language=="Python"{let _=fs::write(root.join(&file_name),&content);}self.project_name=name.to_string();self.project_path=Some(root.clone());self.folders=folders;self.files=vec![FileBuffer{name:file_name,lines:content.lines().map(str::to_string).chain(std::iter::once(String::new())).collect()}];self.selected_file=0;self.caret_line=0;self.caret_column=0;self.status_message=format!("Project {name} created with {language} {version} / {environment}");}
+    fn reset_terminals_for_project(&mut self){self.terminals=default_terminals();self.terminal_active=0;self.terminal_focused=false;}
 
-    fn handle_click(&mut self,x:i32,y:i32,button:u32){
+    fn run_terminal_command(&mut self){if self.terminals.is_empty(){return;}let active=self.terminal_active.min(self.terminals.len()-1);let command=self.terminals[active].input.trim().to_string();if command.is_empty(){return;}self.terminals[active].input.clear();let output=self.terminals[active].output.clone();if let Ok(mut lines)=output.lock(){lines.push(format!("$ {command}"));}let cwd=self.project_path.clone().unwrap_or_else(projects_root);thread::spawn(move||{let result=Command::new("sh").args(["-lc",&command]).current_dir(&cwd).output();if let Ok(mut lines)=output.lock(){match result{Ok(result)=>{let text=format!("{}{}",String::from_utf8_lossy(&result.stdout),String::from_utf8_lossy(&result.stderr));lines.extend(text.lines().map(str::to_string));if text.is_empty(){lines.push(format!("process exited with {}",result.status));}},Err(error)=>lines.push(format!("terminal error: {error}"))}if lines.len()>200{let drain=lines.len()-200;lines.drain(0..drain);}}});}
+
+    fn selected_text(&self)->String{let (Some(a),Some(b))=(self.selection_anchor,self.selection_head)else{return String::new();};let (start,end)=if a<=b{(a,b)}else{(b,a)};if start.0==end.0{return self.files[self.selected_file].lines[start.0][start.1..end.1].to_string();}let mut parts=Vec::new();parts.push(self.files[self.selected_file].lines[start.0][start.1..].to_string());for line in start.0+1..end.0{parts.push(self.files[self.selected_file].lines[line].clone());}parts.push(self.files[self.selected_file].lines[end.0][..end.1].to_string());parts.join("\n")}
+
+    fn delete_selection(&mut self)->bool{let (Some(a),Some(b))=(self.selection_anchor,self.selection_head)else{return false;};if a==b{return false;}let (start,end)=if a<=b{(a,b)}else{(b,a)};let tail=self.files[self.selected_file].lines[end.0][end.1..].to_string();self.files[self.selected_file].lines[start.0].truncate(start.1);self.files[self.selected_file].lines[start.0].push_str(&tail);if end.0>start.0{self.files[self.selected_file].lines.drain(start.0+1..=end.0);}self.caret_line=start.0;self.caret_column=start.1;self.selection_anchor=None;self.selection_head=None;true}
+
+    fn insert_clipboard(&mut self){if self.clipboard.is_empty(){return;}self.delete_selection();let parts=self.clipboard.split('\n').map(str::to_string).collect::<Vec<_>>();if parts.len()==1{self.files[self.selected_file].lines[self.caret_line].insert_str(self.caret_column,&parts[0]);self.caret_column+=parts[0].len();}else{let tail=self.files[self.selected_file].lines[self.caret_line].split_off(self.caret_column);self.files[self.selected_file].lines[self.caret_line].push_str(&parts[0]);for (offset,part) in parts.iter().enumerate().skip(1){self.files[self.selected_file].lines.insert(self.caret_line+offset,part.clone());}self.caret_line+=parts.len()-1;self.caret_column=parts.last().map(|part|part.len()).unwrap_or(0);self.files[self.selected_file].lines[self.caret_line].push_str(&tail);}}
+
+    fn copy_selection(&mut self){self.clipboard=self.selected_text();if self.clipboard.is_empty(){return;}if let Ok(mut child)=Command::new("xsel").args(["--clipboard","--input"]).stdin(Stdio::piped()).spawn(){if let Some(stdin)=child.stdin.as_mut(){let _=stdin.write_all(self.clipboard.as_bytes());}}}
+
+    fn paste_clipboard(&mut self){if let Ok(output)=Command::new("xsel").args(["--clipboard","--output"]).output(){if output.status.success()&&!output.stdout.is_empty(){self.clipboard=String::from_utf8_lossy(&output.stdout).into_owned();}}self.insert_clipboard();}
+
+    fn create_requested_item(&mut self){let name=self.new_file_name.trim().to_string();if name.is_empty()||name.contains('/')||name.contains('\\')||name=="."||name==".."{self.status_message="Use a safe non-empty name".into();return;}match self.create_kind.unwrap(){CreateKind::File=>{if self.files.iter().any(|file|file.name==name){self.status_message="A file with that name already exists".into();return;}let root=self.active_root();let _=fs::create_dir_all(&root);let path=root.join(&name);let _=fs::write(&path,"");let pack_index=self.language_pack_index_for_file(&name);self.files.push(FileBuffer{name:name.clone(),path,lines:vec![String::new()]});self.selected_file=self.files.len()-1;self.caret_line=0;self.caret_column=0;self.editor_focused=true;if let Some(index)=pack_index{let language=self.languages[index].name;if self.languages[index].installed{self.status_message=format!("Created {name} - selected {language} {}",self.languages[index].versions[self.languages[index].selected_version]);}else{self.status_message=format!("Detected {language}; built-in completion active, tooling extension optional");}}else{self.status_message=format!("Created {name} - Plain Text fallback");}},CreateKind::Folder=>{if !self.folders.contains(&name){let root=self.active_root();match fs::create_dir_all(root.join(&name)){Ok(_)=>{self.folders.push(name.clone());self.status_message=format!("Created folder {name}");},Err(error)=>self.status_message=format!("Could not create folder: {error}")}}},CreateKind::Project=>self.create_project(&name)}self.create_kind=None;self.project_language_menu=false;self.project_environment_menu=false;}
+
+    fn create_project(&mut self,name:&str){let root=expand_home(&self.project_location).join(name);if root.exists(){self.status_message=format!("Project {name} already exists; choose another name");return;}if let Err(error)=fs::create_dir_all(&root){self.status_message=format!("Could not create project: {error}");return;}let language=self.languages[self.project_language].name;let envs=project_environments(language);let environment=envs[self.project_environment.min(envs.len()-1)];let version=self.languages[self.project_language].versions[self.languages[self.project_language].selected_version];let cache=if language=="Python"{Some(ensure_python_runtime_cache(version))}else{None};let manifest=format!("name={name}\nlanguage={language}\nversion={version}\nenvironment={environment}\nruntime_cache={}\n",cache.as_ref().map(|path|path.display().to_string()).unwrap_or_default());let _=fs::write(root.join(".tc-ide-project"),manifest);let (file_name,file_path,content,folders):(String,PathBuf,String,Vec<String>)=if language=="Python"{if environment=="venv"{let interpreter=python_interpreter(version);let _=Command::new(interpreter).args(["-m","venv",".venv"]).current_dir(&root).spawn();}let file="main.py".to_string();let path=root.join(&file);(file,path,format!("# {name} - Python {version} - {environment}\n\nprint(\"Hello from TC-IDE\")\n"),if environment=="venv"{vec![".venv".to_string()]}else{Vec::new()})}else if language=="Rust"{let src=root.join("src");let _=fs::create_dir_all(&src);let _=fs::write(root.join("Cargo.toml"),format!("[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",name.to_ascii_lowercase().replace(' ',"-")));let content="fn main() {\n    println!(\"Hello from TC-IDE\");\n}\n".to_string();("main.rs".into(),src.join("main.rs"),content,vec!["src".to_string()])}else{let extension=self.languages[self.project_language].extensions.first().copied().unwrap_or("txt");let file=if language=="Java"{"Main.java".to_string()}else{format!("main.{extension}")};let content=format!("// {name} - {language} {version} - {environment}\n");let path=root.join(&file);(file,path,content,Vec::new())};let _=fs::write(&file_path,&content);self.project_name=name.to_string();self.project_path=Some(root.clone());self.folders=folders;self.files=vec![FileBuffer{name:file_name,path:file_path,lines:content.lines().map(str::to_string).chain(std::iter::once(String::new())).collect()}];self.selected_file=0;self.caret_line=0;self.caret_column=0;self.graph_current=false;self.reset_terminals_for_project();self.status_message=format!("Project {name} created at {} with {language} {version} / {environment}",root.display());}
+
+    fn handle_click(&mut self,x:i32,y:i32,button:u32,state:c_uint){
         let scale=self.scale();let s=move|v:i32|(v as f32*scale).round() as i32;
         let graph_left=(self.width as f32*0.61) as i32;
-        if let Some(kind)=self.create_kind {if kind==CreateKind::Project {let w=s(680);let h=s(390);let dx=(self.width-w)/2;let dy=(self.height-h)/2;if self.project_language_menu {for visible in 0..8.min(self.languages.len()){let row=dy+s(238+visible as i32*34);if (y-row).abs()<s(16){self.project_language=visible;self.project_environment=0;self.project_language_menu=false;return;}}}if self.project_environment_menu {let envs=project_environments(self.languages[self.project_language].name);for index in 0..envs.len(){let row=dy+s(238+index as i32*34);if (y-row).abs()<s(16){self.project_environment=index;self.project_environment_menu=false;return;}}}if x>=dx+s(22)&&x<=dx+s(322)&&y>=dy+s(171)&&y<=dy+s(211){self.project_language_menu=!self.project_language_menu;self.project_environment_menu=false;return;}if x>=dx+s(350)&&x<=dx+s(658)&&y>=dy+s(171)&&y<=dy+s(211){self.project_environment_menu=!self.project_environment_menu;self.project_language_menu=false;return;}}return;}
+        if let Some(kind)=self.create_kind {let project=kind==CreateKind::Project;let w=s(if project{680}else{520});let h=s(if project{450}else{176});let dx=(self.width-w)/2;let dy=(self.height-h)/2;if x>=dx+s(22)&&x<=dx+w-s(22)&&y>=dy+s(82)&&y<=dy+s(122){self.project_location_focused=false;let visual=((x-dx-s(35))/s(10).max(1)).max(0) as usize;self.create_caret=char_to_byte_index(&self.new_file_name,visual);return;}if project {if self.project_language_menu {for visible in 0..8.min(self.languages.len()){let row=dy+s(238+visible as i32*34);if (y-row).abs()<s(16){self.project_language=visible;self.project_environment=0;self.project_language_menu=false;return;}}}if self.project_environment_menu {let envs=project_environments(self.languages[self.project_language].name);for index in 0..envs.len(){let row=dy+s(238+index as i32*34);if (y-row).abs()<s(16){self.project_environment=index;self.project_environment_menu=false;return;}}}if x>=dx+s(22)&&x<=dx+s(322)&&y>=dy+s(171)&&y<=dy+s(211){self.project_language_menu=!self.project_language_menu;self.project_environment_menu=false;return;}if x>=dx+s(350)&&x<=dx+s(658)&&y>=dy+s(171)&&y<=dy+s(211){self.project_environment_menu=!self.project_environment_menu;self.project_language_menu=false;return;}if x>=dx+s(22)&&x<=dx+s(658)&&y>=dy+s(260)&&y<=dy+s(300){self.project_location_focused=true;return;}}return;}
         if self.extensions_open&&self.extension_category==0&&(button==4||button==5){let filtered=self.filtered_language_indices();let visible=10;let maximum=filtered.len().saturating_sub(visible);if button==4{self.extension_scroll=self.extension_scroll.saturating_sub(1);}else{self.extension_scroll=(self.extension_scroll+1).min(maximum);}return;}
+        if state&CONTROL_MASK!=0&&(button==4||button==5){if button==4{self.code_zoom=(self.code_zoom+1).min(8);}else{self.code_zoom=(self.code_zoom-1).max(-4);}unsafe{self.reload_code_font();}return;}
         if x>=graph_left&&button==4 {self.graph_zoom=(self.graph_zoom*1.1).min(1.55);return;}
         if x>=graph_left&&button==5 {self.graph_zoom=(self.graph_zoom/1.1).max(0.65);return;}
-        if x>=s(112)&&x<=s(200)&&y<s(46){self.new_menu_open=!self.new_menu_open;self.extensions_open=false;self.package_open=false;self.editor_focused=false;return;}
-        if self.new_menu_open{let menu_x=s(112);let menu_y=s(43);if x>=menu_x&&x<=menu_x+s(220)&&y>=menu_y&&y<=menu_y+s(126){for (index,kind) in [CreateKind::Project,CreateKind::File,CreateKind::Folder].iter().enumerate(){let row=menu_y+s(50+index as i32*30);if (y-row).abs()<=s(14){self.create_kind=Some(*kind);self.new_file_name.clear();self.new_menu_open=false;return;}}return;}self.new_menu_open=false;}
-        if x>self.width-s(290)&&x<self.width-s(145)&&y<s(46){self.extensions_open=!self.extensions_open;self.new_menu_open=false;self.package_open=false;self.editor_focused=false;return;}
-        if x>self.width-s(150)&&y<s(46){self.package_open=!self.package_open;self.new_menu_open=false;self.extensions_open=false;self.editor_focused=false;return;}
+        if x>=s(112)&&x<=s(200)&&y<s(46){self.new_menu_open=!self.new_menu_open;self.edit_menu_open=false;self.extensions_open=false;self.package_open=false;self.editor_focused=false;return;}
+        if x>=s(207)&&x<=s(295)&&y<s(46){self.edit_menu_open=!self.edit_menu_open;self.new_menu_open=false;self.extensions_open=false;self.package_open=false;return;}
+        if self.edit_menu_open{let menu_x=s(207);let menu_y=s(43);if x>=menu_x&&x<=menu_x+s(260)&&y>=menu_y&&y<=menu_y+s(190){let index=((y-menu_y-s(17))/s(27).max(1)).clamp(0,5);match index{0=>self.save_current_file(),1=>{let last=self.files[self.selected_file].lines.len()-1;self.selection_anchor=Some((0,0));self.selection_head=Some((last,self.files[self.selected_file].lines[last].len()));},2=>self.copy_selection(),3=>self.paste_clipboard(),4=>{self.code_zoom=(self.code_zoom+1).min(8);unsafe{self.reload_code_font();}},_=>{self.code_zoom=(self.code_zoom-1).max(-4);unsafe{self.reload_code_font();}}}self.edit_menu_open=false;return;}self.edit_menu_open=false;}
+        if self.new_menu_open{let menu_x=s(112);let menu_y=s(43);if x>=menu_x&&x<=menu_x+s(220)&&y>=menu_y&&y<=menu_y+s(126){for (index,kind) in [CreateKind::Project,CreateKind::File,CreateKind::Folder].iter().enumerate(){let row=menu_y+s(50+index as i32*30);if (y-row).abs()<=s(14){self.create_kind=Some(*kind);self.new_file_name.clear();self.create_caret=0;self.project_location_focused=false;self.new_menu_open=false;return;}}return;}self.new_menu_open=false;}
+        if x>self.width-s(290)&&x<self.width-s(145)&&y<s(46){self.extensions_open=!self.extensions_open;self.new_menu_open=false;self.edit_menu_open=false;self.package_open=false;self.editor_focused=false;return;}
+        if x>self.width-s(150)&&y<s(46){self.package_open=!self.package_open;self.new_menu_open=false;self.edit_menu_open=false;self.extensions_open=false;self.editor_focused=false;return;}
         if self.extensions_open {
             let w=s(950);let h=s(680);let menu_x=self.width-w-s(20);let menu_y=s(52);
             if x>=menu_x&&x<=menu_x+w&&y>=menu_y&&y<=menu_y+h {for category in 0..5{let row=menu_y+s(101+category as i32*43);if x<=menu_x+s(175)&&(y-row).abs()<s(19){self.extension_category=category;self.extension_search_focused=false;self.version_menu_open=false;return;}}if self.extension_category!=0{return;}let list_x=menu_x+s(195);if x>=list_x&&x<=list_x+s(310)&&y>=menu_y+s(82)&&y<=menu_y+s(120){self.extension_search_focused=true;return;}let filtered=self.filtered_language_indices();for visible in 0..10{let position=self.extension_scroll+visible;if position>=filtered.len(){break;}let index=filtered[position];let row=menu_y+s(153+visible as i32*47);if x>=list_x&&x<=list_x+s(310)&&(y-row).abs()<s(20){self.selected_language=Some(index);self.version_menu_open=false;self.extension_search_focused=false;return;}}if let Some(index)=self.selected_language{let dx=menu_x+s(555);if self.version_menu_open{let versions=self.languages[index].versions;for version in 0..versions.len(){let row=menu_y+s(274+version as i32*34);if x>=dx&&x<=dx+s(355)&&(y-row).abs()<s(16){if self.languages[index].selected_version!=version&&self.languages[index].installed{self.languages[index].installed=false;save_language_settings(&self.languages);self.status_message="Version changed; download the selected language extension".into();}self.languages[index].selected_version=version;self.version_menu_open=false;return;}}}if x>=dx&&x<=dx+s(355)&&y>=menu_y+s(207)&&y<=menu_y+s(247){self.version_menu_open=!self.version_menu_open;return;}if x>=dx&&x<=dx+s(355)&&y>=menu_y+s(282)&&y<=menu_y+s(320){if self.languages[index].installed{self.languages[index].installed=false;self.status_message=format!("{} language extension removed; built-in completion remains active",self.languages[index].name);save_language_settings(&self.languages);}else{self.downloading=Some((index,Instant::now()));self.status_message=format!("Downloading {} {} tooling...",self.languages[index].name,self.languages[index].versions[self.languages[index].selected_version]);}return;}}return;}
@@ -607,34 +672,41 @@ impl App {
             self.package_open=false;
         }
         let workspace_right=(self.width as f32*0.17) as i32;
-        if x>=workspace_right&&x<graph_left&&button==1{let base=s(119);let step=s(28);for index in 0..self.files[self.selected_file].lines.len(){let y_line=base+index as i32*step;let Some(comment)=self.comment_parts(&self.files[self.selected_file].lines[index]) else{continue;};let text=comment.text.to_string();let content_column=comment.content_column;let raw_anchor=workspace_right+s(62)+comment.code.chars().count() as i32*s(10);let anchor=if comment.code.trim().is_empty(){workspace_right+s(350)}else{raw_anchor};let expanded=self.expanded_comments.contains(&(self.selected_file,index));let layout=self.comment_bubble_layout(anchor,y_line,&text,expanded,workspace_right+s(18));if x>=layout.left&&x<=layout.left+layout.width&&y>=layout.top&&y<=layout.top+layout.height{if y<=layout.top+s(27)&&x<=layout.left+s(28){let key=(self.selected_file,index);if !self.expanded_comments.remove(&key){self.expanded_comments.insert(key);}return;}self.expanded_comments.insert((self.selected_file,index));self.editor_focused=true;self.caret_line=index;if y>layout.top+s(27){let visual_line=((y-layout.top-s(38))/s(22).max(1)).max(0) as usize;let visual_column=((x-layout.left-s(12))/s(11).max(1)).max(0) as usize;let char_offset=(visual_line*layout.chars_per_line+visual_column).min(text.chars().count());self.caret_column=content_column+char_to_byte_index(&text,char_offset);}else{self.caret_column=content_column+text.len();}self.status_message="Comment editing active - click text to place the caret".into();return;}}}
+        let terminal_top=if self.terminal_open{self.height-s(230)}else{self.height-s(28)};if y>=terminal_top{if !self.terminal_open{self.terminal_open=true;self.terminal_focused=true;return;}if y<=terminal_top+s(30){if x<s(120){self.terminal_open=false;self.terminal_focused=false;return;}let first=self.width-s(520);if x>=first{let index=((x-first)/(s(134).max(1))) as usize;if index<self.terminals.len(){self.terminal_active=index;self.terminal_focused=true;}else{let number=self.terminals.len()+1;self.terminals.push(TerminalSession{name:format!("Terminal {number}"),input:String::new(),output:Arc::new(Mutex::new(vec!["terminal ready".into()]))});self.terminal_active=self.terminals.len()-1;}return;}}self.terminal_focused=true;self.editor_focused=false;return;}
+        if x>=workspace_right&&x<graph_left&&button==1{let base=s(119);let step=s(28);for index in 0..self.files[self.selected_file].lines.len(){let y_line=base+index as i32*step;let Some(comment)=self.comment_parts(&self.files[self.selected_file].lines[index]) else{continue;};let text=comment.text.to_string();let content_column=comment.content_column;let raw_anchor=workspace_right+s(62)+self.code_text_width(comment.code);let anchor=if comment.code.trim().is_empty(){workspace_right+s(350)}else{raw_anchor};let expanded=self.expanded_comments.contains(&(self.selected_file,index));let layout=self.comment_bubble_layout(anchor,y_line,&text,expanded,workspace_right+s(18));if x>=layout.left&&x<=layout.left+layout.width&&y>=layout.top&&y<=layout.top+layout.height{if y<=layout.top+s(27)&&x<=layout.left+s(28){let key=(self.selected_file,index);if !self.expanded_comments.remove(&key){self.expanded_comments.insert(key);}return;}self.expanded_comments.insert((self.selected_file,index));self.editor_focused=true;self.caret_line=index;if y>layout.top+s(27){let visual_line=((y-layout.top-s(38))/s(22).max(1)).max(0) as usize;let visual_column=((x-layout.left-s(12))/s(11).max(1)).max(0) as usize;let char_offset=(visual_line*layout.chars_per_line+visual_column).min(text.chars().count());self.caret_column=content_column+char_to_byte_index(&text,char_offset);}else{self.caret_column=content_column+text.len();}self.status_message="Comment editing active - click text to place the caret".into();return;}}}
         if x<workspace_right {
-            let file_start=134+self.folders.len() as i32*28;for index in 0..self.files.len(){let center=file_start+index as i32*29;if (y-s(center)).abs()<s(15){self.selected_file=index;self.caret_line=0;self.caret_column=0;self.editor_focused=false;self.hovered=if index<3{Some(index+1)}else{None};self.hovered_from_code=false;return;}}
+            if y>=s(112)&&y<=s(144){self.workspace_search_focused=true;self.editor_focused=false;return;}let file_start=176+self.folders.len() as i32*28;let needle=self.workspace_search.to_ascii_lowercase();for (index,file) in self.files.iter().enumerate(){if !needle.is_empty()&&!file.name.to_ascii_lowercase().contains(&needle){continue;}let center=file_start+index as i32*29;if (y-s(center)).abs()<s(15){self.selected_file=index;self.caret_line=0;self.caret_column=0;self.editor_focused=false;self.selection_anchor=None;self.selection_head=None;self.hovered=if self.graph_current&&index<3{Some(index+1)}else{None};self.hovered_from_code=false;return;}}
         }
         if x>=workspace_right&&x<graph_left&&y>s(85)&&y<self.height-s(60){
-            self.editor_focused=true;let base=s(119);let step=s(28);let line=((y-base+step/2)/step).max(0) as usize;self.caret_line=line.min(self.files[self.selected_file].lines.len().saturating_sub(1));let text_x=workspace_right+s(52);let visual_column=(((x-text_x).max(0))/s(10).max(1)) as usize;self.caret_column=char_to_byte_index(&self.files[self.selected_file].lines[self.caret_line],visual_column);return;
+            self.editor_focused=true;self.terminal_focused=false;let base=s(119);let step=s(28);let line=((y-base+step/2)/step).max(0) as usize;self.caret_line=line.min(self.files[self.selected_file].lines.len().saturating_sub(1));let text_x=workspace_right+s(52);self.caret_column=self.byte_index_at_code_x(&self.files[self.selected_file].lines[self.caret_line],(x-text_x).max(0));self.selection_anchor=Some((self.caret_line,self.caret_column));self.selection_head=Some((self.caret_line,self.caret_column));return;
         }
         self.editor_focused=false;
     }
 
     unsafe fn handle_key(&mut self,event:&mut XKeyEvent)->bool {
         let mut keysym=0;let mut buffer=[0_i8;32];let count=XLookupString(event,buffer.as_mut_ptr(),buffer.len() as i32,&mut keysym,ptr::null_mut());
+        let bytes=buffer[..count.max(0) as usize].iter().map(|v|*v as u8).collect::<Vec<_>>();let input=std::str::from_utf8(&bytes).unwrap_or("");let control=event.state&CONTROL_MASK!=0;
+        if self.terminal_focused{if keysym==ESCAPE_KEYSYM{self.terminal_focused=false;return true;}if keysym==BACKSPACE_KEYSYM{self.terminals[self.terminal_active].input.pop();return true;}if keysym==RETURN_KEYSYM{self.run_terminal_command();return true;}if count>0&&!input.chars().any(char::is_control){self.terminals[self.terminal_active].input.push_str(input);}return true;}
+        if self.workspace_search_focused{if keysym==ESCAPE_KEYSYM||keysym==RETURN_KEYSYM{self.workspace_search_focused=false;return true;}if keysym==BACKSPACE_KEYSYM{self.workspace_search.pop();return true;}if count>0&&!input.chars().any(char::is_control){self.workspace_search.push_str(input);}return true;}
         if self.extension_search_focused {if keysym==ESCAPE_KEYSYM{self.extension_search_focused=false;return true;}if keysym==BACKSPACE_KEYSYM{self.extension_search.pop();self.extension_scroll=0;return true;}if keysym==RETURN_KEYSYM{self.extension_search_focused=false;return true;}if count>0{let bytes=buffer[..count as usize].iter().map(|v|*v as u8).collect::<Vec<_>>();if let Ok(input)=std::str::from_utf8(&bytes){if !input.chars().any(char::is_control){self.extension_search.push_str(input);self.extension_scroll=0;}}}return true;}
-        if self.create_kind.is_some() {if keysym==ESCAPE_KEYSYM{if self.project_language_menu||self.project_environment_menu{self.project_language_menu=false;self.project_environment_menu=false;}else{self.create_kind=None;}return true;}if keysym==BACKSPACE_KEYSYM{self.new_file_name.pop();return true;}if keysym==RETURN_KEYSYM{self.create_requested_item();return true;}if count>0{let bytes=buffer[..count as usize].iter().map(|v|*v as u8).collect::<Vec<_>>();if let Ok(input)=std::str::from_utf8(&bytes){if !input.chars().any(char::is_control){self.new_file_name.push_str(input);}}}return true;}
-        if keysym==ESCAPE_KEYSYM {if self.extensions_open||self.new_menu_open||self.package_open||self.build_started.is_some(){self.extensions_open=false;self.new_menu_open=false;self.version_menu_open=false;self.package_open=false;self.build_started=None;return true;}return false;}
+        if self.create_kind.is_some() {if keysym==ESCAPE_KEYSYM{if self.project_language_menu||self.project_environment_menu{self.project_language_menu=false;self.project_environment_menu=false;}else{self.create_kind=None;}return true;}if self.project_location_focused{if keysym==BACKSPACE_KEYSYM{self.project_location.pop();return true;}if keysym==TAB_KEYSYM||keysym==RETURN_KEYSYM{self.project_location_focused=false;return true;}if count>0&&!input.chars().any(char::is_control){self.project_location.push_str(input);}return true;}if keysym==LEFT_KEYSYM{self.create_caret=previous_char_boundary(&self.new_file_name,self.create_caret);return true;}if keysym==RIGHT_KEYSYM{self.create_caret=next_char_boundary(&self.new_file_name,self.create_caret);return true;}if keysym==BACKSPACE_KEYSYM{if self.create_caret>0{let previous=previous_char_boundary(&self.new_file_name,self.create_caret);self.new_file_name.replace_range(previous..self.create_caret,"");self.create_caret=previous;}return true;}if keysym==RETURN_KEYSYM{self.create_requested_item();return true;}if count>0&&!input.chars().any(char::is_control){self.new_file_name.insert_str(self.create_caret,input);self.create_caret+=input.len();}return true;}
+        if keysym==ESCAPE_KEYSYM {if self.extensions_open||self.new_menu_open||self.edit_menu_open||self.package_open||self.build_started.is_some(){self.extensions_open=false;self.new_menu_open=false;self.edit_menu_open=false;self.version_menu_open=false;self.package_open=false;self.build_started=None;return true;}return false;}
+        if control{match input.to_ascii_lowercase().as_str(){"s"=>self.save_current_file(),"a"=>{let last=self.files[self.selected_file].lines.len()-1;self.selection_anchor=Some((0,0));self.selection_head=Some((last,self.files[self.selected_file].lines[last].len()));},"c"=>self.copy_selection(),"x"=>{self.copy_selection();self.delete_selection();},"v"=>self.paste_clipboard(),"+"|"="=>{self.code_zoom=(self.code_zoom+1).min(8);self.reload_code_font();self.status_message=format!("Code font size +{}",self.code_zoom);},"-"=>{self.code_zoom=(self.code_zoom-1).max(-4);self.reload_code_font();self.status_message=format!("Code font size {}",self.code_zoom);},_=>{}}return true;}
         if !self.editor_focused{return true;}
         match keysym {
             TAB_KEYSYM=>self.accept_completion(),
-            BACKSPACE_KEYSYM=>{if self.caret_column>0 {let line=&mut self.files[self.selected_file].lines[self.caret_line];let previous=previous_char_boundary(line,self.caret_column);line.replace_range(previous..self.caret_column,"");self.caret_column=previous;}else if self.caret_line>0{let current=self.files[self.selected_file].lines.remove(self.caret_line);self.caret_line-=1;self.caret_column=self.files[self.selected_file].lines[self.caret_line].len();self.files[self.selected_file].lines[self.caret_line].push_str(&current);}},
-            RETURN_KEYSYM=>{let tail=self.files[self.selected_file].lines[self.caret_line].split_off(self.caret_column);self.caret_line+=1;self.caret_column=0;self.files[self.selected_file].lines.insert(self.caret_line,tail);},
+            BACKSPACE_KEYSYM=>{if !self.delete_selection(){if self.caret_column>0 {let line=&mut self.files[self.selected_file].lines[self.caret_line];let previous=previous_char_boundary(line,self.caret_column);line.replace_range(previous..self.caret_column,"");self.caret_column=previous;}else if self.caret_line>0{let current=self.files[self.selected_file].lines.remove(self.caret_line);self.caret_line-=1;self.caret_column=self.files[self.selected_file].lines[self.caret_line].len();self.files[self.selected_file].lines[self.caret_line].push_str(&current);}}},
+            RETURN_KEYSYM=>{self.delete_selection();let tail=self.files[self.selected_file].lines[self.caret_line].split_off(self.caret_column);self.caret_line+=1;self.caret_column=0;self.files[self.selected_file].lines.insert(self.caret_line,tail);},
             LEFT_KEYSYM=>self.caret_column=previous_char_boundary(&self.files[self.selected_file].lines[self.caret_line],self.caret_column),
             RIGHT_KEYSYM=>self.caret_column=next_char_boundary(&self.files[self.selected_file].lines[self.caret_line],self.caret_column),
             UP_KEYSYM=>{let visual=self.files[self.selected_file].lines[self.caret_line][..self.caret_column].chars().count();self.caret_line=self.caret_line.saturating_sub(1);self.caret_column=char_to_byte_index(&self.files[self.selected_file].lines[self.caret_line],visual);},
             DOWN_KEYSYM=>{let visual=self.files[self.selected_file].lines[self.caret_line][..self.caret_column].chars().count();self.caret_line=(self.caret_line+1).min(self.files[self.selected_file].lines.len()-1);self.caret_column=char_to_byte_index(&self.files[self.selected_file].lines[self.caret_line],visual);},
-            _=>if count>0 {let bytes=buffer[..count as usize].iter().map(|v|*v as u8).collect::<Vec<_>>();if let Ok(input)=std::str::from_utf8(&bytes){if !input.chars().any(char::is_control){self.files[self.selected_file].lines[self.caret_line].insert_str(self.caret_column,input);self.caret_column+=input.len();}}}
+            _=>if count>0&&!input.chars().any(char::is_control){self.delete_selection();self.files[self.selected_file].lines[self.caret_line].insert_str(self.caret_column,input);self.caret_column+=input.len();}
         }
         true
     }
+
+    fn update_drag_selection(&mut self,x:i32,y:i32,state:c_uint){if state&BUTTON1_MASK==0||self.selection_anchor.is_none(){return;}let s=|v|self.s(v);let left=(self.width as f32*0.17) as i32;let graph=(self.width as f32*0.61) as i32;if x<left||x>=graph||y<s(85){return;}let line=(((y-s(119)+s(14))/s(28).max(1)).max(0) as usize).min(self.files[self.selected_file].lines.len()-1);let column=self.byte_index_at_code_x(&self.files[self.selected_file].lines[line],(x-left-s(52)).max(0));self.selection_head=Some((line,column));self.caret_line=line;self.caret_column=column;}
 
     fn update_hover(&mut self) {
         let scale=self.scale();let s=move|v:i32|(v as f32*scale).round() as i32;let left=(self.width as f32*0.17) as i32;let graph=(self.width as f32*0.61) as i32;
@@ -666,12 +738,22 @@ fn initial_files() -> Vec<FileBuffer> {
         ("workspace.rs",["use crate::workspace::Project;","","pub fn analyze_workspace(project: &Project) {","    project.index_files();","}","","pub fn resolve_symbols(files: Vec<File>) {","    SemanticIndex::from(files);","}"].as_slice()),
         ("render.rs",["use crate::graph::SymbolNode;","","pub struct GraphRenderer;","","impl GraphRenderer {","    pub fn render_graph(nodes: &[SymbolNode]) {","        scene.draw(nodes);","    }","}"].as_slice()),
     ];
-    sources.iter().map(|(name,lines)|FileBuffer{name:(*name).into(),lines:lines.iter().map(|line|line.to_string()).collect()}).collect()
+    sources.iter().map(|(name,lines)|FileBuffer{name:(*name).into(),path:PathBuf::from(name),lines:lines.iter().map(|line|line.to_string()).collect()}).collect()
 }
 
 fn language_settings_path()->PathBuf {std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(||std::env::var_os("HOME").map(|home|PathBuf::from(home).join(".config"))).unwrap_or_else(||PathBuf::from(".")).join("tc-ide/languages.conf")}
 
 fn projects_root()->PathBuf {std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(||PathBuf::from(".")).join("TC-IDE-Projects")}
+
+fn default_terminals()->Vec<TerminalSession>{["Build","Run","Output"].iter().map(|name|TerminalSession{name:(*name).into(),input:String::new(),output:Arc::new(Mutex::new(vec![format!("{} terminal ready",name)]))}).collect()}
+
+fn expand_home(value:&str)->PathBuf{if value=="~"{return std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(||PathBuf::from("."));}if let Some(rest)=value.strip_prefix("~/"){return std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(||PathBuf::from(".")).join(rest);}PathBuf::from(value)}
+
+fn runtime_cache_root()->PathBuf{std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).or_else(||std::env::var_os("HOME").map(|home|PathBuf::from(home).join(".cache"))).unwrap_or_else(||PathBuf::from(".")).join("tc-ide/runtimes")}
+
+fn python_interpreter(version:&str)->String{let candidate=format!("python{version}");if Command::new(&candidate).arg("--version").output().map(|result|result.status.success()).unwrap_or(false){candidate}else{"python3".into()}}
+
+fn ensure_python_runtime_cache(version:&str)->PathBuf{let root=runtime_cache_root().join("python").join(version);let _=fs::create_dir_all(&root);let interpreter=python_interpreter(version);let _=fs::write(root.join("runtime.conf"),format!("version={version}\ninterpreter={interpreter}\n"));root}
 
 fn comment_markers_for_file(name:&str)->&'static [&'static str]{let extension=name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();match extension.as_str(){"py"|"pyw"|"rb"|"sh"|"bash"|"zsh"|"fish"|"r"=>&["#"],"sql"|"lua"|"hs"|"lhs"=>&["--"],"html"|"htm"|"md"|"mdx"=>&["<!--"],"css"|"scss"|"sass"=>&["/*"],"c"|"h"|"cc"|"cpp"|"cxx"|"hpp"|"rs"|"java"|"kt"|"kts"|"swift"|"go"|"cs"|"ts"|"tsx"|"js"|"jsx"|"mjs"|"dart"|"php"|"scala"|"vue"|"svelte"=>&["//","/*"],_=>&[]}}
 
@@ -683,11 +765,13 @@ fn next_char_boundary(value:&str,index:usize)->usize{if index>=value.len(){retur
 
 fn identifiers_in(value:&str)->Vec<String>{value.split(|character:char|!(character.is_ascii_alphanumeric()||character=='_')).filter(|token|token.len()>1&&token.chars().next().map(|first|first.is_ascii_alphabetic()||first=='_').unwrap_or(false)).map(str::to_string).collect()}
 
+fn syntax_tokens(value:&str,keywords:&[&str])->Vec<(String,u8)>{let chars=value.chars().collect::<Vec<_>>();let mut result=Vec::new();let mut index=0;while index<chars.len(){let start=index;let kind;if chars[index]=='"'||chars[index]=='\''{let quote=chars[index];index+=1;while index<chars.len(){let escaped=index>start&&chars[index-1]=='\\';let done=chars[index]==quote&&!escaped;index+=1;if done{break;}}kind=2;}else if chars[index].is_ascii_alphabetic()||chars[index]=='_'{index+=1;while index<chars.len()&&(chars[index].is_ascii_alphanumeric()||chars[index]=='_'){index+=1;}let word=chars[start..index].iter().collect::<String>();kind=if keywords.contains(&word.as_str()){1}else{0};result.push((word,kind));continue;}else if chars[index].is_ascii_digit(){index+=1;while index<chars.len()&&(chars[index].is_ascii_alphanumeric()||chars[index]=='.'){index+=1;}kind=2;}else{index+=1;while index<chars.len()&&!chars[index].is_ascii_alphanumeric()&&chars[index]!='_'&&chars[index]!='"'&&chars[index]!='\''{index+=1;}kind=0;}result.push((chars[start..index].iter().collect(),kind));}result}
+
 fn completion_words_for_language(language:&str)->&'static [&'static str]{match language{"C"=>&["auto","break","case","char","const","continue","default","define","do","double","else","enum","extern","float","for","goto","if","include","inline","int","long","NULL","register","restrict","return","short","signed","sizeof","size_t","static","struct","switch","typedef","union","unsigned","void","volatile","while"],"C++"=>&["alignas","alignof","auto","bool","break","case","catch","char","class","concept","const","constexpr","define","delete","do","double","else","enum","explicit","export","extern","false","float","for","friend","if","include","inline","int","namespace","new","nullptr","operator","private","protected","public","requires","return","short","signed","sizeof","static","std","string","struct","switch","template","this","throw","true","try","typename","union","unsigned","using","vector","virtual","void","volatile","while"],"Rust"=>&["async","await","const","enum","fn","impl","let","match","mod","pub","Result","self","struct","trait","use"],"Python"=>&["async","await","class","def","elif","else","from","import","lambda","None","return","self","try","with"],"TypeScript / JavaScript"|"Web / HTML / CSS"=>&["async","await","class","const","export","extends","function","import","interface","return","type"],"Go"=>&["chan","defer","func","go","import","interface","map","package","range","return","struct"],"Java"|"Kotlin"=>&["class","extends","fun","import","interface","new","package","private","public","return","static"],_=>&["class","const","function","import","return","struct","type","value"]}}
 
 fn wrap_bubble_text(value:&str,max_chars:usize,max_lines:usize)->Vec<String>{let source=if value.trim().is_empty(){"comment"}else{value.trim()};let mut lines=Vec::new();for paragraph in source.lines(){let chars=paragraph.chars().collect::<Vec<_>>();if chars.is_empty(){lines.push(String::new());continue;}for chunk in chars.chunks(max_chars.max(1)){lines.push(chunk.iter().collect());}}if lines.len()>max_lines{lines.truncate(max_lines);if let Some(last)=lines.last_mut(){if last.chars().count()>=3{let keep=last.chars().take(max_chars.saturating_sub(3)).collect::<String>();*last=format!("{keep}...");}}}lines}
 
-fn project_environments(language:&str)->&'static [&'static str]{match language{"Python"=>&["venv","uv","conda","poetry"],"C"=>&["GCC","Clang","CMake"],"C++"=>&["CMake + GCC","CMake + Clang","Meson","Conan"],"Java"=>&["JDK 25","JDK 21 LTS","Gradle","Maven"],"Rust"=>&["cargo stable","cargo nightly","Nix shell"],"TypeScript / JavaScript"=>&["pnpm","npm","yarn","bun"],"Go"=>&["Go modules","GVM","container"],_=>&["system toolchain","container","custom"]}}
+fn project_environments(language:&str)->&'static [&'static str]{match language{"Python"=>&["None","venv","uv","conda","poetry"],"C"=>&["None","GCC","Clang","CMake"],"C++"=>&["None","CMake + GCC","CMake + Clang","Meson","Conan"],"Java"=>&["None","JDK 25","JDK 21 LTS","Gradle","Maven"],"Rust"=>&["None","cargo stable","cargo nightly","Nix shell"],"TypeScript / JavaScript"=>&["None","pnpm","npm","yarn","bun"],"Go"=>&["None","Go modules","GVM","container"],_=>&["None","system toolchain","container","custom"]}}
 
 fn initial_languages()->Vec<LanguagePack>{
     let installed=fs::read_to_string(language_settings_path()).unwrap_or_else(|_|"Rust\n".into());
@@ -725,6 +809,7 @@ fn main() {
         let mut font=XLoadQueryFont(display,font_name.as_ptr());
         let fallback_font=CString::new("fixed").unwrap();
         if font.is_null(){font=XLoadQueryFont(display,fallback_font.as_ptr());}
+        let mut code_font=XLoadQueryFont(display,font_name.as_ptr());if code_font.is_null(){code_font=XLoadQueryFont(display,fallback_font.as_ptr());}
         if !font.is_null(){XSetFont(display,gc,(*font).fid);}
         let depth=XDefaultDepth(display,screen);
         let canvas=XCreatePixmap(display,window,width as u32,height as u32,depth as u32);
@@ -739,7 +824,7 @@ fn main() {
             accent:color(display,map,"#9bbbc2"),
             project:color(display,map,"#29353a"),
         };
-        let mut app=App { display,window,gc,canvas,depth,font,colors,width,height,mouse_x:-100,mouse_y:-100,hovered:None,hovered_from_code:false,selected_file:0,files:initial_files(),folders:vec!["src".into(),"src/editor".into()],project_name:"TC-IDE".into(),project_path:None,editor_focused:false,caret_line:0,caret_column:0,graph_zoom:1.0,package_open:false,package_targets:[true,true,true,true],build_started:None,new_menu_open:false,extensions_open:false,languages:initial_languages(),downloading:None,extension_scroll:0,extension_category:0,extension_search:String::new(),extension_search_focused:false,selected_language:Some(1),version_menu_open:false,create_kind:None,new_file_name:String::new(),project_language:1,project_environment:0,project_language_menu:false,project_environment_menu:false,expanded_comments:BTreeSet::new(),status_message:"Rust / X11 - 60 FPS double-buffered scene".into(),started:Instant::now() };
+        let mut app=App { display,window,gc,canvas,depth,font,code_font,code_font_base:if width>2200{24}else{18},colors,width,height,mouse_x:-100,mouse_y:-100,hovered:None,hovered_from_code:false,selected_file:0,files:initial_files(),folders:vec!["src".into(),"src/editor".into()],project_name:"TC-IDE".into(),project_path:None,project_location:"~/TC-IDE-Projects".into(),project_location_focused:false,create_caret:0,editor_focused:false,caret_line:0,caret_column:0,selection_anchor:None,selection_head:None,clipboard:String::new(),code_zoom:0,edit_menu_open:false,workspace_search:String::new(),workspace_search_focused:false,terminal_open:false,terminal_focused:false,terminal_active:0,terminals:default_terminals(),graph_current:true,graph_zoom:1.0,package_open:false,package_targets:[true,true,true,true],build_started:None,new_menu_open:false,extensions_open:false,languages:initial_languages(),downloading:None,extension_scroll:0,extension_category:0,extension_search:String::new(),extension_search_focused:false,selected_language:Some(1),version_menu_open:false,create_kind:None,new_file_name:String::new(),project_language:1,project_environment:0,project_language_menu:false,project_environment_menu:false,expanded_comments:BTreeSet::new(),status_message:"Ready".into(),started:Instant::now() };
         let frame=Duration::from_micros(16_667);
         let mut running=true;
         while running {
@@ -749,8 +834,8 @@ fn main() {
                 XNextEvent(display,&mut event);
                 match event.type_ {
                     KEY_PRESS => { let mut key=event.key;running=app.handle_key(&mut key); }
-                    BUTTON_PRESS => {let button=event.button;app.handle_click(button.x,button.y,button.button);}
-                    MOTION_NOTIFY => { let motion=event.motion;app.mouse_x=motion.x;app.mouse_y=motion.y;app.update_hover(); }
+                    BUTTON_PRESS => {let button=event.button;app.handle_click(button.x,button.y,button.button,button.state);}
+                    MOTION_NOTIFY => { let motion=event.motion;app.mouse_x=motion.x;app.mouse_y=motion.y;app.update_drag_selection(motion.x,motion.y,motion.state);app.update_hover(); }
                     CONFIGURE_NOTIFY => { let config=event.configure;if config.width!=app.width||config.height!=app.height{app.resize(config.width,config.height);} }
                     CLIENT_MESSAGE => running=false,
                     EXPOSE => {},
@@ -764,6 +849,7 @@ fn main() {
         }
         XFreePixmap(display,app.canvas);
         if !app.font.is_null(){XFreeFont(display,app.font);}
+        if !app.code_font.is_null(){XFreeFont(display,app.code_font);}
         XFreeGC(display,gc);
         XDestroyWindow(display,window);
         XCloseDisplay(display);
@@ -805,8 +891,9 @@ mod tests {
     }
 
     #[test]
-    fn python_projects_offer_real_venv_option() {
-        assert_eq!(project_environments("Python").first(),Some(&"venv"));
+    fn python_projects_offer_optional_and_real_venv_modes() {
+        assert_eq!(project_environments("Python").first(),Some(&"None"));
+        assert!(project_environments("Python").contains(&"venv"));
     }
 
     #[test]
@@ -850,5 +937,12 @@ mod tests {
         assert!(symbols.contains(&"Widget".to_string()));
         assert!(symbols.contains(&"build_widget".to_string()));
         assert!(symbols.contains(&"WidgetConfig".to_string()));
+    }
+
+    #[test]
+    fn syntax_highlighting_classifies_cpp_keywords_and_strings() {
+        let tokens=syntax_tokens("constexpr auto name = \"TCI\";",completion_words_for_language("C++"));
+        assert!(tokens.iter().any(|(token,kind)|token=="constexpr"&&*kind==1));
+        assert!(tokens.iter().any(|(token,kind)|token=="\"TCI\""&&*kind==2));
     }
 }
