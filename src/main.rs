@@ -608,6 +608,11 @@ struct App {
     graph_current: bool,
     graph_zoom: f32,
     graph_mode: usize,
+    graph_scope: usize,
+    graph_scroll: usize,
+    graph_search: String,
+    graph_search_focused: bool,
+    graph_collapsed: BTreeSet<usize>,
     package_open: bool,
     package_targets: [bool; 4],
     build_started: Option<Instant>,
@@ -1541,10 +1546,80 @@ impl App {
             Level::File => 1,
             Level::Class | Level::Function => 2,
         };
+        let visible = self.graph_visible_indices();
+        let row = visible
+            .iter()
+            .position(|candidate| *candidate == index)
+            .unwrap_or(0)
+            .saturating_sub(self.graph_scroll);
         (
             x + self.s(28 + depth * 28),
-            y + self.s(56) + (self.s(54) as f32 * self.graph_zoom * index as f32) as i32,
+            y + self.s(121) + (self.s(54) as f32 * self.graph_zoom * row as f32) as i32,
         )
+    }
+
+    fn graph_descends_from(index: usize, ancestor: usize) -> bool {
+        let mut current = index;
+        while let Some((parent, _)) = EDGES.iter().find(|(_, child)| *child == current) {
+            if *parent == ancestor {
+                return true;
+            }
+            current = *parent;
+        }
+        false
+    }
+
+    fn graph_file_node(&self) -> Option<usize> {
+        let selected = &self.files[self.selected_file].name;
+        NODES.iter().position(|node| {
+            node.level == Level::File && (node.label == selected || selected.ends_with(node.label))
+        })
+    }
+
+    fn graph_visible_indices(&self) -> Vec<usize> {
+        let selected_file = self.graph_file_node();
+        let selected_folder = selected_file.map(|index| NODES[index].detail);
+        let query = self.graph_search.trim().to_ascii_lowercase();
+        let mut visible = Vec::new();
+        for (index, node) in NODES.iter().enumerate() {
+            let in_scope = match self.graph_scope {
+                0 => selected_file
+                    .map(|file| index == file || Self::graph_descends_from(index, file))
+                    .unwrap_or(node.level != Level::Project),
+                1 => selected_folder
+                    .map(|folder| {
+                        NODES.iter().enumerate().any(|(file, candidate)| {
+                            candidate.level == Level::File
+                                && candidate.detail == folder
+                                && (index == file || Self::graph_descends_from(index, file))
+                        })
+                    })
+                    .unwrap_or(node.level != Level::Project),
+                _ => true,
+            };
+            if !in_scope {
+                continue;
+            }
+            let hidden_by_collapse = self
+                .graph_collapsed
+                .iter()
+                .any(|parent| index != *parent && Self::graph_descends_from(index, *parent));
+            if hidden_by_collapse {
+                continue;
+            }
+            let matches = query.is_empty()
+                || node.label.to_ascii_lowercase().contains(&query)
+                || node.detail.to_ascii_lowercase().contains(&query)
+                || NODES.iter().enumerate().any(|(child, candidate)| {
+                    Self::graph_descends_from(child, index)
+                        && (candidate.label.to_ascii_lowercase().contains(&query)
+                            || candidate.detail.to_ascii_lowercase().contains(&query))
+                });
+            if matches {
+                visible.push(index);
+            }
+        }
+        visible
     }
 
     fn is_related(&self, index: usize) -> bool {
@@ -1659,12 +1734,7 @@ impl App {
             s(88),
             s(27),
         );
-        self.text(
-            self.colors.text,
-            s(219),
-            s(29),
-            self.tr("Edit  v", "编辑 v"),
-        );
+        self.text(self.colors.text, s(219), s(29), self.tr("Edit", "编辑"));
         let path = format!(
             "{}  /  {}",
             self.project_name, self.files[self.selected_file].name
@@ -2367,18 +2437,65 @@ impl App {
             );
             return;
         }
-        let active = self.hovered.unwrap_or(0);
+        let active = self.hovered.or_else(|| self.graph_file_node()).unwrap_or(0);
         let active_label = NODES[active].label;
+        let scope_labels = [
+            self.tr("FILE", "当前文件"),
+            self.tr("FOLDER", "当前文件夹"),
+            self.tr("PROJECT", "整个项目"),
+        ];
+        let scope_w = ((w - s(36)) / 3).max(s(72));
+        for (index, label) in scope_labels.iter().enumerate() {
+            let bx = x + s(14) + index as i32 * scope_w;
+            if self.graph_scope == index {
+                self.rect(self.colors.project, bx, y + s(8), scope_w - s(5), s(27));
+            }
+            self.outline(self.colors.line, bx, y + s(8), scope_w - s(5), s(27));
+            self.text(self.colors.text, bx + s(9), y + s(27), label);
+        }
+        self.rect(self.colors.bg, x + s(14), y + s(43), w - s(28), s(30));
+        self.outline(
+            if self.graph_search_focused {
+                self.colors.accent
+            } else {
+                self.colors.line
+            },
+            x + s(14),
+            y + s(43),
+            w - s(28),
+            s(30),
+        );
+        self.text(
+            self.colors.muted,
+            x + s(26),
+            y + s(64),
+            if self.graph_search.is_empty() {
+                self.tr("Search symbols in this scope", "搜索当前范围内的符号")
+            } else {
+                &self.graph_search
+            },
+        );
         self.text(
             self.colors.muted,
             x + s(18),
-            y + s(18),
+            y + s(98),
             &format!(
                 "{}  /  {}  /  {}",
                 self.project_name, self.files[self.selected_file].name, active_label
             ),
         );
+        let visible = self.graph_visible_indices();
+        let visible_rows = ((h - s(158)) / s(54).max(1)).max(1) as usize;
+        let shown: BTreeSet<usize> = visible
+            .iter()
+            .skip(self.graph_scroll)
+            .take(visible_rows)
+            .copied()
+            .collect();
         for &(a, b) in EDGES {
+            if !shown.contains(&a) || !shown.contains(&b) {
+                continue;
+            }
             let related = match self.graph_mode {
                 1 => b == active,
                 2 => a == active,
@@ -2399,7 +2516,13 @@ impl App {
             self.line(color, width, (rail_x, from.1 + s(8)), (rail_x, to.1));
             self.line(color, width, (rail_x, to.1), (to.0, to.1));
         }
-        for (index, node) in NODES.iter().enumerate() {
+        for index in visible
+            .iter()
+            .skip(self.graph_scroll)
+            .take(visible_rows)
+            .copied()
+        {
+            let node = &NODES[index];
             let (nx, ny) = self.node_position(node);
             let active = self.hovered == Some(index);
             let related = match self.graph_mode {
@@ -2457,6 +2580,18 @@ impl App {
                 self.colors.muted
             };
             self.text(label_color, card_x + s(12), ny + s(5), node.label);
+            if node.level == Level::File {
+                self.text(
+                    self.colors.accent,
+                    card_x + s(2),
+                    ny + s(5),
+                    if self.graph_collapsed.contains(&index) {
+                        "+"
+                    } else {
+                        "-"
+                    },
+                );
+            }
             let detail_width = self.pango_text_size(node.detail, false).0;
             self.text(
                 self.colors.muted,
@@ -2470,8 +2605,8 @@ impl App {
             x + s(14),
             y + h - s(10),
             self.tr(
-                "hover a symbol to focus; choose callers or callees above",
-                "悬停符号可聚焦；上方可切换调用者或被调用者",
+                "wheel: browse  |  click a file: fold  |  hover: focus",
+                "滚轮浏览  |  单击文件折叠  |  悬停符号聚焦",
             ),
         );
     }
@@ -3002,7 +3137,7 @@ impl App {
                     y + s(234),
                     pack.versions[pack.selected_version],
                 );
-                self.text(self.colors.muted, dx + s(326), y + s(234), "v");
+                self.chevron(dx + s(326), y + s(226), self.version_menu_open);
                 let downloading = self
                     .downloading
                     .map(|(active, _)| active == index)
@@ -3312,7 +3447,7 @@ impl App {
                 y + s(198),
                 &format!("{}  {}", pack.name, pack.versions[pack.selected_version]),
             );
-            self.text(self.colors.muted, x + s(294), y + s(198), "v");
+            self.chevron(x + s(294), y + s(190), self.project_language_menu);
             self.text(
                 self.colors.muted,
                 x + s(350),
@@ -3337,7 +3472,7 @@ impl App {
                 y + s(198),
                 envs[self.project_environment.min(envs.len() - 1)],
             );
-            self.text(self.colors.muted, x + s(630), y + s(198), "v");
+            self.chevron(x + s(630), y + s(190), self.project_environment_menu);
             self.text(
                 self.colors.muted,
                 x + s(22),
@@ -3596,8 +3731,68 @@ impl App {
             .unwrap_or(false)
         {
             self.build_started = None;
-            self.status_message = "Build animation complete - selected packages emitted".into();
+            self.finish_build_preview();
         }
+    }
+
+    fn finish_build_preview(&mut self) {
+        let output = self.active_root().join("dist");
+        if let Err(error) = fs::create_dir_all(&output) {
+            self.status_message = format!("Unable to create {}: {error}", output.display());
+            return;
+        }
+        let labels = [
+            "Windows .exe",
+            "Linux .deb",
+            "Linux .AppImage",
+            "macOS .dmg",
+        ];
+        let selected = labels
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.package_targets[*index])
+            .map(|(_, label)| *label)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let report = format!(
+            "TC-IDE build preview\n\nRequested targets: {selected}\n\nThis development build currently demonstrates the packaging workflow and animation. Native installer generation is not implemented yet, so no .exe, .deb, .AppImage, or .dmg file has been fabricated. This directory is the reserved output location for the real packaging pipeline.\n"
+        );
+        if let Err(error) = fs::write(output.join("BUILD-RESULT.txt"), report) {
+            self.status_message = format!("Unable to write build result: {error}");
+            return;
+        }
+        let opened = Command::new("xdg-open")
+            .arg(&output)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+            || Command::new("gio")
+                .arg("open")
+                .arg(&output)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .is_ok();
+        self.status_message = if opened {
+            format!(
+                "{}: {}",
+                self.tr(
+                    "Build preview complete; opened output folder",
+                    "打包预览完成；已打开输出目录"
+                ),
+                output.display()
+            )
+        } else {
+            format!(
+                "{}: {}",
+                self.tr(
+                    "Build preview complete; output folder",
+                    "打包预览完成；输出目录"
+                ),
+                output.display()
+            )
+        };
     }
 
     fn active_root(&mut self) -> PathBuf {
@@ -4207,12 +4402,61 @@ impl App {
                 return;
             }
         }
+        let (_, graph_y, _, graph_h) = self.graph_bounds();
+        if button == 1 && x >= graph_left && y >= graph_y + s(8) && y <= graph_y + s(35) {
+            let scope_w = ((self.width - graph_left - s(36)) / 3).max(s(72));
+            self.graph_scope = ((x - graph_left - s(14)) / scope_w.max(1)).clamp(0, 2) as usize;
+            self.graph_scroll = 0;
+            self.status_message = match self.graph_scope {
+                0 => self.tr("Graph scoped to the current file", "关系图已聚焦当前文件"),
+                1 => self.tr(
+                    "Graph scoped to the current folder",
+                    "关系图已聚焦当前文件夹",
+                ),
+                _ => self.tr(
+                    "Graph scoped to the whole project",
+                    "关系图已切换到整个项目",
+                ),
+            }
+            .into();
+            return;
+        }
+        if button == 1 && x >= graph_left + s(14) && y >= graph_y + s(43) && y <= graph_y + s(73) {
+            self.graph_search_focused = true;
+            self.editor_focused = false;
+            return;
+        }
+        if button == 1 && x >= graph_left && y >= graph_y + s(102) {
+            for index in self
+                .graph_visible_indices()
+                .iter()
+                .skip(self.graph_scroll)
+                .copied()
+            {
+                let (_, node_y) = self.node_position(&NODES[index]);
+                if (y - node_y).abs() <= s(20) {
+                    if NODES[index].level == Level::File {
+                        if !self.graph_collapsed.remove(&index) {
+                            self.graph_collapsed.insert(index);
+                        }
+                        self.graph_scroll = 0;
+                    }
+                    self.hovered = Some(index);
+                    return;
+                }
+            }
+        }
         if x >= graph_left && button == 4 {
-            self.graph_zoom = (self.graph_zoom * 1.1).min(1.55);
+            self.graph_scroll = self.graph_scroll.saturating_sub(1);
             return;
         }
         if x >= graph_left && button == 5 {
-            self.graph_zoom = (self.graph_zoom / 1.1).max(0.65);
+            let visible_rows = ((graph_h - s(158)) / s(54).max(1)).max(1) as usize;
+            let maximum = self
+                .graph_visible_indices()
+                .len()
+                .saturating_sub(visible_rows);
+            self.graph_scroll = (self.graph_scroll + 1).min(maximum);
             return;
         }
         if x >= s(112) && x <= s(200) && y < s(46) {
@@ -4790,6 +5034,7 @@ impl App {
                 }
                 if (y - s(center)).abs() < s(15) {
                     self.selected_file = index;
+                    self.graph_scroll = 0;
                     self.caret_line = 0;
                     self.caret_column = 0;
                     self.editor_focused = false;
@@ -4871,6 +5116,22 @@ impl App {
             }
             if count > 0 && !input.chars().any(char::is_control) {
                 self.font_search.push_str(input);
+            }
+            return true;
+        }
+        if self.graph_search_focused {
+            if keysym == ESCAPE_KEYSYM || keysym == RETURN_KEYSYM {
+                self.graph_search_focused = false;
+                return true;
+            }
+            if keysym == BACKSPACE_KEYSYM {
+                self.graph_search.pop();
+                self.graph_scroll = 0;
+                return true;
+            }
+            if count > 0 && !input.chars().any(char::is_control) {
+                self.graph_search.push_str(input);
+                self.graph_scroll = 0;
             }
             return true;
         }
@@ -5261,9 +5522,22 @@ impl App {
         }
         self.hovered_from_code = false;
         self.hovered_code_span = None;
+        if self.mouse_x < graph {
+            self.hovered = None;
+            return;
+        }
         let mut best = None;
         let mut distance = self.s(40) as i64 * self.s(40) as i64;
-        for (index, node) in NODES.iter().enumerate() {
+        let (_, _, _, graph_h) = self.graph_bounds();
+        let visible_rows = ((graph_h - s(158)) / s(54).max(1)).max(1) as usize;
+        for index in self
+            .graph_visible_indices()
+            .iter()
+            .skip(self.graph_scroll)
+            .take(visible_rows)
+            .copied()
+        {
+            let node = &NODES[index];
             let (x, y) = self.node_position(node);
             let dx = (self.mouse_x - x) as i64;
             let dy = (self.mouse_y - y) as i64;
@@ -6310,6 +6584,11 @@ fn main() {
             graph_current: true,
             graph_zoom: 1.0,
             graph_mode: 0,
+            graph_scope: 0,
+            graph_scroll: 0,
+            graph_search: String::new(),
+            graph_search_focused: false,
+            graph_collapsed: BTreeSet::new(),
             package_open: false,
             package_targets: [false, false, false, false],
             build_started: None,
