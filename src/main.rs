@@ -3315,7 +3315,7 @@ impl App {
 
     fn pop_out_terminal(&mut self) {
         let cwd = self.project_path.clone().unwrap_or_else(projects_root);
-        let script = "printf '\\033[38;5;117m  _______ _             _____ _                          __     __     \\n |__   __(_)           / ____| |                         \\ \\   / /     \\n    | |   _  __ _ _ __| |    | |__  _   _  __ _ _ __    \\ \\_/ /_ _   \\n    | |  | |/ _` |  __| |    |  _ \\| | | |/ _` |  _ \\    \\   / _` |  \\n    | |  | | (_| | |  | |____| | | | |_| | (_| | | | |    | | (_| |  \\n    |_|  |_|\\__,_|_|   \\_____|_| |_|\\__,_|\\__,_|_| |_|    |_|\\__,_|  \\n\\033[0mGitHub: https://github.com/tianchuangya/TC-IDE\\nTC-IDE · Native semantic workspace\\n\\n'; exec bash";
+        let script = "printf '\\n\\033[1;38;5;117m  [ T I A N C H U A N G Y A ]\\033[0m\\n\\033[38;5;44m  ===========================\\033[0m\\n  TC-IDE TERMINAL\\n  GitHub: https://github.com/tianchuangya/TC-IDE\\n  Native semantic workspace\\n\\n'; exec bash";
         let cwd_text = cwd.to_string_lossy().into_owned();
         let launched = Command::new("gnome-terminal")
             .args([
@@ -5003,12 +5003,13 @@ fn default_terminals() -> Vec<TerminalSession> {
 
 fn terminal_banner() -> Vec<String> {
     [
-        "████████╗██╗ █████╗ ███╗   ██╗ ██████╗██╗  ██╗██╗   ██╗ █████╗ ███╗   ██╗ ██████╗ ██╗   ██╗ █████╗",
-        "╚══██╔══╝██║██╔══██╗████╗  ██║██╔════╝██║  ██║██║   ██║██╔══██╗████╗  ██║██╔════╝ ╚██╗ ██╔╝██╔══██╗",
-        "   ██║   ██║███████║██╔██╗ ██║██║     ███████║██║   ██║███████║██╔██╗ ██║██║  ███╗ ╚████╔╝ ███████║",
-        "   ██║   ██║██╔══██║██║╚██╗██║██║     ██╔══██║██║   ██║██╔══██║██║╚██╗██║██║   ██║  ╚██╔╝  ██╔══██║",
-        "   ██║   ██║██║  ██║██║ ╚████║╚██████╗██║  ██║╚██████╔╝██║  ██║██║ ╚████║╚██████╔╝   ██║   ██║  ██║",
-        "GitHub  https://github.com/tianchuangya/TC-IDE   ·   Native semantic workspace",
+        "",
+        "  [ T I A N C H U A N G Y A ]",
+        "  ===========================",
+        "  TC-IDE TERMINAL",
+        "  GitHub: https://github.com/tianchuangya/TC-IDE",
+        "  Native semantic workspace",
+        "",
     ]
     .iter()
     .map(|line| (*line).to_string())
@@ -5955,5 +5956,15 @@ mod tests {
         assert!(tokens
             .iter()
             .any(|(token, kind)| token == "\"TCI\"" && *kind == 2));
+    }
+
+    #[test]
+    fn terminal_banner_is_readable_plain_ascii() {
+        let banner = terminal_banner();
+        assert!(banner.iter().all(|line| line.is_ascii()));
+        assert!(banner
+            .iter()
+            .any(|line| line.contains("T I A N C H U A N G Y A")));
+        assert!(banner.iter().all(|line| line.len() <= 64));
     }
 }
