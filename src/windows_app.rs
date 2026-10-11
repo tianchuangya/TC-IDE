@@ -80,6 +80,13 @@ struct EditorSnapshot {
     selection_anchor: Option<TextPosition>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CreateKind {
+    Project,
+    File,
+    Folder,
+}
+
 thread_local! {
     static APP: RefCell<WindowsAppState> = RefCell::new(WindowsAppState::new());
     static RENDERER: RefCell<Option<DirectEditorRenderer>> = const { RefCell::new(None) };
@@ -91,6 +98,14 @@ struct WindowsAppState {
     project_root: PathBuf,
     project_entries: Vec<String>,
     project_entry_paths: Vec<PathBuf>,
+    workspace_search: String,
+    workspace_search_focused: bool,
+    create_kind: Option<CreateKind>,
+    create_name: String,
+    create_error: String,
+    create_location: PathBuf,
+    project_language: usize,
+    project_environment: usize,
     lines: Vec<String>,
     caret_line: usize,
     caret_column: usize,
@@ -114,15 +129,43 @@ struct WindowsAppState {
 }
 
 impl WindowsAppState {
+    const PROJECT_LANGUAGES: [&'static str; 7] =
+        ["Rust", "Python", "C", "C++", "Java", "Go", "Web"];
+
+    fn project_language_name(&self) -> &'static str {
+        Self::PROJECT_LANGUAGES[self.project_language.min(Self::PROJECT_LANGUAGES.len() - 1)]
+    }
+
+    fn project_environments(&self) -> &'static [&'static str] {
+        match self.project_language_name() {
+            "Python" => &["None", "venv", "uv", "conda", "poetry"],
+            "C" => &["None", "GCC", "Clang", "CMake"],
+            "C++" => &["None", "CMake + MSVC", "CMake + Clang", "Meson", "Conan"],
+            "Java" => &["None", "JDK 25", "JDK 21 LTS", "Gradle", "Maven"],
+            "Rust" => &["None", "cargo stable", "cargo nightly"],
+            "Go" => &["None", "Go modules"],
+            _ => &["None", "npm", "pnpm", "yarn", "bun"],
+        }
+    }
+
     fn new() -> Self {
         let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let (project_entries, project_entry_paths) = Self::scan_project(&project_root);
+        let create_location = project_root.clone();
         Self {
             file_name: "main.rs".into(),
             file_path: None,
             project_root,
             project_entries,
             project_entry_paths,
+            workspace_search: String::new(),
+            workspace_search_focused: false,
+            create_kind: None,
+            create_name: String::new(),
+            create_error: String::new(),
+            create_location,
+            project_language: 0,
+            project_environment: 0,
             lines: vec![
                 "use tc_ide::workspace::Project;".into(),
                 String::new(),
@@ -519,6 +562,89 @@ impl WindowsAppState {
         self.started = Instant::now();
     }
 
+    fn begin_create(&mut self, kind: CreateKind) {
+        self.create_kind = Some(kind);
+        self.create_name.clear();
+        self.create_error.clear();
+        self.create_location = self.project_root.clone();
+        self.workspace_search_focused = false;
+    }
+
+    fn refresh_project(&mut self) {
+        (self.project_entries, self.project_entry_paths) = Self::scan_project(&self.project_root);
+    }
+
+    fn create_requested_item(&mut self) {
+        let Some(kind) = self.create_kind else {
+            return;
+        };
+        let name = self.create_name.trim();
+        if name.is_empty() || name.contains(['/', '\\']) {
+            self.create_error = "Enter a valid name without path separators".into();
+            return;
+        }
+        let target = if kind == CreateKind::Project {
+            self.create_location.join(name)
+        } else {
+            self.project_root.join(name)
+        };
+        if target.exists() {
+            self.create_error = format!("{} already exists", target.display());
+            return;
+        }
+        let result = match kind {
+            CreateKind::File => fs::write(&target, ""),
+            CreateKind::Folder => fs::create_dir(&target),
+            CreateKind::Project => self.create_project_template(&target),
+        };
+        match result {
+            Ok(()) => {
+                self.create_kind = None;
+                self.create_error.clear();
+                if kind == CreateKind::Project {
+                    self.open_project(target);
+                } else {
+                    self.refresh_project();
+                    self.status = format!("Created {}", target.display());
+                    if kind == CreateKind::File {
+                        self.open_file(target);
+                    }
+                }
+            }
+            Err(error) => self.create_error = format!("Create failed: {error}"),
+        }
+    }
+
+    fn create_project_template(&self, target: &std::path::Path) -> std::io::Result<()> {
+        let language = self.project_language_name();
+        fs::create_dir_all(target)?;
+        match language {
+            "Rust" => {
+                fs::create_dir_all(target.join("src"))?;
+                fs::write(target.join("Cargo.toml"), "[package]\nname = \"tc-project\"\nversion = \"0.1.0\"\nedition = \"2024\"\n")?;
+                fs::write(target.join("src/main.rs"), "fn main() {\n    println!(\"Hello from TC-IDE\");\n}\n")?;
+            }
+            "Python" => fs::write(target.join("main.py"), "print(\"Hello from TC-IDE\")\n")?,
+            "C" => fs::write(target.join("main.c"), "#include <stdio.h>\n\nint main(void) {\n    puts(\"Hello from TC-IDE\");\n    return 0;\n}\n")?,
+            "C++" => fs::write(target.join("main.cpp"), "#include <iostream>\n\nint main() {\n    std::cout << \"Hello from TC-IDE\\n\";\n}\n")?,
+            "Java" => fs::write(target.join("Main.java"), "public class Main {\n    public static void main(String[] args) {\n        System.out.println(\"Hello from TC-IDE\");\n    }\n}\n")?,
+            "Go" => {
+                fs::write(target.join("go.mod"), "module tc-project\n\ngo 1.24\n")?;
+                fs::write(target.join("main.go"), "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"Hello from TC-IDE\") }\n")?;
+            }
+            _ => fs::write(target.join("index.html"), "<!doctype html>\n<title>TC-IDE Project</title>\n<h1>Hello from TC-IDE</h1>\n")?,
+        }
+        fs::write(
+            target.join(".tc-ide-project"),
+            format!(
+                "language={language}\nenvironment={}\n",
+                self.project_environments()[self
+                    .project_environment
+                    .min(self.project_environments().len() - 1)]
+            ),
+        )
+    }
+
     fn ensure_terminal(&mut self) {
         if self.terminal.is_some() {
             return;
@@ -791,6 +917,18 @@ fn perform_command(window: Hwnd, command: Wparam) {
             }
             platform::COMMAND_FONT_INCREASE => app.code_zoom = (app.code_zoom + 1).min(8),
             platform::COMMAND_FONT_DECREASE => app.code_zoom = (app.code_zoom - 1).max(-2),
+            platform::COMMAND_NEW_PROJECT => {
+                if let Some(location) = platform::choose_folder(window) {
+                    app.begin_create(CreateKind::Project);
+                    app.create_location = location;
+                }
+            }
+            platform::COMMAND_NEW_FILE => app.begin_create(CreateKind::File),
+            platform::COMMAND_NEW_FOLDER => app.begin_create(CreateKind::Folder),
+            platform::COMMAND_WORKSPACE_SEARCH => {
+                app.workspace_search_focused = true;
+                app.create_kind = None;
+            }
             platform::COMMAND_OPEN_FOLDER => {
                 if let Some(path) = platform::choose_folder(window) {
                     app.open_project(path);
@@ -844,6 +982,14 @@ fn render_window(window: Hwnd) {
                 })
                 .unwrap_or_default();
             let completions = app.completions();
+            let create_location = app.create_location.to_string_lossy().into_owned();
+            let query = app.workspace_search.to_ascii_lowercase();
+            let visible_entries = app
+                .project_entries
+                .iter()
+                .filter(|entry| query.is_empty() || entry.to_ascii_lowercase().contains(&query))
+                .cloned()
+                .collect::<Vec<_>>();
             let scene = WindowsScene {
                 file_name: &app.file_name,
                 project_name: app
@@ -851,7 +997,21 @@ fn render_window(window: Hwnd) {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .unwrap_or("PROJECT"),
-                project_entries: &app.project_entries,
+                project_entries: &visible_entries,
+                workspace_search: &app.workspace_search,
+                workspace_search_focused: app.workspace_search_focused,
+                create_kind: app.create_kind.map(|kind| match kind {
+                    CreateKind::Project => "New project",
+                    CreateKind::File => "New file",
+                    CreateKind::Folder => "New folder",
+                }),
+                create_name: &app.create_name,
+                create_error: &app.create_error,
+                create_location: &create_location,
+                create_language: app.project_language_name(),
+                create_environment: app.project_environments()[app
+                    .project_environment
+                    .min(app.project_environments().len() - 1)],
                 lines: &app.lines,
                 caret_line: app.caret_line,
                 caret_column: app.caret_column,
@@ -884,7 +1044,16 @@ fn render_window(window: Hwnd) {
 fn handle_character(window: Hwnd, value: char) {
     APP.with(|cell| {
         let mut app = cell.borrow_mut();
-        if app.terminal_open {
+        if app.create_kind.is_some() {
+            if !value.is_control() {
+                app.create_name.push(value);
+                app.create_error.clear();
+            }
+        } else if app.workspace_search_focused {
+            if !value.is_control() {
+                app.workspace_search.push(value);
+            }
+        } else if app.terminal_open {
             match value {
                 '\r' | '\n' => {
                     if let Some(session) = &app.terminal {
@@ -973,6 +1142,7 @@ unsafe extern "system" fn window_proc(
                     0x41 => platform::COMMAND_SELECT_ALL,
                     0x43 => platform::COMMAND_COPY_DIAGNOSTIC,
                     0x4f => platform::COMMAND_OPEN_FILE,
+                    0x50 => platform::COMMAND_WORKSPACE_SEARCH,
                     0x54 => platform::COMMAND_OPEN_TERMINAL,
                     0x56 => platform::COMMAND_PASTE,
                     0x58 => platform::COMMAND_CUT,
@@ -994,6 +1164,48 @@ unsafe extern "system" fn window_proc(
             }
             APP.with(|cell| {
                 let mut app = cell.borrow_mut();
+                if app.create_kind.is_some() {
+                    match w_param as u32 {
+                        0x0d => app.create_requested_item(),
+                        0x1b => {
+                            app.create_kind = None;
+                            app.create_error.clear();
+                        }
+                        VK_BACK => {
+                            app.create_name.pop();
+                            app.create_error.clear();
+                        }
+                        VK_UP => {
+                            app.project_language = app.project_language.saturating_sub(1);
+                            app.project_environment = 0;
+                        }
+                        VK_DOWN => {
+                            app.project_language = (app.project_language + 1)
+                                % WindowsAppState::PROJECT_LANGUAGES.len();
+                            app.project_environment = 0;
+                        }
+                        VK_LEFT => {
+                            app.project_environment = app.project_environment.saturating_sub(1);
+                        }
+                        VK_RIGHT => {
+                            let environment_count = app.project_environments().len();
+                            app.project_environment =
+                                (app.project_environment + 1) % environment_count;
+                        }
+                        _ => return,
+                    }
+                    return;
+                }
+                if app.workspace_search_focused {
+                    match w_param as u32 {
+                        0x1b | 0x0d => app.workspace_search_focused = false,
+                        VK_BACK => {
+                            app.workspace_search.pop();
+                        }
+                        _ => return,
+                    }
+                    return;
+                }
                 if !app.terminal_open {
                     let old = app.position();
                     match w_param as u32 {
@@ -1039,13 +1251,32 @@ unsafe extern "system" fn window_proc(
                 APP.with(|cell| cell.borrow_mut().toggle_terminal());
                 invalidate(window);
             } else if x as f32 <= (area.right as f32 * 0.19).max(220.0 * scale) {
-                let first_row = (48.0 + 25.0) * scale;
+                if y as f32 >= 56.0 * scale && y as f32 <= 88.0 * scale {
+                    APP.with(|cell| {
+                        let mut app = cell.borrow_mut();
+                        app.workspace_search_focused = true;
+                        app.create_kind = None;
+                    });
+                    invalidate(window);
+                    return 0;
+                }
+                let first_row = (48.0 + 45.0) * scale;
                 if y as f32 >= first_row {
                     let row = ((y as f32 - first_row) / (35.0 * scale)).floor() as usize;
                     if row >= 2 {
                         APP.with(|cell| {
                             let mut app = cell.borrow_mut();
-                            if let Some(path) = app.project_entry_paths.get(row - 2).cloned() {
+                            let query = app.workspace_search.to_ascii_lowercase();
+                            let path = app
+                                .project_entries
+                                .iter()
+                                .zip(&app.project_entry_paths)
+                                .filter(|(entry, _)| {
+                                    query.is_empty() || entry.to_ascii_lowercase().contains(&query)
+                                })
+                                .nth(row - 2)
+                                .map(|(_, path)| path.clone());
+                            if let Some(path) = path {
                                 if path.is_dir() {
                                     app.open_project(path);
                                 } else {

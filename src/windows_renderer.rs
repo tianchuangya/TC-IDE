@@ -25,6 +25,14 @@ pub struct WindowsScene<'a> {
     pub file_name: &'a str,
     pub project_name: &'a str,
     pub project_entries: &'a [String],
+    pub workspace_search: &'a str,
+    pub workspace_search_focused: bool,
+    pub create_kind: Option<&'a str>,
+    pub create_name: &'a str,
+    pub create_error: &'a str,
+    pub create_location: &'a str,
+    pub create_language: &'a str,
+    pub create_environment: &'a str,
     pub lines: &'a [String],
     pub caret_line: usize,
     pub caret_column: usize,
@@ -353,11 +361,54 @@ impl DirectEditorRenderer {
             .chain(std::iter::once(format!("▾ {}", scene.project_name)))
             .chain(scene.project_entries.iter().cloned())
             .collect::<Vec<_>>();
+        unsafe {
+            Self::rounded(
+                &target_base,
+                if scene.workspace_search_focused {
+                    &selection
+                } else {
+                    &raised
+                },
+                D2D_RECT_F {
+                    left: 12.0 * scale,
+                    top: header_h + 8.0 * scale,
+                    right: tree_w - 12.0 * scale,
+                    bottom: header_h + 40.0 * scale,
+                },
+                8.0 * scale,
+            )
+        };
+        unsafe {
+            Self::text(
+                &target_base,
+                &self.small_format,
+                if scene.workspace_search.is_empty() {
+                    &muted
+                } else {
+                    &text
+                },
+                if scene.workspace_search.is_empty() {
+                    if scene.ui_chinese {
+                        "搜索项目文件"
+                    } else {
+                        "Search project files"
+                    }
+                } else {
+                    scene.workspace_search
+                },
+                D2D_RECT_F {
+                    left: 22.0 * scale,
+                    top: header_h + 16.0 * scale,
+                    right: tree_w - 18.0 * scale,
+                    bottom: header_h + 38.0 * scale,
+                },
+            )
+        };
         for (index, item) in tree_items.iter().enumerate() {
             let delay = index as f32 * 0.045;
             let local = ((scene.animation_seconds - delay) / 0.28).clamp(0.0, 1.0);
             let eased = 1.0 - (1.0 - local).powi(3);
-            let y = header_h + (38.0 + index as f32 * 35.0) * scale;
+            let y = header_h + (58.0 + index as f32 * 35.0) * scale;
             let x = (18.0 + index.saturating_sub(1) as f32 * 14.0) * scale
                 - (1.0 - eased) * 18.0 * scale;
             unsafe {
@@ -746,6 +797,129 @@ impl DirectEditorRenderer {
                     },
                 )
             };
+        }
+        if let Some(kind) = scene.create_kind {
+            let dialog_w = (520.0 * scale).min(width - 40.0 * scale);
+            let dialog_h = 230.0 * scale;
+            let left = (width - dialog_w) * 0.5;
+            let top = (height - dialog_h) * 0.42;
+            unsafe {
+                Self::rounded(
+                    &target_base,
+                    &panel,
+                    D2D_RECT_F {
+                        left,
+                        top,
+                        right: left + dialog_w,
+                        bottom: top + dialog_h,
+                    },
+                    16.0 * scale,
+                )
+            };
+            unsafe {
+                Self::text(
+                    &target_base,
+                    &self.ui_format,
+                    &bright,
+                    kind,
+                    D2D_RECT_F {
+                        left: left + 24.0 * scale,
+                        top: top + 22.0 * scale,
+                        right: left + dialog_w,
+                        bottom: top + 52.0 * scale,
+                    },
+                )
+            };
+            unsafe {
+                Self::rounded(
+                    &target_base,
+                    &selection,
+                    D2D_RECT_F {
+                        left: left + 24.0 * scale,
+                        top: top + 70.0 * scale,
+                        right: left + dialog_w - 24.0 * scale,
+                        bottom: top + 112.0 * scale,
+                    },
+                    9.0 * scale,
+                )
+            };
+            unsafe {
+                Self::text(
+                    &target_base,
+                    &self.code_format,
+                    &bright,
+                    if scene.create_name.is_empty() {
+                        "name"
+                    } else {
+                        scene.create_name
+                    },
+                    D2D_RECT_F {
+                        left: left + 38.0 * scale,
+                        top: top + 81.0 * scale,
+                        right: left + dialog_w - 32.0 * scale,
+                        bottom: top + 108.0 * scale,
+                    },
+                )
+            };
+            unsafe {
+                Self::text(
+                    &target_base,
+                    &self.small_format,
+                    if scene.create_error.is_empty() {
+                        &muted
+                    } else {
+                        &literal
+                    },
+                    if scene.create_error.is_empty() {
+                        if scene.ui_chinese {
+                            "Enter 确定  ·  Esc 取消"
+                        } else {
+                            "Enter to create  ·  Esc to cancel"
+                        }
+                    } else {
+                        scene.create_error
+                    },
+                    D2D_RECT_F {
+                        left: left + 26.0 * scale,
+                        top: top + 132.0 * scale,
+                        right: left + dialog_w - 26.0 * scale,
+                        bottom: top + 170.0 * scale,
+                    },
+                )
+            };
+            if kind == "New project" {
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        &text,
+                        &format!(
+                            "↑↓ Language: {}    ←→ Environment: {}",
+                            scene.create_language, scene.create_environment
+                        ),
+                        D2D_RECT_F {
+                            left: left + 26.0 * scale,
+                            top: top + 172.0 * scale,
+                            right: left + dialog_w - 26.0 * scale,
+                            bottom: top + 204.0 * scale,
+                        },
+                    )
+                };
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        &muted,
+                        &format!("Location: {}", scene.create_location),
+                        D2D_RECT_F {
+                            left: left + 26.0 * scale,
+                            top: top + 202.0 * scale,
+                            right: left + dialog_w - 26.0 * scale,
+                            bottom: top + 226.0 * scale,
+                        },
+                    )
+                };
+            }
         }
         if let Err(error) = unsafe { target_base.EndDraw(None, None) } {
             self.target = None;

@@ -28,6 +28,10 @@ pub const COMMAND_THEME_LIGHT: Wparam = 1012;
 pub const COMMAND_LANGUAGE_TOGGLE: Wparam = 1013;
 pub const COMMAND_FONT_INCREASE: Wparam = 1014;
 pub const COMMAND_FONT_DECREASE: Wparam = 1015;
+pub const COMMAND_NEW_PROJECT: Wparam = 1016;
+pub const COMMAND_NEW_FILE: Wparam = 1017;
+pub const COMMAND_NEW_FOLDER: Wparam = 1018;
+pub const COMMAND_WORKSPACE_SEARCH: Wparam = 1019;
 
 const CF_UNICODETEXT: Uint = 13;
 const GMEM_MOVEABLE: Uint = 0x0002;
@@ -217,6 +221,9 @@ pub fn install_native_menu(window: Hwnd) {
         let view_menu = CreatePopupMenu();
         let platform_menu = CreatePopupMenu();
         let open_file = wide("Open file...\tCtrl+O");
+        let new_project = wide("New project...");
+        let new_file = wide("New file...");
+        let new_folder = wide("New folder...");
         let open_folder = wide("Open project folder...");
         let reveal_folder = wide("Reveal current project in Explorer");
         let open_terminal = wide("Toggle integrated ConPTY terminal\tCtrl+T");
@@ -231,6 +238,20 @@ pub fn install_native_menu(window: Hwnd) {
         let language = wide("English / 中文");
         let font_increase = wide("Increase code size\tCtrl++");
         let font_decrease = wide("Decrease code size\tCtrl+-");
+        let workspace_search = wide("Search project files\tCtrl+P");
+        AppendMenuW(
+            file_menu,
+            MF_STRING,
+            COMMAND_NEW_PROJECT,
+            new_project.as_ptr(),
+        );
+        AppendMenuW(file_menu, MF_STRING, COMMAND_NEW_FILE, new_file.as_ptr());
+        AppendMenuW(
+            file_menu,
+            MF_STRING,
+            COMMAND_NEW_FOLDER,
+            new_folder.as_ptr(),
+        );
         AppendMenuW(file_menu, MF_STRING, COMMAND_OPEN_FILE, open_file.as_ptr());
         AppendMenuW(
             file_menu,
@@ -280,6 +301,12 @@ pub fn install_native_menu(window: Hwnd) {
             MF_STRING,
             COMMAND_FONT_DECREASE,
             font_decrease.as_ptr(),
+        );
+        AppendMenuW(
+            view_menu,
+            MF_STRING,
+            COMMAND_WORKSPACE_SEARCH,
+            workspace_search.as_ptr(),
         );
         let file_label = wide("File");
         let edit_label = wide("Edit");
