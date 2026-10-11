@@ -17,7 +17,7 @@ TC-IDE 不是网页套壳。界面状态、布局、动画和绘制都由 Rust �
 TC-IDE 不把 Linux 可执行文件改名后当作 Windows 或 macOS 包。入口按目标系统编译：
 
 - `linux_app`：现有 X11/Cairo/Pango 后端；
-- `windows_app`：Win32 原生窗口后端，后续接入 DirectWrite/Direct2D、Windows Clipboard、IFileDialog、ConPTY 与 Shell API；
+- `windows_app`：Win32 原生窗口后端，已接入 DirectWrite/Direct2D、Windows Clipboard、原生文件对话框、ConPTY 与 Shell API；
 - `macos_app`：独立的 Cocoa/Metal 后端入口，后续接入 NSPasteboard、NSOpenPanel 与 PTY；
 - 工作区、文本缓冲、语义图、动画状态和打包任务将逐步下沉为共享的纯 Rust 核心，不允许调用平台 API。
 
@@ -26,14 +26,14 @@ TC-IDE 不把 Linux 可执行文件改名后当作 Windows 或 macOS 包。入�
 | 能力 | Linux | Windows | macOS |
 | --- | --- | --- | --- |
 | 原生窗口 | X11（已实现） | Win32 基础窗口（已建立） | 独立入口（待实现） |
-| 文本/GPU 渲染 | Cairo/Pango | DirectWrite/Direct2D（待实现） | CoreText/Metal（待实现） |
+| 文本/GPU 渲染 | Cairo/Pango | DirectWrite/Direct2D（基础编辑画布已接入） | CoreText/Metal（待实现） |
 | 系统剪贴板 | X11 selection | Windows Clipboard UTF-16（平台层已接入，待编辑器共享核心） | NSPasteboard（待实现） |
 | 文件选择 | zenity（将替换为适配器） | GetOpenFileNameW（已接入） | NSOpenPanel（待实现） |
-| 集成终端 | shell/PTY | Windows Terminal/PowerShell 启动（已接入），ConPTY 流（待实现） | PTY + 用户 shell（待实现） |
+| 集成终端 | shell/PTY | ConPTY + PowerShell 输入输出流（已接入） | PTY + 用户 shell（待实现） |
 | 打开输出目录 | xdg-open/gio | Explorer/ShellExecuteW（已接入） | NSWorkspace/open（待实现） |
 | 安装包 | deb/AppImage（待接入真实打包） | MSIX/NSIS（待实现） | dmg/pkg（待实现） |
 
-Windows 后端还启用了 Per-monitor DPI V2，并处理 `WM_DPICHANGED` 推荐窗口尺寸。其原生菜单和快捷键会实际执行文件选择、UTF-16 剪贴板读写、Explorer 打开目录和终端启动，用于在编辑器共享核心迁移前验证平台适配器。
+Windows 后端还启用了 Per-monitor DPI V2，并处理 `WM_DPICHANGED` 推荐窗口尺寸。其原生菜单和快捷键会实际执行文件选择、UTF-16 剪贴板读写与 Explorer 打开目录。Direct2D 将项目树、可编辑代码、调用层级和底部终端统一绘制；ConPTY 在项目目录启动 PowerShell，通过管道双向传输输入输出。当前仍需在真实 Windows 设备上补齐语法布局、IME 和终端 VT 属性的完整运行测试。
 
 ## 关系图的层级语义
 

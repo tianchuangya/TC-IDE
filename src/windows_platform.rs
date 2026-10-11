@@ -182,7 +182,7 @@ pub fn install_native_menu(window: Hwnd) {
         let platform_menu = CreatePopupMenu();
         let open_file = wide("Open file...\tCtrl+O");
         let open_folder = wide("Open project folder in Explorer");
-        let open_terminal = wide("Open Windows Terminal\tCtrl+T");
+        let open_terminal = wide("Toggle integrated ConPTY terminal\tCtrl+T");
         let copy = wide("Copy API diagnostic\tCtrl+C");
         let paste = wide("Read system clipboard\tCtrl+V");
         AppendMenuW(file_menu, MF_STRING, COMMAND_OPEN_FILE, open_file.as_ptr());
@@ -326,15 +326,4 @@ pub fn read_clipboard(window: Hwnd) -> Result<String, &'static str> {
 
 pub fn open_in_explorer(window: Hwnd, path: &Path) -> bool {
     shell_execute(window, &path.to_string_lossy(), None)
-}
-
-pub fn open_terminal(window: Hwnd, path: &Path) -> bool {
-    let location = path.to_string_lossy();
-    let terminal_arguments = format!("-d \"{location}\"");
-    if shell_execute(window, "wt.exe", Some(&terminal_arguments)) {
-        return true;
-    }
-    let escaped = location.replace('\'', "''");
-    let powershell_arguments = format!("-NoExit -Command Set-Location -LiteralPath '{escaped}'");
-    shell_execute(window, "powershell.exe", Some(&powershell_arguments))
 }
