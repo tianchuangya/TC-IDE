@@ -8,6 +8,8 @@ pub struct WindowsPreferences {
     pub code_zoom: i32,
     pub project_language: usize,
     pub project_environment: usize,
+    pub language_installed: Vec<bool>,
+    pub language_versions: Vec<usize>,
 }
 
 fn path() -> PathBuf {
@@ -33,6 +35,15 @@ pub fn load() -> WindowsPreferences {
             "code_zoom" => preferences.code_zoom = value.parse().unwrap_or(0).clamp(-2, 8),
             "project_language" => preferences.project_language = value.parse().unwrap_or(0),
             "project_environment" => preferences.project_environment = value.parse().unwrap_or(0),
+            "language_installed" => {
+                preferences.language_installed = value.split(',').map(|item| item == "1").collect()
+            }
+            "language_versions" => {
+                preferences.language_versions = value
+                    .split(',')
+                    .map(|item| item.parse().unwrap_or(0))
+                    .collect()
+            }
             _ => {}
         }
     }
@@ -47,7 +58,7 @@ pub fn save(preferences: &WindowsPreferences) -> std::io::Result<()> {
     fs::write(
         path,
         format!(
-            "theme={}\nlanguage={}\ncode_zoom={}\nproject_language={}\nproject_environment={}\n",
+            "theme={}\nlanguage={}\ncode_zoom={}\nproject_language={}\nproject_environment={}\nlanguage_installed={}\nlanguage_versions={}\n",
             if preferences.light_theme {
                 "light"
             } else {
@@ -61,6 +72,18 @@ pub fn save(preferences: &WindowsPreferences) -> std::io::Result<()> {
             preferences.code_zoom,
             preferences.project_language,
             preferences.project_environment,
+            preferences
+                .language_installed
+                .iter()
+                .map(|value| if *value { "1" } else { "0" })
+                .collect::<Vec<_>>()
+                .join(","),
+            preferences
+                .language_versions
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
         ),
     )
 }

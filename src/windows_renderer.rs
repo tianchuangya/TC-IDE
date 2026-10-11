@@ -41,6 +41,13 @@ pub struct WindowsScene<'a> {
     pub completions: &'a [String],
     pub light_theme: bool,
     pub ui_chinese: bool,
+    pub code_zoom: i32,
+    pub settings_open: bool,
+    pub extensions_open: bool,
+    pub extension_category: usize,
+    pub selected_language: usize,
+    pub language_installed: &'a [bool],
+    pub language_versions: &'a [usize],
     pub status: &'a str,
     pub terminal_lines: &'a [String],
     pub terminal_input: &'a str,
@@ -797,6 +804,273 @@ impl DirectEditorRenderer {
                     },
                 )
             };
+        }
+        if scene.settings_open {
+            let panel_w = 390.0 * scale;
+            let left = width - panel_w - 20.0 * scale;
+            let top = 58.0 * scale;
+            unsafe {
+                Self::rounded(
+                    &target_base,
+                    &panel,
+                    D2D_RECT_F {
+                        left,
+                        top,
+                        right: width - 20.0 * scale,
+                        bottom: (top + 560.0 * scale).min(height - 36.0 * scale),
+                    },
+                    16.0 * scale,
+                )
+            };
+            let settings = [
+                if scene.ui_chinese {
+                    "设置"
+                } else {
+                    "SETTINGS"
+                }
+                .to_string(),
+                format!(
+                    "L   Interface language: {}",
+                    if scene.ui_chinese {
+                        "简体中文"
+                    } else {
+                        "English"
+                    }
+                ),
+                format!(
+                    "T   Theme: {}",
+                    if scene.light_theme { "Light" } else { "Dark" }
+                ),
+                format!("←→  Code font size: {}", 15 + scene.code_zoom),
+                "Font: Cascadia Mono / JetBrains Mono".into(),
+                "Background image: not selected".into(),
+                "Opacity 100%   Crop 0,0   Zoom 1.0x".into(),
+                "Esc  Close settings".into(),
+            ];
+            for (index, value) in settings.iter().enumerate() {
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        if index == 0 {
+                            &self.ui_format
+                        } else {
+                            &self.small_format
+                        },
+                        if index == 0 {
+                            &bright
+                        } else if index < 4 {
+                            &text
+                        } else {
+                            &muted
+                        },
+                        value,
+                        D2D_RECT_F {
+                            left: left + 22.0 * scale,
+                            top: top + (24.0 + index as f32 * 54.0) * scale,
+                            right: width - 38.0 * scale,
+                            bottom: top + (52.0 + index as f32 * 54.0) * scale,
+                        },
+                    )
+                };
+            }
+        }
+        if scene.extensions_open {
+            let panel_w = (920.0 * scale).min(width - 50.0 * scale);
+            let panel_h = (610.0 * scale).min(height - 80.0 * scale);
+            let left = (width - panel_w) * 0.5;
+            let top = 58.0 * scale;
+            unsafe {
+                Self::rounded(
+                    &target_base,
+                    &panel,
+                    D2D_RECT_F {
+                        left,
+                        top,
+                        right: left + panel_w,
+                        bottom: top + panel_h,
+                    },
+                    16.0 * scale,
+                )
+            };
+            let categories = [
+                "Languages",
+                "Themes",
+                "Debuggers",
+                "Formatters",
+                "AI / Agents",
+            ];
+            unsafe {
+                Self::text(
+                    &target_base,
+                    &self.ui_format,
+                    &bright,
+                    if scene.ui_chinese {
+                        "扩展"
+                    } else {
+                        "EXTENSIONS"
+                    },
+                    D2D_RECT_F {
+                        left: left + 22.0 * scale,
+                        top: top + 20.0 * scale,
+                        right: left + panel_w,
+                        bottom: top + 50.0 * scale,
+                    },
+                )
+            };
+            for (index, category) in categories.iter().enumerate() {
+                let y = top + (78.0 + index as f32 * 44.0) * scale;
+                if index == scene.extension_category {
+                    unsafe {
+                        Self::rounded(
+                            &target_base,
+                            &selection,
+                            D2D_RECT_F {
+                                left: left + 14.0 * scale,
+                                top: y - 20.0 * scale,
+                                right: left + 172.0 * scale,
+                                bottom: y + 14.0 * scale,
+                            },
+                            7.0 * scale,
+                        )
+                    };
+                }
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        if index == scene.extension_category {
+                            &bright
+                        } else {
+                            &text
+                        },
+                        category,
+                        D2D_RECT_F {
+                            left: left + 26.0 * scale,
+                            top: y - 8.0 * scale,
+                            right: left + 168.0 * scale,
+                            bottom: y + 20.0 * scale,
+                        },
+                    )
+                };
+            }
+            let content_left = left + 205.0 * scale;
+            if scene.extension_category == 0 {
+                for (index, language) in ["Rust", "Python", "C", "C++", "Java", "Go", "Web"]
+                    .iter()
+                    .enumerate()
+                {
+                    let y = top + (92.0 + index as f32 * 48.0) * scale;
+                    if index == scene.selected_language {
+                        unsafe {
+                            Self::rounded(
+                                &target_base,
+                                &selection,
+                                D2D_RECT_F {
+                                    left: content_left,
+                                    top: y - 22.0 * scale,
+                                    right: content_left + 300.0 * scale,
+                                    bottom: y + 16.0 * scale,
+                                },
+                                7.0 * scale,
+                            )
+                        };
+                    }
+                    let installed = scene
+                        .language_installed
+                        .get(index)
+                        .copied()
+                        .unwrap_or(false);
+                    unsafe {
+                        Self::text(
+                            &target_base,
+                            &self.small_format,
+                            &text,
+                            language,
+                            D2D_RECT_F {
+                                left: content_left + 12.0 * scale,
+                                top: y - 9.0 * scale,
+                                right: content_left + 160.0 * scale,
+                                bottom: y + 18.0 * scale,
+                            },
+                        )
+                    };
+                    unsafe {
+                        Self::text(
+                            &target_base,
+                            &self.small_format,
+                            if installed { &accent } else { &muted },
+                            if installed {
+                                "INSTALLED"
+                            } else {
+                                "BUILT-IN DETECTION"
+                            },
+                            D2D_RECT_F {
+                                left: content_left + 160.0 * scale,
+                                top: y - 9.0 * scale,
+                                right: content_left + 300.0 * scale,
+                                bottom: y + 18.0 * scale,
+                            },
+                        )
+                    };
+                }
+                let version = scene
+                    .language_versions
+                    .get(scene.selected_language)
+                    .copied()
+                    .unwrap_or(0)
+                    + 1;
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        &muted,
+                        &format!("↑↓ Select  ·  V Version {version}  ·  Space Install/remove"),
+                        D2D_RECT_F {
+                            left: content_left,
+                            top: top + panel_h - 48.0 * scale,
+                            right: left + panel_w,
+                            bottom: top + panel_h - 18.0 * scale,
+                        },
+                    )
+                };
+            } else {
+                let detail = match scene.extension_category {
+                    1 => "Dark and light semantic themes apply immediately.",
+                    2 => "Native LLDB / GDB / DAP adapters: not connected.",
+                    3 => "Biome / clang-format / Black / Ruff: not connected.",
+                    _ => {
+                        "OpenAI-compatible endpoint, model and session-only API key configuration."
+                    }
+                };
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.ui_format,
+                        &bright,
+                        categories[scene.extension_category],
+                        D2D_RECT_F {
+                            left: content_left,
+                            top: top + 82.0 * scale,
+                            right: left + panel_w - 20.0 * scale,
+                            bottom: top + 118.0 * scale,
+                        },
+                    )
+                };
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        &muted,
+                        detail,
+                        D2D_RECT_F {
+                            left: content_left,
+                            top: top + 132.0 * scale,
+                            right: left + panel_w - 30.0 * scale,
+                            bottom: top + 220.0 * scale,
+                        },
+                    )
+                };
+            }
         }
         if let Some(kind) = scene.create_kind {
             let dialog_w = (520.0 * scale).min(width - 40.0 * scale);

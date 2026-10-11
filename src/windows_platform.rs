@@ -32,6 +32,8 @@ pub const COMMAND_NEW_PROJECT: Wparam = 1016;
 pub const COMMAND_NEW_FILE: Wparam = 1017;
 pub const COMMAND_NEW_FOLDER: Wparam = 1018;
 pub const COMMAND_WORKSPACE_SEARCH: Wparam = 1019;
+pub const COMMAND_SETTINGS: Wparam = 1020;
+pub const COMMAND_EXTENSIONS: Wparam = 1021;
 
 const CF_UNICODETEXT: Uint = 13;
 const GMEM_MOVEABLE: Uint = 0x0002;
@@ -239,11 +241,20 @@ pub fn install_native_menu(window: Hwnd) {
         let font_increase = wide("Increase code size\tCtrl++");
         let font_decrease = wide("Decrease code size\tCtrl+-");
         let workspace_search = wide("Search project files\tCtrl+P");
+        let settings = wide("Settings...");
+        let extensions = wide("Extensions...");
         AppendMenuW(
             file_menu,
             MF_STRING,
             COMMAND_NEW_PROJECT,
             new_project.as_ptr(),
+        );
+        AppendMenuW(view_menu, MF_STRING, COMMAND_SETTINGS, settings.as_ptr());
+        AppendMenuW(
+            view_menu,
+            MF_STRING,
+            COMMAND_EXTENSIONS,
+            extensions.as_ptr(),
         );
         AppendMenuW(file_menu, MF_STRING, COMMAND_NEW_FILE, new_file.as_ptr());
         AppendMenuW(

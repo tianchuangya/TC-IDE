@@ -119,6 +119,12 @@ struct WindowsAppState {
     light_theme: bool,
     ui_chinese: bool,
     code_zoom: i32,
+    settings_open: bool,
+    extensions_open: bool,
+    extension_category: usize,
+    selected_language: usize,
+    language_installed: Vec<bool>,
+    language_versions: Vec<usize>,
     terminal_open: bool,
     terminal_motion: f32,
     terminal_velocity: f32,
@@ -192,6 +198,29 @@ impl WindowsAppState {
             light_theme: preferences.light_theme,
             ui_chinese: preferences.ui_chinese,
             code_zoom: preferences.code_zoom,
+            settings_open: false,
+            extensions_open: false,
+            extension_category: 0,
+            selected_language: 0,
+            language_installed: (0..7)
+                .map(|index| {
+                    preferences
+                        .language_installed
+                        .get(index)
+                        .copied()
+                        .unwrap_or(false)
+                })
+                .collect(),
+            language_versions: (0..7)
+                .map(|index| {
+                    preferences
+                        .language_versions
+                        .get(index)
+                        .copied()
+                        .unwrap_or(0)
+                        .min(2)
+                })
+                .collect(),
             terminal_open: false,
             terminal_motion: 0.0,
             terminal_velocity: 0.0,
@@ -580,6 +609,8 @@ impl WindowsAppState {
             code_zoom: self.code_zoom,
             project_language: self.project_language,
             project_environment: self.project_environment,
+            language_installed: self.language_installed.clone(),
+            language_versions: self.language_versions.clone(),
         });
     }
 
@@ -942,6 +973,14 @@ fn perform_command(window: Hwnd, command: Wparam) {
                 app.workspace_search_focused = true;
                 app.create_kind = None;
             }
+            platform::COMMAND_SETTINGS => {
+                app.settings_open = !app.settings_open;
+                app.extensions_open = false;
+            }
+            platform::COMMAND_EXTENSIONS => {
+                app.extensions_open = !app.extensions_open;
+                app.settings_open = false;
+            }
             platform::COMMAND_OPEN_FOLDER => {
                 if let Some(path) = platform::choose_folder(window) {
                     app.open_project(path);
@@ -1036,6 +1075,13 @@ fn render_window(window: Hwnd) {
                 completions: &completions,
                 light_theme: app.light_theme,
                 ui_chinese: app.ui_chinese,
+                code_zoom: app.code_zoom,
+                settings_open: app.settings_open,
+                extensions_open: app.extensions_open,
+                extension_category: app.extension_category,
+                selected_language: app.selected_language,
+                language_installed: &app.language_installed,
+                language_versions: &app.language_versions,
                 status: &app.status,
                 terminal_lines: &terminal_lines,
                 terminal_input: &app.terminal_input,
@@ -1205,6 +1251,44 @@ unsafe extern "system" fn window_proc(
                             let environment_count = app.project_environments().len();
                             app.project_environment =
                                 (app.project_environment + 1) % environment_count;
+                        }
+                        _ => return,
+                    }
+                    app.save_preferences();
+                    return;
+                }
+                if app.settings_open {
+                    match w_param as u32 {
+                        0x1b => app.settings_open = false,
+                        0x4c => app.ui_chinese = !app.ui_chinese,
+                        0x54 => app.light_theme = !app.light_theme,
+                        VK_LEFT => app.code_zoom = (app.code_zoom - 1).max(-2),
+                        VK_RIGHT => app.code_zoom = (app.code_zoom + 1).min(8),
+                        _ => return,
+                    }
+                    app.save_preferences();
+                    RENDERER.with(|renderer| *renderer.borrow_mut() = None);
+                    return;
+                }
+                if app.extensions_open {
+                    match w_param as u32 {
+                        0x1b => app.extensions_open = false,
+                        VK_LEFT => {
+                            app.extension_category = app.extension_category.saturating_sub(1)
+                        }
+                        VK_RIGHT => app.extension_category = (app.extension_category + 1) % 5,
+                        VK_UP => app.selected_language = app.selected_language.saturating_sub(1),
+                        VK_DOWN => {
+                            app.selected_language = (app.selected_language + 1)
+                                % WindowsAppState::PROJECT_LANGUAGES.len()
+                        }
+                        0x20 if app.extension_category == 0 => {
+                            let index = app.selected_language;
+                            app.language_installed[index] = !app.language_installed[index];
+                        }
+                        0x56 if app.extension_category == 0 => {
+                            let index = app.selected_language;
+                            app.language_versions[index] = (app.language_versions[index] + 1) % 3;
                         }
                         _ => return,
                     }
