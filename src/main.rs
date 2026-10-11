@@ -408,6 +408,11 @@ const LC_ALL: c_int = 6;
 
 const CODE_FONT_FAMILIES: &[&str] = &[
     "JetBrains Mono",
+    "Fira Code",
+    "Cascadia Code",
+    "Source Code Pro",
+    "Hack",
+    "Ubuntu Mono",
     "DejaVu Sans Mono",
     "Liberation Mono",
     "Noto Sans Mono CJK SC",
@@ -425,8 +430,6 @@ struct Node {
     label: &'static str,
     detail: &'static str,
     level: Level,
-    nx: f32,
-    ny: f32,
 }
 
 struct FileBuffer {
@@ -477,64 +480,46 @@ const NODES: &[Node] = &[
         label: "TC-IDE",
         detail: "project",
         level: Level::Project,
-        nx: 0.12,
-        ny: 0.50,
     },
     Node {
         label: "graph.rs",
         detail: "src/editor",
         level: Level::File,
-        nx: 0.34,
-        ny: 0.20,
     },
     Node {
         label: "workspace.rs",
         detail: "src",
         level: Level::File,
-        nx: 0.34,
-        ny: 0.50,
     },
     Node {
         label: "render.rs",
         detail: "src",
         level: Level::File,
-        nx: 0.34,
-        ny: 0.80,
     },
     Node {
         label: "GraphController",
         detail: "class",
         level: Level::Class,
-        nx: 0.56,
-        ny: 0.20,
     },
     Node {
         label: "build_graph()",
         detail: "fn - L42",
         level: Level::Function,
-        nx: 0.78,
-        ny: 0.20,
     },
     Node {
         label: "analyze_workspace()",
         detail: "fn - L18",
         level: Level::Function,
-        nx: 0.78,
-        ny: 0.42,
     },
     Node {
         label: "resolve_symbols()",
         detail: "fn - L67",
         level: Level::Function,
-        nx: 0.78,
-        ny: 0.58,
     },
     Node {
         label: "render_graph()",
         detail: "fn - L12",
         level: Level::Function,
-        nx: 0.78,
-        ny: 0.80,
     },
 ];
 
@@ -549,6 +534,7 @@ const EDGES: &[(usize, usize)] = &[
     (3, 8),
 ];
 
+#[derive(Clone, Copy)]
 struct Palette {
     bg: c_ulong,
     panel: c_ulong,
@@ -579,8 +565,12 @@ struct App {
     background_opacity: f64,
     background_offset_x: f64,
     background_offset_y: f64,
+    background_zoom: f64,
     logo_surface: *mut CairoSurface,
     colors: Palette,
+    dark_colors: Palette,
+    light_colors: Palette,
+    light_theme: bool,
     width: i32,
     height: i32,
     mouse_x: i32,
@@ -603,6 +593,8 @@ struct App {
     selection_head: Option<(usize, usize)>,
     clipboard: String,
     code_zoom: i32,
+    font_search: String,
+    font_search_focused: bool,
     edit_menu_open: bool,
     workspace_search: String,
     workspace_search_focused: bool,
@@ -615,6 +607,7 @@ struct App {
     terminal_menu_open: bool,
     graph_current: bool,
     graph_zoom: f32,
+    graph_mode: usize,
     package_open: bool,
     package_targets: [bool; 4],
     build_started: Option<Instant>,
@@ -631,6 +624,10 @@ struct App {
     extension_search_focused: bool,
     selected_language: Option<usize>,
     version_menu_open: bool,
+    ai_endpoint: String,
+    ai_model: String,
+    ai_key: String,
+    ai_field_focused: Option<usize>,
     create_kind: Option<CreateKind>,
     new_file_name: String,
     project_language: usize,
@@ -666,7 +663,27 @@ impl App {
     }
 
     fn color_rgb(&self, color: c_ulong) -> (f64, f64, f64) {
-        let hex = if color == self.colors.bg {
+        let hex = if self.light_theme {
+            if color == self.colors.bg {
+                0xf7f8fa
+            } else if color == self.colors.panel {
+                0xffffff
+            } else if color == self.colors.panel_2 {
+                0xeff2f5
+            } else if color == self.colors.line {
+                0xcbd2d9
+            } else if color == self.colors.muted {
+                0x68737d
+            } else if color == self.colors.text {
+                0x34414a
+            } else if color == self.colors.bright {
+                0x11181d
+            } else if color == self.colors.accent {
+                0x397f91
+            } else {
+                0xdce9ed
+            }
+        } else if color == self.colors.bg {
             0x0d0f11
         } else if color == self.colors.panel {
             0x121518
@@ -765,7 +782,53 @@ impl App {
 
     fn reload_code_font(&mut self) {
         self.code_zoom = self.code_zoom.clamp(-2, 8);
-        save_ui_preferences(self.ui_chinese, self.code_font_family, self.code_zoom);
+        save_ui_preferences(
+            self.ui_chinese,
+            self.code_font_family,
+            self.code_zoom,
+            self.light_theme,
+        );
+    }
+
+    fn set_light_theme(&mut self, light: bool) {
+        self.light_theme = light;
+        self.colors = if light {
+            self.light_colors
+        } else {
+            self.dark_colors
+        };
+        save_ui_preferences(
+            self.ui_chinese,
+            self.code_font_family,
+            self.code_zoom,
+            self.light_theme,
+        );
+        self.status_message = self
+            .tr(
+                if light {
+                    "Light theme enabled"
+                } else {
+                    "Dark theme enabled"
+                },
+                if light {
+                    "已启用浅色主题"
+                } else {
+                    "已启用深色主题"
+                },
+            )
+            .into();
+    }
+
+    fn filtered_font_indices(&self) -> Vec<usize> {
+        let needle = self.font_search.trim().to_ascii_lowercase();
+        CODE_FONT_FAMILIES
+            .iter()
+            .enumerate()
+            .filter(|(_, family)| {
+                needle.is_empty() || family.to_ascii_lowercase().contains(&needle)
+            })
+            .map(|(index, _)| index)
+            .collect()
     }
 
     unsafe fn replace_background(&mut self, path: Option<PathBuf>) {
@@ -792,6 +855,7 @@ impl App {
             self.background_opacity,
             self.background_offset_x,
             self.background_offset_y,
+            self.background_zoom,
         );
     }
 
@@ -858,13 +922,40 @@ impl App {
         }
     }
 
+    fn choose_project_location(&mut self) {
+        let output = Command::new("zenity")
+            .args([
+                "--file-selection",
+                "--directory",
+                "--title=TC-IDE Project Location",
+            ])
+            .output();
+        match output {
+            Ok(output) if output.status.success() => {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    self.project_location = path;
+                    self.project_location_focused = false;
+                    self.status_message = self
+                        .tr("Project location selected", "已选择项目位置")
+                        .into();
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.status_message = format!("Could not open folder picker: {error}");
+            }
+        }
+    }
+
     unsafe fn draw_background_region(&self, x: i32, y: i32, width: i32, height: i32) {
         if self.background_surface.is_null() || self.background_opacity <= 0.0 {
             return;
         }
         let image_w = cairo_image_surface_get_width(self.background_surface).max(1) as f64;
         let image_h = cairo_image_surface_get_height(self.background_surface).max(1) as f64;
-        let scale = (width as f64 / image_w).max(height as f64 / image_h);
+        let scale = (width as f64 / image_w).max(height as f64 / image_h)
+            * self.background_zoom.clamp(1.0, 3.0);
         let drawn_w = image_w * scale;
         let drawn_h = image_h * scale;
         let excess_x = (drawn_w - width as f64).max(0.0);
@@ -1440,12 +1531,19 @@ impl App {
     }
 
     fn node_position(&self, node: &Node) -> (i32, i32) {
-        let (x, y, w, h) = self.graph_bounds();
-        let cx = x + w / 2;
-        let cy = y + h / 2;
+        let (x, y, _, _) = self.graph_bounds();
+        let index = NODES
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, node))
+            .unwrap_or(0);
+        let depth = match node.level {
+            Level::Project => 0,
+            Level::File => 1,
+            Level::Class | Level::Function => 2,
+        };
         (
-            cx + ((node.nx - 0.5) * w as f32 * self.graph_zoom) as i32,
-            cy + ((node.ny - 0.5) * h as f32 * self.graph_zoom) as i32,
+            x + self.s(28 + depth * 28),
+            y + self.s(56) + (self.s(54) as f32 * self.graph_zoom * index as f32) as i32,
         )
     }
 
@@ -1637,10 +1735,7 @@ impl App {
             (width, s(46)),
             (width, self.height - s(24)),
         );
-        self.text(self.colors.muted, s(14), s(71), self.tr("PROJECT", "项目"));
-        self.text(self.colors.bright, s(34), s(101), &self.project_name);
-        self.chevron(s(17), s(96), self.project_tree_expanded);
-        self.rect(self.colors.bg, s(10), s(112), width - s(20), s(32));
+        self.rect(self.colors.bg, s(10), s(58), width - s(20), s(34));
         self.outline(
             if self.workspace_search_focused {
                 self.colors.accent
@@ -1648,18 +1743,31 @@ impl App {
                 self.colors.line
             },
             s(10),
-            s(112),
+            s(58),
             width - s(20),
-            s(32),
+            s(34),
         );
         self.text(
             self.colors.muted,
             s(22),
-            s(134),
+            s(81),
             if self.workspace_search.is_empty() {
                 self.tr("Search files", "搜索文件")
             } else {
                 &self.workspace_search
+            },
+        );
+        self.text(self.colors.muted, s(14), s(116), self.tr("PROJECT", "项目"));
+        self.text(self.colors.bright, s(34), s(145), &self.project_name);
+        self.chevron(s(17), s(140), self.project_tree_expanded);
+        self.text(
+            self.colors.muted,
+            width - s(72),
+            s(145),
+            if self.project_tree_expanded {
+                self.tr("HIDE", "收起")
+            } else {
+                self.tr("SHOW", "展开")
             },
         );
         if self.project_tree_expanded || !self.workspace_search.is_empty() {
@@ -1741,8 +1849,8 @@ impl App {
         let s = |v| self.s(v);
         let x = self.width - s(410);
         let y = s(43);
-        let w = s(380);
-        let h = s(555);
+        let w = s(390);
+        let h = s(690);
         self.rect(self.colors.panel_2, x, y, w, h);
         self.outline(self.colors.line, x, y, w, h);
         self.text(
@@ -1762,44 +1870,88 @@ impl App {
                 .iter()
                 .enumerate()
         {
-            let row = y + s(86 + index as i32 * 30);
+            let bx = x + s(16 + index as i32 * 178);
             if *active {
-                self.rect(
-                    self.colors.project,
-                    x + s(10),
-                    row - s(20),
-                    w - s(20),
-                    s(26),
-                );
+                self.rect(self.colors.project, bx, y + s(69), s(164), s(31));
             }
+            self.outline(self.colors.line, bx, y + s(69), s(164), s(31));
             self.text(
                 if *active {
                     self.colors.bright
                 } else {
                     self.colors.text
                 },
-                x + s(20),
-                row,
+                bx + s(14),
+                y + s(91),
                 label,
             );
             if *active {
-                self.text(self.colors.accent, x + w - s(28), row, "o");
+                self.circle(
+                    self.colors.accent,
+                    self.colors.accent,
+                    bx + s(148),
+                    y + s(84),
+                    s(3),
+                );
             }
+        }
+        self.text(
+            self.colors.muted,
+            x + s(16),
+            y + s(127),
+            self.tr("Theme", "主题"),
+        );
+        for (index, (label, active)) in [
+            (self.tr("Dark", "深色"), !self.light_theme),
+            (self.tr("Light", "浅色"), self.light_theme),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let bx = x + s(110 + index as i32 * 124);
+            if *active {
+                self.rect(self.colors.project, bx, y + s(106), s(112), s(30));
+            }
+            self.outline(self.colors.line, bx, y + s(106), s(112), s(30));
+            self.text(self.colors.text, bx + s(14), y + s(127), label);
         }
         self.line(
             self.colors.line,
             1,
-            (x + s(12), y + s(128)),
-            (x + w - s(12), y + s(128)),
+            (x + s(12), y + s(153)),
+            (x + w - s(12), y + s(153)),
         );
         self.text(
             self.colors.muted,
             x + s(16),
-            y + s(157),
+            y + s(187),
             self.tr("Editor font family", "编辑器字体"),
         );
-        for (index, family) in CODE_FONT_FAMILIES.iter().enumerate() {
-            let row = y + s(186 + index as i32 * 30);
+        self.rect(self.colors.bg, x + s(180), y + s(163), s(192), s(34));
+        self.outline(
+            if self.font_search_focused {
+                self.colors.accent
+            } else {
+                self.colors.line
+            },
+            x + s(180),
+            y + s(163),
+            s(192),
+            s(34),
+        );
+        self.text(
+            self.colors.muted,
+            x + s(194),
+            y + s(187),
+            if self.font_search.is_empty() {
+                self.tr("Search fonts", "搜索字体")
+            } else {
+                &self.font_search
+            },
+        );
+        for (visible, index) in self.filtered_font_indices().into_iter().take(5).enumerate() {
+            let family = CODE_FONT_FAMILIES[index];
+            let row = y + s(226 + visible as i32 * 30);
             if index == self.code_font_family {
                 self.rect(
                     self.colors.project,
@@ -1826,23 +1978,23 @@ impl App {
         self.line(
             self.colors.line,
             1,
-            (x + s(12), y + s(294)),
-            (x + w - s(12), y + s(294)),
+            (x + s(12), y + s(376)),
+            (x + w - s(12), y + s(376)),
         );
         self.text(
             self.colors.muted,
             x + s(16),
-            y + s(323),
+            y + s(408),
             self.tr("Editor font size", "编辑器字号"),
         );
-        self.outline(self.colors.line, x + s(170), y + s(303), s(34), s(28));
-        self.text(self.colors.text, x + s(182), y + s(324), "-");
-        self.outline(self.colors.line, x + s(278), y + s(303), s(34), s(28));
-        self.text(self.colors.text, x + s(290), y + s(324), "+");
+        self.outline(self.colors.line, x + s(180), y + s(386), s(34), s(28));
+        self.text(self.colors.text, x + s(192), y + s(407), "-");
+        self.outline(self.colors.line, x + s(300), y + s(386), s(34), s(28));
+        self.text(self.colors.text, x + s(312), y + s(407), "+");
         self.text(
             self.colors.bright,
-            x + s(222),
-            y + s(324),
+            x + s(246),
+            y + s(407),
             &(self.code_font_base + self.code_zoom * 2)
                 .clamp(10, 36)
                 .to_string(),
@@ -1850,69 +2002,85 @@ impl App {
         self.text(
             self.colors.muted,
             x + s(16),
-            y + s(365),
+            y + s(444),
             self.tr("Ctrl+wheel also changes size", "Ctrl+滚轮也可调整字号"),
         );
         self.line(
             self.colors.line,
             1,
-            (x + s(12), y + s(382)),
-            (x + w - s(12), y + s(382)),
+            (x + s(12), y + s(458)),
+            (x + w - s(12), y + s(458)),
         );
         self.text(
             self.colors.muted,
             x + s(16),
-            y + s(410),
+            y + s(489),
             self.tr("Editor background", "编辑器背景"),
         );
-        self.outline(self.colors.line, x + s(156), y + s(391), s(112), s(27));
+        self.outline(self.colors.line, x + s(166), y + s(468), s(112), s(27));
         self.text(
             self.colors.text,
-            x + s(169),
-            y + s(411),
+            x + s(179),
+            y + s(488),
             self.tr("CHOOSE PNG", "选择 PNG"),
         );
-        self.outline(self.colors.line, x + s(276), y + s(391), s(82), s(27));
+        self.outline(self.colors.line, x + s(286), y + s(468), s(82), s(27));
         self.text(
             self.colors.text,
-            x + s(289),
-            y + s(411),
+            x + s(299),
+            y + s(488),
             self.tr("CLEAR", "清除"),
         );
         self.text(
             self.colors.muted,
             x + s(16),
-            y + s(450),
+            y + s(529),
             self.tr("Opacity", "不透明度"),
         );
-        self.outline(self.colors.line, x + s(156), y + s(430), s(34), s(27));
-        self.text(self.colors.text, x + s(168), y + s(451), "-");
+        self.outline(self.colors.line, x + s(166), y + s(508), s(34), s(27));
+        self.text(self.colors.text, x + s(178), y + s(529), "-");
         self.text(
             self.colors.bright,
-            x + s(208),
-            y + s(451),
+            x + s(218),
+            y + s(529),
             &format!("{}%", (self.background_opacity * 100.0).round() as i32),
         );
-        self.outline(self.colors.line, x + s(276), y + s(430), s(34), s(27));
-        self.text(self.colors.text, x + s(288), y + s(451), "+");
+        self.outline(self.colors.line, x + s(300), y + s(508), s(34), s(27));
+        self.text(self.colors.text, x + s(312), y + s(529), "+");
         self.text(
             self.colors.muted,
             x + s(16),
-            y + s(490),
+            y + s(569),
             self.tr("Crop position", "取景位置"),
         );
         for (index, label) in ["←", "→", "↑", "↓"].iter().enumerate() {
-            let bx = x + s(156 + index as i32 * 48);
-            self.outline(self.colors.line, bx, y + s(469), s(34), s(27));
-            self.text(self.colors.text, bx + s(9), y + s(490), label);
+            let bx = x + s(166 + index as i32 * 48);
+            self.outline(self.colors.line, bx, y + s(548), s(34), s(27));
+            self.text(self.colors.text, bx + s(9), y + s(569), label);
         }
+        self.text(
+            self.colors.muted,
+            x + s(16),
+            y + s(609),
+            self.tr("Image zoom", "图片缩放"),
+        );
+        self.outline(self.colors.line, x + s(166), y + s(588), s(34), s(27));
+        self.text(self.colors.text, x + s(178), y + s(609), "-");
+        self.text(
+            self.colors.bright,
+            x + s(218),
+            y + s(609),
+            &format!("{:.1}x", self.background_zoom),
+        );
+        self.outline(self.colors.line, x + s(300), y + s(588), s(34), s(27));
+        self.text(self.colors.text, x + s(312), y + s(609), "+");
         let background_name = self
             .background_path
             .as_ref()
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.tr("No image selected", "未选择图片").to_string());
-        self.text(self.colors.muted, x + s(16), y + s(530), &background_name);
+        self.text(self.colors.muted, x + s(16), y + s(650), &background_name);
     }
 
     unsafe fn draw_new_menu(&self) {
@@ -2152,22 +2320,37 @@ impl App {
             self.colors.text,
             x + s(14),
             s(71),
-            self.tr("Semantic Project Graph", "项目语义关系图"),
+            self.tr("Call Hierarchy", "调用层级"),
         );
+        let mode_labels = [
+            self.tr("AUTO", "跟随"),
+            self.tr("CALLERS", "调用者"),
+            self.tr("CALLEES", "被调用"),
+        ];
+        let mode_w = s(73);
+        let modes_x = self.width - mode_w * 3 - s(12);
+        for (index, label) in mode_labels.iter().enumerate() {
+            let bx = modes_x + index as i32 * mode_w;
+            if self.graph_mode == index {
+                self.rect(self.colors.project, bx, s(52), mode_w - s(4), s(25));
+            }
+            self.outline(self.colors.line, bx, s(52), mode_w - s(4), s(25));
+            self.text(self.colors.muted, bx + s(8), s(70), label);
+        }
         if !self.graph_current {
             let cx = x + w / 2;
             let cy = y + h / 2;
-            self.circle(self.colors.project, self.colors.accent, cx, cy, s(15));
+            self.outline(self.colors.accent, cx - s(120), cy - s(38), s(240), s(76));
             self.text(
                 self.colors.bright,
-                cx + s(24),
-                cy - s(2),
+                cx - s(96),
+                cy - s(6),
                 &self.project_name,
             );
             self.text(
                 self.colors.muted,
-                cx + s(24),
-                cy + s(18),
+                cx - s(96),
+                cy + s(19),
                 self.tr(
                     "new project - semantic index is empty",
                     "新项目 - 语义索引为空",
@@ -2184,22 +2367,26 @@ impl App {
             );
             return;
         }
-        let mode = self
-            .hovered
-            .map(|i| match NODES[i].level {
-                Level::Project => self.tr("PROJECT", "项目"),
-                Level::File => self.tr("FILE", "文件"),
-                Level::Class => "CLASS",
-                Level::Function => self.tr("FUNCTION", "函数"),
-            })
-            .unwrap_or(self.tr("AUTO", "自动"));
-        self.text(self.colors.muted, self.width - s(112), s(71), mode);
-
+        let active = self.hovered.unwrap_or(0);
+        let active_label = NODES[active].label;
+        self.text(
+            self.colors.muted,
+            x + s(18),
+            y + s(18),
+            &format!(
+                "{}  /  {}  /  {}",
+                self.project_name, self.files[self.selected_file].name, active_label
+            ),
+        );
         for &(a, b) in EDGES {
-            let related = self
-                .hovered
-                .map(|active| active == a || active == b)
-                .unwrap_or(true);
+            let related = match self.graph_mode {
+                1 => b == active,
+                2 => a == active,
+                _ => self
+                    .hovered
+                    .map(|focus| focus == a || focus == b)
+                    .unwrap_or(true),
+            };
             let color = if related {
                 self.colors.accent
             } else {
@@ -2207,66 +2394,84 @@ impl App {
             };
             let from = self.node_position(&NODES[a]);
             let to = self.node_position(&NODES[b]);
-            let middle_x = (from.0 + to.0) / 2;
             let width = if related { 2 } else { 1 };
-            self.line(color, width, from, (middle_x, from.1));
-            self.line(color, width, (middle_x, from.1), (middle_x, to.1));
-            self.line(color, width, (middle_x, to.1), to);
+            let rail_x = from.0 + s(13);
+            self.line(color, width, (rail_x, from.1 + s(8)), (rail_x, to.1));
+            self.line(color, width, (rail_x, to.1), (to.0, to.1));
         }
-
-        let elapsed = self.started.elapsed().as_secs_f32();
         for (index, node) in NODES.iter().enumerate() {
             let (nx, ny) = self.node_position(node);
             let active = self.hovered == Some(index);
-            let related = self.is_related(index);
-            let base = s(match node.level {
-                Level::Project => 14,
-                Level::File => 9,
-                Level::Class => 7,
-                Level::Function => 5,
-            });
-            let pulse = if active {
-                ((elapsed * 5.0).sin().abs() * s(4) as f32) as i32
-            } else {
-                0
+            let related = match self.graph_mode {
+                1 => {
+                    index == self.hovered.unwrap_or(0)
+                        || EDGES
+                            .iter()
+                            .any(|&(a, b)| b == self.hovered.unwrap_or(0) && a == index)
+                }
+                2 => {
+                    index == self.hovered.unwrap_or(0)
+                        || EDGES
+                            .iter()
+                            .any(|&(a, b)| a == self.hovered.unwrap_or(0) && b == index)
+                }
+                _ => self.is_related(index),
             };
+            let card_x = nx + s(12);
+            let card_w = (self.width - card_x - s(16)).max(s(120));
             if active {
-                self.circle(
-                    self.colors.panel,
-                    self.colors.accent,
-                    nx,
-                    ny,
-                    base + pulse + 5,
-                );
+                self.rect(self.colors.project, card_x, ny - s(19), card_w, s(39));
             }
-            let stroke = if active {
-                self.colors.bright
-            } else if related {
-                self.colors.accent
-            } else {
-                self.colors.line
+            self.outline(
+                if active {
+                    self.colors.accent
+                } else {
+                    self.colors.line
+                },
+                card_x,
+                ny - s(19),
+                card_w,
+                s(39),
+            );
+            let marker = match node.level {
+                Level::Project => "P",
+                Level::File => "F",
+                Level::Class => "C",
+                Level::Function => "fn",
             };
-            let fill = if node.level == Level::Project {
-                self.colors.project
-            } else {
-                self.colors.panel_2
-            };
-            self.circle(fill, stroke, nx, ny, base);
+            self.rect(
+                if related {
+                    self.colors.accent
+                } else {
+                    self.colors.line
+                },
+                nx - s(7),
+                ny - s(8),
+                s(19),
+                s(17),
+            );
+            self.text(self.colors.bg, nx - s(4), ny + s(5), marker);
             let label_color = if related {
-                self.colors.text
+                self.colors.bright
             } else {
                 self.colors.muted
             };
-            self.text(label_color, nx + base + s(6), ny - s(2), node.label);
-            self.text(self.colors.muted, nx + base + s(6), ny + s(14), node.detail);
+            self.text(label_color, card_x + s(12), ny + s(5), node.label);
+            let detail_width = self.pango_text_size(node.detail, false).0;
+            self.text(
+                self.colors.muted,
+                (self.width - detail_width - s(26)).max(card_x + s(120)),
+                ny + s(5),
+                node.detail,
+            );
         }
         self.text(
             self.colors.muted,
             x + s(14),
             y + h - s(10),
             self.tr(
-                "wheel: zoom hierarchy - hover code to trace calls",
-                "滚轮缩放层级；悬停代码可追踪声明与调用",
+                "hover a symbol to focus; choose callers or callees above",
+                "悬停符号可聚焦；上方可切换调用者或被调用者",
             ),
         );
     }
@@ -2451,14 +2656,44 @@ impl App {
                 .unwrap_or(self.tr("No active project", "没有活动项目")),
         );
         if self.terminal_open {
-            let controls_x = self.width - s(700);
-            self.outline(self.colors.line, controls_x, top + s(4), s(30), s(25));
-            self.text(self.colors.text, controls_x + s(10), top + s(21), "+");
-            let mut tab_x = controls_x + s(38);
+            let list_x = self.width - s(190);
+            self.rect(
+                self.colors.panel,
+                list_x,
+                top + s(30),
+                s(190),
+                panel_h - s(30),
+            );
+            self.line(
+                self.colors.line,
+                1,
+                (list_x, top + s(30)),
+                (list_x, self.height),
+            );
+            self.outline(self.colors.line, list_x + s(10), top + s(38), s(76), s(27));
+            self.text(
+                self.colors.text,
+                list_x + s(22),
+                top + s(58),
+                self.tr("+ NEW", "+ 新建"),
+            );
+            self.outline(self.colors.line, list_x + s(94), top + s(38), s(84), s(27));
+            self.text(
+                self.colors.text,
+                list_x + s(105),
+                top + s(58),
+                self.tr("POP OUT", "弹出"),
+            );
             for (index, terminal) in self.terminals.iter().take(4).enumerate() {
-                let width = s(106);
+                let row = top + s(79 + index as i32 * 34);
                 if index == self.terminal_active {
-                    self.rect(self.colors.project, tab_x, top + s(4), width, s(25));
+                    self.rect(
+                        self.colors.project,
+                        list_x + s(10),
+                        row - s(22),
+                        s(168),
+                        s(29),
+                    );
                 }
                 self.text(
                     if index == self.terminal_active {
@@ -2466,24 +2701,31 @@ impl App {
                     } else {
                         self.colors.muted
                     },
-                    tab_x + s(10),
-                    top + s(21),
+                    list_x + s(24),
+                    row,
                     &terminal.name,
                 );
-                tab_x += width + s(4);
             }
             if self.terminals.len() > 4 {
-                self.outline(self.colors.line, tab_x, top + s(4), s(82), s(25));
+                let more_y = top + s(79 + 4 * 34);
+                self.outline(
+                    self.colors.line,
+                    list_x + s(10),
+                    more_y - s(22),
+                    s(168),
+                    s(29),
+                );
                 self.text(
                     self.colors.text,
-                    tab_x + s(9),
-                    top + s(21),
+                    list_x + s(24),
+                    more_y,
                     &format!("{} +{}", self.tr("More", "更多"), self.terminals.len() - 4),
                 );
                 if self.terminal_menu_open {
                     let menu_h = s(29) * self.terminals.len() as i32;
-                    self.rect(self.colors.panel, tab_x, top + s(32), s(180), menu_h);
-                    self.outline(self.colors.line, tab_x, top + s(32), s(180), menu_h);
+                    let menu_x = list_x - s(184);
+                    self.rect(self.colors.panel, menu_x, top + s(38), s(180), menu_h);
+                    self.outline(self.colors.line, menu_x, top + s(38), s(180), menu_h);
                     for (index, item) in self.terminals.iter().enumerate() {
                         self.text(
                             if index == self.terminal_active {
@@ -2491,30 +2733,24 @@ impl App {
                             } else {
                                 self.colors.text
                             },
-                            tab_x + s(12),
-                            top + s(53 + index as i32 * 29),
+                            menu_x + s(12),
+                            top + s(60 + index as i32 * 29),
                             &item.name,
                         );
                     }
                 }
             }
-            let detach_x = self.width - s(92);
-            self.outline(self.colors.line, detach_x, top + s(4), s(74), s(25));
-            self.text(
-                self.colors.text,
-                detach_x + s(9),
-                top + s(21),
-                self.tr("POP OUT", "弹出"),
-            );
             let terminal = &self.terminals[self.terminal_active.min(self.terminals.len() - 1)];
             if let Ok(lines) = terminal.output.lock() {
                 let visible = lines.iter().rev().take(6).collect::<Vec<_>>();
                 for (offset, line) in visible.iter().rev().enumerate() {
+                    let max_chars = ((list_x - s(52)) / s(8).max(1)).max(8) as usize;
+                    let display_line = line.chars().take(max_chars).collect::<String>();
                     self.text(
                         self.colors.text,
                         s(24),
                         top + s(55 + offset as i32 * 24),
-                        line,
+                        &display_line,
                     );
                 }
             }
@@ -2852,53 +3088,123 @@ impl App {
                 }
             }
         } else {
-            let items = match self.extension_category {
-                1 => ["Obsidian Mono", "Ghost in the Shell", "Minimal Motion"],
-                2 => ["Native LLDB", "GDB Adapter", "DAP Bridge"],
-                3 => ["Biome", "clang-format", "Black / Ruff"],
-                _ => ["Local AI", "Project Index Agent", "Review Agent"],
-            };
             self.text(
                 self.colors.accent,
                 x + s(195),
                 y + s(64),
                 categories[self.extension_category],
             );
-            for (index, item) in items.iter().enumerate() {
-                let row = y + s(110 + index as i32 * 47);
-                self.outline(self.colors.line, x + s(195), row - s(27), s(315), s(39));
-                self.text(self.colors.text, x + s(210), row, item);
+            if self.extension_category == 1 {
+                for (index, label) in [self.tr("Dark", "深色主题"), self.tr("Light", "浅色主题")]
+                    .iter()
+                    .enumerate()
+                {
+                    let row = y + s(116 + index as i32 * 52);
+                    let active =
+                        (index == 0 && !self.light_theme) || (index == 1 && self.light_theme);
+                    if active {
+                        self.rect(self.colors.project, x + s(195), row - s(29), s(315), s(41));
+                    }
+                    self.outline(self.colors.line, x + s(195), row - s(29), s(315), s(41));
+                    self.text(self.colors.text, x + s(212), row, label);
+                    if active {
+                        self.text(
+                            self.colors.accent,
+                            x + s(465),
+                            row,
+                            self.tr("ACTIVE", "使用中"),
+                        );
+                    }
+                }
+                self.text(
+                    self.colors.muted,
+                    x + s(560),
+                    y + s(116),
+                    self.tr("Theme changes apply immediately.", "主题切换会立即生效。"),
+                );
+            } else if self.extension_category == 4 {
+                let dx = x + s(195);
+                self.text(self.colors.bright, dx, y + s(108), "OpenAI-compatible API");
+                for (index, (label, value)) in [
+                    (self.tr("ENDPOINT", "接口地址"), self.ai_endpoint.as_str()),
+                    (self.tr("MODEL", "模型"), self.ai_model.as_str()),
+                    (
+                        self.tr("API KEY (session only)", "API KEY（仅本次运行）"),
+                        if self.ai_key.is_empty() {
+                            ""
+                        } else {
+                            "****************"
+                        },
+                    ),
+                ]
+                .iter()
+                .enumerate()
+                {
+                    let fy = y + s(145 + index as i32 * 92);
+                    self.text(self.colors.muted, dx, fy, label);
+                    self.rect(self.colors.bg, dx, fy + s(14), s(600), s(42));
+                    self.outline(
+                        if self.ai_field_focused == Some(index) {
+                            self.colors.accent
+                        } else {
+                            self.colors.line
+                        },
+                        dx,
+                        fy + s(14),
+                        s(600),
+                        s(42),
+                    );
+                    self.text(self.colors.text, dx + s(14), fy + s(42), value);
+                }
+                self.rect(self.colors.accent, dx, y + s(440), s(210), s(40));
+                self.text(
+                    self.colors.bg,
+                    dx + s(43),
+                    y + s(467),
+                    self.tr("SAVE API SETTINGS", "保存 API 设置"),
+                );
+                self.text(
+                    self.colors.muted,
+                    dx,
+                    y + s(520),
+                    self.tr(
+                        "Endpoint and model are saved. API keys are never written to disk.",
+                        "接口地址和模型会保存；API Key 不会写入磁盘。",
+                    ),
+                );
+            } else {
+                let items = if self.extension_category == 2 {
+                    ["Native LLDB", "GDB Adapter", "DAP Bridge"]
+                } else {
+                    ["Biome", "clang-format", "Black / Ruff"]
+                };
+                for (index, item) in items.iter().enumerate() {
+                    let row = y + s(116 + index as i32 * 52);
+                    self.outline(self.colors.line, x + s(195), row - s(29), s(315), s(41));
+                    self.text(self.colors.text, x + s(212), row, item);
+                    self.text(
+                        self.colors.muted,
+                        x + s(420),
+                        row,
+                        self.tr("NOT CONNECTED", "未接入"),
+                    );
+                }
+                self.text(
+                    self.colors.bright,
+                    x + s(560),
+                    y + s(116),
+                    self.tr("Adapter status", "适配器状态"),
+                );
+                self.text(
+                    self.colors.muted,
+                    x + s(560),
+                    y + s(154),
+                    self.tr(
+                        "These entries are not functional yet. Clicking one now reports its real status.",
+                        "这些适配器目前尚未实现；点击后会明确显示真实状态。",
+                    ),
+                );
             }
-            self.line(
-                self.colors.line,
-                1,
-                (x + s(530), y + s(52)),
-                (x + s(530), y + h - s(24)),
-            );
-            self.text(
-                self.colors.bright,
-                x + s(560),
-                y + s(110),
-                self.tr("Extension registry slot ready", "扩展注册表入口已就绪"),
-            );
-            self.text(
-                self.colors.muted,
-                x + s(560),
-                y + s(148),
-                self.tr(
-                    "This category is separated from language packs.",
-                    "此分类与语言扩展分开管理。",
-                ),
-            );
-            self.text(
-                self.colors.muted,
-                x + s(560),
-                y + s(180),
-                self.tr(
-                    "Installable manifests can be connected next.",
-                    "后续可接入可安装的扩展清单。",
-                ),
-            );
         }
         self.text(
             self.colors.muted,
@@ -2915,7 +3221,7 @@ impl App {
         let s = |v| self.s(v);
         let project = self.create_kind == Some(CreateKind::Project);
         let w = s(if project { 680 } else { 520 });
-        let h = s(if project { 450 } else { 176 });
+        let h = s(if project { 500 } else { 230 });
         let x = (self.width - w) / 2;
         let y = (self.height - h) / 2;
         self.rect(self.colors.panel_2, x, y, w, h);
@@ -3038,7 +3344,7 @@ impl App {
                 y + s(247),
                 self.tr("PROJECT LOCATION", "项目位置"),
             );
-            self.rect(self.colors.bg, x + s(22), y + s(260), s(636), s(40));
+            self.rect(self.colors.bg, x + s(22), y + s(260), s(500), s(40));
             self.outline(
                 if self.project_location_focused {
                     self.colors.accent
@@ -3047,7 +3353,7 @@ impl App {
                 },
                 x + s(22),
                 y + s(260),
-                s(636),
+                s(500),
                 s(40),
             );
             self.text(
@@ -3066,6 +3372,13 @@ impl App {
                     (caret, y + s(292)),
                 );
             }
+            self.outline(self.colors.line, x + s(532), y + s(260), s(126), s(40));
+            self.text(
+                self.colors.text,
+                x + s(550),
+                y + s(287),
+                self.tr("BROWSE", "选择位置"),
+            );
             self.text(
                 self.colors.text,
                 x + s(22),
@@ -3092,8 +3405,8 @@ impl App {
                 ),
             );
             if self.project_language_menu {
-                self.rect(self.colors.panel, x + s(22), y + s(214), s(300), s(34) * 8);
-                for (visible, index) in self.languages.iter().enumerate().take(8) {
+                self.rect(self.colors.panel, x + s(22), y + s(214), s(300), s(34) * 6);
+                for (visible, index) in self.languages.iter().enumerate().take(6) {
                     self.text(
                         if visible == self.project_language {
                             self.colors.accent
@@ -3128,11 +3441,26 @@ impl App {
                 }
             }
         }
+        let button_y = y + h - s(52);
         self.text(
             self.colors.muted,
             x + s(22),
-            y + h - s(18),
-            self.tr("Enter: create   Esc: cancel", "Enter：创建   Esc：取消"),
+            button_y - s(17),
+            &self.status_message,
+        );
+        self.outline(self.colors.line, x + w - s(238), button_y, s(102), s(34));
+        self.text(
+            self.colors.text,
+            x + w - s(211),
+            button_y + s(24),
+            self.tr("CANCEL", "取消"),
+        );
+        self.rect(self.colors.accent, x + w - s(126), button_y, s(104), s(34));
+        self.text(
+            self.colors.bg,
+            x + w - s(101),
+            button_y + s(24),
+            self.tr("CREATE", "确定"),
         );
     }
 
@@ -3564,16 +3892,24 @@ impl App {
             self.status_message = "Use a safe non-empty name".into();
             return;
         }
-        match self.create_kind.unwrap() {
+        let created = match self.create_kind.unwrap() {
             CreateKind::File => {
-                if self.files.iter().any(|file| file.name == name) {
-                    self.status_message = "A file with that name already exists".into();
+                let root = self.active_root();
+                if let Err(error) = fs::create_dir_all(&root) {
+                    self.status_message = format!("Could not prepare project folder: {error}");
                     return;
                 }
-                let root = self.active_root();
-                let _ = fs::create_dir_all(&root);
                 let path = root.join(&name);
-                let _ = fs::write(&path, "");
+                if path.exists() || self.files.iter().any(|file| file.path == path) {
+                    self.status_message = self
+                        .tr("A file already exists at this path", "该路径已存在同名文件")
+                        .into();
+                    return;
+                }
+                if let Err(error) = fs::write(&path, "") {
+                    self.status_message = format!("Could not create file: {error}");
+                    return;
+                }
                 let pack_index = self.language_pack_index_for_file(&name);
                 self.files.push(FileBuffer {
                     name: name.clone(),
@@ -3597,37 +3933,55 @@ impl App {
                 } else {
                     self.status_message = format!("Created {name} - Plain Text fallback");
                 }
+                true
             }
             CreateKind::Folder => {
-                if !self.folders.contains(&name) {
-                    let root = self.active_root();
-                    match fs::create_dir_all(root.join(&name)) {
+                let root = self.active_root();
+                let path = root.join(&name);
+                if path.exists() || self.folders.contains(&name) {
+                    self.status_message = self
+                        .tr(
+                            "A folder already exists at this path",
+                            "该路径已存在同名文件夹",
+                        )
+                        .into();
+                    false
+                } else {
+                    match fs::create_dir_all(&path) {
                         Ok(_) => {
                             self.folders.push(name.clone());
                             self.status_message = format!("Created folder {name}");
+                            true
                         }
                         Err(error) => {
-                            self.status_message = format!("Could not create folder: {error}")
+                            self.status_message = format!("Could not create folder: {error}");
+                            false
                         }
                     }
                 }
             }
             CreateKind::Project => self.create_project(&name),
+        };
+        if created {
+            self.create_kind = None;
+            self.project_language_menu = false;
+            self.project_environment_menu = false;
         }
-        self.create_kind = None;
-        self.project_language_menu = false;
-        self.project_environment_menu = false;
     }
 
-    fn create_project(&mut self, name: &str) {
+    fn create_project(&mut self, name: &str) -> bool {
         let root = expand_home(&self.project_location).join(name);
         if root.exists() {
-            self.status_message = format!("Project {name} already exists; choose another name");
-            return;
+            self.status_message = if self.ui_chinese {
+                format!("该路径已有项目：{}", root.display())
+            } else {
+                format!("A project already exists at {}", root.display())
+            };
+            return false;
         }
         if let Err(error) = fs::create_dir_all(&root) {
             self.status_message = format!("Could not create project: {error}");
-            return;
+            return false;
         }
         let language = self.languages[self.project_language].name;
         let envs = project_environments(language);
@@ -3711,6 +4065,7 @@ impl App {
             "Project {name} created at {} with {language} {version} / {environment}",
             root.display()
         );
+        true
     }
 
     fn handle_click(&mut self, x: i32, y: i32, button: u32, state: c_uint) {
@@ -3732,6 +4087,7 @@ impl App {
                 self.create_kind = Some(kind);
                 self.new_file_name.clear();
                 self.create_caret = 0;
+                self.status_message = self.tr("Enter a name", "请输入名称").into();
                 self.workspace_context_menu = None;
                 return;
             }
@@ -3742,9 +4098,22 @@ impl App {
         if let Some(kind) = self.create_kind {
             let project = kind == CreateKind::Project;
             let w = s(if project { 680 } else { 520 });
-            let h = s(if project { 450 } else { 176 });
+            let h = s(if project { 500 } else { 230 });
             let dx = (self.width - w) / 2;
             let dy = (self.height - h) / 2;
+            let button_y = dy + h - s(52);
+            if button == 1 && y >= button_y && y <= button_y + s(34) {
+                if x >= dx + w - s(238) && x <= dx + w - s(136) {
+                    self.create_kind = None;
+                    self.project_language_menu = false;
+                    self.project_environment_menu = false;
+                    return;
+                }
+                if x >= dx + w - s(126) && x <= dx + w - s(22) {
+                    self.create_requested_item();
+                    return;
+                }
+            }
             if x >= dx + s(22) && x <= dx + w - s(22) && y >= dy + s(82) && y <= dy + s(122) {
                 self.project_location_focused = false;
                 self.create_caret =
@@ -3753,7 +4122,7 @@ impl App {
             }
             if project {
                 if self.project_language_menu {
-                    for visible in 0..8.min(self.languages.len()) {
+                    for visible in 0..6.min(self.languages.len()) {
                         let row = dy + s(238 + visible as i32 * 34);
                         if (y - row).abs() < s(16) {
                             self.project_language = visible;
@@ -3784,8 +4153,12 @@ impl App {
                     self.project_language_menu = false;
                     return;
                 }
-                if x >= dx + s(22) && x <= dx + s(658) && y >= dy + s(260) && y <= dy + s(300) {
+                if x >= dx + s(22) && x <= dx + s(522) && y >= dy + s(260) && y <= dy + s(300) {
                     self.project_location_focused = true;
+                    return;
+                }
+                if x >= dx + s(532) && x <= dx + s(658) && y >= dy + s(260) && y <= dy + s(300) {
+                    self.choose_project_location();
                     return;
                 }
             }
@@ -3810,6 +4183,29 @@ impl App {
             }
             self.reload_code_font();
             return;
+        }
+        if button == 1 && x >= graph_left && y >= s(52) && y <= s(77) {
+            let mode_w = s(73);
+            let modes_x = self.width - mode_w * 3 - s(12);
+            if x >= modes_x {
+                self.graph_mode = ((x - modes_x) / mode_w.max(1)).clamp(0, 2) as usize;
+                self.status_message = match self.graph_mode {
+                    1 => self.tr(
+                        "Showing callers of the focused symbol",
+                        "正在显示焦点符号的调用者",
+                    ),
+                    2 => self.tr(
+                        "Showing callees of the focused symbol",
+                        "正在显示焦点符号调用的内容",
+                    ),
+                    _ => self.tr(
+                        "Graph follows the symbol under the pointer",
+                        "关系图自动跟随鼠标所指符号",
+                    ),
+                }
+                .into();
+                return;
+            }
         }
         if x >= graph_left && button == 4 {
             self.graph_zoom = (self.graph_zoom * 1.1).min(1.55);
@@ -3879,6 +4275,7 @@ impl App {
                         self.new_file_name.clear();
                         self.create_caret = 0;
                         self.project_location_focused = false;
+                        self.status_message = self.tr("Enter a name", "请输入名称").into();
                         self.new_menu_open = false;
                         return;
                     }
@@ -3899,10 +4296,15 @@ impl App {
         if self.settings_open {
             let menu_x = self.width - s(410);
             let menu_y = s(43);
-            if button == 1 && x >= menu_x && x <= menu_x + s(380) {
-                if y >= menu_y + s(62) && y <= menu_y + s(122) {
-                    self.ui_chinese = y >= menu_y + s(92);
-                    save_ui_preferences(self.ui_chinese, self.code_font_family, self.code_zoom);
+            if button == 1 && x >= menu_x && x <= menu_x + s(390) {
+                if y >= menu_y + s(69) && y <= menu_y + s(100) {
+                    self.ui_chinese = x >= menu_x + s(194);
+                    save_ui_preferences(
+                        self.ui_chinese,
+                        self.code_font_family,
+                        self.code_zoom,
+                        self.light_theme,
+                    );
                     self.status_message = if self.ui_chinese {
                         "界面语言已切换为简体中文".into()
                     } else {
@@ -3910,37 +4312,54 @@ impl App {
                     };
                     return;
                 }
-                if y >= menu_y + s(162) && y <= menu_y + s(286) {
-                    let index = ((y - menu_y - s(166)) / s(30).max(1))
-                        .clamp(0, (CODE_FONT_FAMILIES.len() - 1) as i32)
-                        as usize;
-                    self.code_font_family = index;
-                    save_ui_preferences(self.ui_chinese, self.code_font_family, self.code_zoom);
-                    self.status_message = format!(
-                        "{}: {}",
-                        self.tr("Editor font", "编辑器字体"),
-                        CODE_FONT_FAMILIES[index]
-                    );
+                if y >= menu_y + s(106) && y <= menu_y + s(136) {
+                    if x >= menu_x + s(110) && x <= menu_x + s(222) {
+                        self.set_light_theme(false);
+                    } else if x >= menu_x + s(234) && x <= menu_x + s(346) {
+                        self.set_light_theme(true);
+                    }
                     return;
                 }
-                if y >= menu_y + s(300) && y <= menu_y + s(336) {
-                    if x >= menu_x + s(160) && x <= menu_x + s(215) {
+                if x >= menu_x + s(180)
+                    && x <= menu_x + s(372)
+                    && y >= menu_y + s(163)
+                    && y <= menu_y + s(197)
+                {
+                    self.font_search_focused = true;
+                    return;
+                }
+                for (visible, index) in self.filtered_font_indices().into_iter().take(5).enumerate()
+                {
+                    let row = menu_y + s(226 + visible as i32 * 30);
+                    if y >= row - s(20) && y <= row + s(7) {
+                        self.code_font_family = index;
+                        self.reload_code_font();
+                        self.status_message = format!(
+                            "{}: {}",
+                            self.tr("Editor font", "编辑器字体"),
+                            CODE_FONT_FAMILIES[index]
+                        );
+                        return;
+                    }
+                }
+                if y >= menu_y + s(386) && y <= menu_y + s(414) {
+                    if x >= menu_x + s(180) && x <= menu_x + s(214) {
                         self.code_zoom = (self.code_zoom - 1).max(-2);
                         self.reload_code_font();
                         return;
                     }
-                    if x >= menu_x + s(268) && x <= menu_x + s(325) {
+                    if x >= menu_x + s(300) && x <= menu_x + s(334) {
                         self.code_zoom = (self.code_zoom + 1).min(8);
                         self.reload_code_font();
                         return;
                     }
                 }
-                if y >= menu_y + s(389) && y <= menu_y + s(421) {
-                    if x >= menu_x + s(156) && x <= menu_x + s(268) {
+                if y >= menu_y + s(468) && y <= menu_y + s(495) {
+                    if x >= menu_x + s(166) && x <= menu_x + s(278) {
                         unsafe { self.choose_background() };
                         return;
                     }
-                    if x >= menu_x + s(276) && x <= menu_x + s(358) {
+                    if x >= menu_x + s(286) && x <= menu_x + s(368) {
                         unsafe { self.replace_background(None) };
                         self.status_message = self
                             .tr("Editor background cleared", "编辑器背景已清除")
@@ -3948,10 +4367,10 @@ impl App {
                         return;
                     }
                 }
-                if y >= menu_y + s(428) && y <= menu_y + s(460) {
-                    if x >= menu_x + s(156) && x <= menu_x + s(190) {
+                if y >= menu_y + s(508) && y <= menu_y + s(535) {
+                    if x >= menu_x + s(166) && x <= menu_x + s(200) {
                         self.background_opacity = (self.background_opacity - 0.05).max(0.0);
-                    } else if x >= menu_x + s(276) && x <= menu_x + s(310) {
+                    } else if x >= menu_x + s(300) && x <= menu_x + s(334) {
                         self.background_opacity = (self.background_opacity + 0.05).min(1.0);
                     } else {
                         return;
@@ -3961,15 +4380,16 @@ impl App {
                         self.background_opacity,
                         self.background_offset_x,
                         self.background_offset_y,
+                        self.background_zoom,
                     );
                     return;
                 }
-                if y >= menu_y + s(467)
-                    && y <= menu_y + s(501)
-                    && x >= menu_x + s(156)
-                    && x <= menu_x + s(346)
+                if y >= menu_y + s(548)
+                    && y <= menu_y + s(575)
+                    && x >= menu_x + s(166)
+                    && x <= menu_x + s(356)
                 {
-                    let index = ((x - menu_x - s(156)) / s(48).max(1)).clamp(0, 3);
+                    let index = ((x - menu_x - s(166)) / s(48).max(1)).clamp(0, 3);
                     match index {
                         0 => self.background_offset_x = (self.background_offset_x - 0.1).max(-1.0),
                         1 => self.background_offset_x = (self.background_offset_x + 0.1).min(1.0),
@@ -3981,10 +4401,29 @@ impl App {
                         self.background_opacity,
                         self.background_offset_x,
                         self.background_offset_y,
+                        self.background_zoom,
+                    );
+                    return;
+                }
+                if y >= menu_y + s(588) && y <= menu_y + s(615) {
+                    if x >= menu_x + s(166) && x <= menu_x + s(200) {
+                        self.background_zoom = (self.background_zoom - 0.1).max(1.0);
+                    } else if x >= menu_x + s(300) && x <= menu_x + s(334) {
+                        self.background_zoom = (self.background_zoom + 0.1).min(3.0);
+                    } else {
+                        return;
+                    }
+                    save_background_preferences(
+                        self.background_path.as_deref(),
+                        self.background_opacity,
+                        self.background_offset_x,
+                        self.background_offset_y,
+                        self.background_zoom,
                     );
                     return;
                 }
             }
+            self.font_search_focused = false;
             self.settings_open = false;
         }
         if x > self.width - s(290) && x < self.width - s(145) && y < s(46) {
@@ -4016,11 +4455,74 @@ impl App {
                     if x <= menu_x + s(175) && (y - row).abs() < s(19) {
                         self.extension_category = category;
                         self.extension_search_focused = false;
+                        self.ai_field_focused = None;
                         self.version_menu_open = false;
                         return;
                     }
                 }
                 if self.extension_category != 0 {
+                    if self.extension_category == 1 {
+                        for index in 0..2 {
+                            let row = menu_y + s(116 + index as i32 * 52);
+                            if x >= menu_x + s(195)
+                                && x <= menu_x + s(510)
+                                && (y - row).abs() < s(22)
+                            {
+                                self.set_light_theme(index == 1);
+                                return;
+                            }
+                        }
+                    } else if self.extension_category == 4 {
+                        let field_x = menu_x + s(195);
+                        for index in 0..3 {
+                            let field_y = menu_y + s(159 + index as i32 * 92);
+                            if x >= field_x
+                                && x <= field_x + s(600)
+                                && y >= field_y
+                                && y <= field_y + s(42)
+                            {
+                                self.ai_field_focused = Some(index);
+                                return;
+                            }
+                        }
+                        if x >= field_x
+                            && x <= field_x + s(210)
+                            && y >= menu_y + s(440)
+                            && y <= menu_y + s(480)
+                        {
+                            if self.ai_endpoint.trim().is_empty() || self.ai_model.trim().is_empty()
+                            {
+                                self.status_message = self
+                                    .tr("Endpoint and model are required", "接口地址和模型不能为空")
+                                    .into();
+                            } else {
+                                save_ai_preferences(&self.ai_endpoint, &self.ai_model);
+                                self.status_message = self
+                                    .tr(
+                                        "AI API settings saved; API key kept in memory for this session",
+                                        "AI API 设置已保存；API Key 仅保留在本次运行内存中",
+                                    )
+                                    .into();
+                            }
+                            return;
+                        }
+                    } else {
+                        for index in 0..3 {
+                            let row = menu_y + s(116 + index as i32 * 52);
+                            if x >= menu_x + s(195)
+                                && x <= menu_x + s(510)
+                                && (y - row).abs() < s(22)
+                            {
+                                self.status_message = self
+                                    .tr(
+                                        "This adapter is not connected yet",
+                                        "该适配器目前尚未接入，不能使用",
+                                    )
+                                    .into();
+                                return;
+                            }
+                        }
+                    }
                     return;
                 }
                 let list_x = menu_x + s(195);
@@ -4131,40 +4633,42 @@ impl App {
                 self.terminal_focused = true;
                 return;
             }
-            if y <= terminal_top + s(30) {
-                if x < s(120) {
-                    self.terminal_open = false;
-                    self.terminal_focused = false;
-                    return;
-                }
-                let controls_x = self.width - s(700);
-                if x >= controls_x && x <= controls_x + s(30) {
-                    self.add_terminal();
-                    return;
-                }
-                let first = controls_x + s(38);
-                if x >= first && x < first + s(440) {
-                    let index = ((x - first) / s(110).max(1)) as usize;
-                    if index < self.terminals.len().min(4) {
-                        self.terminal_active = index;
-                        self.terminal_focused = true;
+            if y <= terminal_top + s(30) && x < s(120) {
+                self.terminal_open = false;
+                self.terminal_focused = false;
+                return;
+            }
+            let list_x = self.width - s(190);
+            if x >= list_x {
+                if y >= terminal_top + s(38) && y <= terminal_top + s(65) {
+                    if x <= list_x + s(86) {
+                        self.add_terminal();
+                    } else {
+                        self.pop_out_terminal();
                     }
                     return;
                 }
-                let more_x = first + s(440);
-                if self.terminals.len() > 4 && x >= more_x && x <= more_x + s(82) {
-                    self.terminal_menu_open = !self.terminal_menu_open;
-                    return;
+                for index in 0..self.terminals.len().min(4) {
+                    let row = terminal_top + s(79 + index as i32 * 34);
+                    if (y - row).abs() <= s(16) {
+                        self.terminal_active = index;
+                        self.terminal_focused = true;
+                        return;
+                    }
                 }
-                if x >= self.width - s(92) {
-                    self.pop_out_terminal();
-                    return;
+                if self.terminals.len() > 4 {
+                    let row = terminal_top + s(79 + 4 * 34);
+                    if (y - row).abs() <= s(16) {
+                        self.terminal_menu_open = !self.terminal_menu_open;
+                        return;
+                    }
                 }
+                return;
             }
             if self.terminal_menu_open {
-                let menu_x = self.width - s(700) + s(38 + 440);
+                let menu_x = list_x - s(184);
                 for index in 0..self.terminals.len() {
-                    let row = terminal_top + s(53 + index as i32 * 29);
+                    let row = terminal_top + s(60 + index as i32 * 29);
                     if x >= menu_x && x <= menu_x + s(180) && (y - row).abs() < s(14) {
                         self.terminal_active = index;
                         self.terminal_menu_open = false;
@@ -4241,11 +4745,17 @@ impl App {
             }
         }
         if x < workspace_right {
-            if button == 1 && y >= s(77) && y <= s(108) {
+            if button == 1 && y >= s(102) && y <= s(154) {
                 self.project_tree_expanded = !self.project_tree_expanded;
+                self.status_message = if self.project_tree_expanded {
+                    self.tr("Project file list expanded", "项目文件列表已展开")
+                } else {
+                    self.tr("Project file list collapsed", "项目文件列表已收起")
+                }
+                .into();
                 return;
             }
-            if y >= s(112) && y <= s(144) {
+            if y >= s(58) && y <= s(92) {
                 self.workspace_search_focused = true;
                 self.editor_focused = false;
                 return;
@@ -4347,6 +4857,39 @@ impl App {
             }
             if count > 0 && !input.chars().any(char::is_control) {
                 self.terminals[self.terminal_active].input.push_str(input);
+            }
+            return true;
+        }
+        if self.font_search_focused {
+            if keysym == ESCAPE_KEYSYM || keysym == RETURN_KEYSYM {
+                self.font_search_focused = false;
+                return true;
+            }
+            if keysym == BACKSPACE_KEYSYM {
+                self.font_search.pop();
+                return true;
+            }
+            if count > 0 && !input.chars().any(char::is_control) {
+                self.font_search.push_str(input);
+            }
+            return true;
+        }
+        if let Some(field) = self.ai_field_focused {
+            if keysym == ESCAPE_KEYSYM || keysym == RETURN_KEYSYM {
+                self.ai_field_focused = None;
+                return true;
+            }
+            let value = match field {
+                0 => &mut self.ai_endpoint,
+                1 => &mut self.ai_model,
+                _ => &mut self.ai_key,
+            };
+            if keysym == BACKSPACE_KEYSYM {
+                value.pop();
+                return true;
+            }
+            if count > 0 && !input.chars().any(char::is_control) {
+                value.push_str(input);
             }
             return true;
         }
@@ -4835,11 +5378,41 @@ fn background_settings_path() -> PathBuf {
     ui_settings_path().with_file_name("background.conf")
 }
 
+fn ai_settings_path() -> PathBuf {
+    ui_settings_path().with_file_name("ai-api.conf")
+}
+
+fn load_ai_preferences() -> (String, String) {
+    let content = fs::read_to_string(ai_settings_path()).unwrap_or_default();
+    let value = |key: &str| {
+        content.lines().find_map(|line| {
+            line.split_once('=')
+                .filter(|(name, _)| *name == key)
+                .map(|(_, value)| value.to_string())
+        })
+    };
+    (
+        value("endpoint").unwrap_or_else(|| "https://api.openai.com/v1".into()),
+        value("model").unwrap_or_else(|| "gpt-5.1".into()),
+    )
+}
+
+fn save_ai_preferences(endpoint: &str, model: &str) {
+    let path = ai_settings_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let endpoint = endpoint.replace(['\n', '\r'], "");
+    let model = model.replace(['\n', '\r'], "");
+    let _ = fs::write(path, format!("endpoint={endpoint}\nmodel={model}\n"));
+}
+
 struct BackgroundPreferences {
     path: Option<PathBuf>,
     opacity: f64,
     offset_x: f64,
     offset_y: f64,
+    zoom: f64,
 }
 
 fn load_background_preferences() -> BackgroundPreferences {
@@ -4871,6 +5444,10 @@ fn load_background_preferences() -> BackgroundPreferences {
             .and_then(|value| value.parse().ok())
             .unwrap_or(0.0_f64)
             .clamp(-1.0, 1.0),
+        zoom: value("zoom")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1.0_f64)
+            .clamp(1.0, 3.0),
     }
 }
 
@@ -4879,6 +5456,7 @@ fn save_background_preferences(
     opacity: f64,
     offset_x: f64,
     offset_y: f64,
+    zoom: f64,
 ) {
     let config = background_settings_path();
     if let Some(parent) = config.parent() {
@@ -4890,10 +5468,11 @@ fn save_background_preferences(
     let _ = fs::write(
         config,
         format!(
-            "path={path}\nopacity={}\noffset_x={}\noffset_y={}\n",
+            "path={path}\nopacity={}\noffset_x={}\noffset_y={}\nzoom={}\n",
             opacity.clamp(0.0, 1.0),
             offset_x.clamp(-1.0, 1.0),
-            offset_y.clamp(-1.0, 1.0)
+            offset_y.clamp(-1.0, 1.0),
+            zoom.clamp(1.0, 3.0)
         ),
     );
 }
@@ -4902,6 +5481,7 @@ struct UiPreferences {
     chinese: bool,
     font_family: usize,
     code_zoom: i32,
+    light_theme: bool,
 }
 
 fn load_ui_preferences() -> UiPreferences {
@@ -4929,10 +5509,11 @@ fn load_ui_preferences() -> UiPreferences {
             .and_then(|value| value.parse().ok())
             .unwrap_or(0)
             .clamp(-2, 8),
+        light_theme: value("theme") == Some("light"),
     }
 }
 
-fn save_ui_preferences(chinese: bool, font_family: usize, code_zoom: i32) {
+fn save_ui_preferences(chinese: bool, font_family: usize, code_zoom: i32, light_theme: bool) {
     let path = ui_settings_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -4941,9 +5522,10 @@ fn save_ui_preferences(chinese: bool, font_family: usize, code_zoom: i32) {
     let _ = fs::write(
         path,
         format!(
-            "language={language}\nfont_family={}\ncode_zoom={}\n",
+            "language={language}\nfont_family={}\ncode_zoom={}\ntheme={}\n",
             font_family.min(CODE_FONT_FAMILIES.len() - 1),
-            code_zoom.clamp(-2, 8)
+            code_zoom.clamp(-2, 8),
+            if light_theme { "light" } else { "dark" }
         ),
     );
 }
@@ -5622,7 +6204,7 @@ fn main() {
         let visual = XDefaultVisual(display, screen);
         let cairo_surface = cairo_xlib_surface_create(display, canvas, visual, width, height);
         let cairo = cairo_create(cairo_surface);
-        let colors = Palette {
+        let dark_colors = Palette {
             bg,
             panel: color(display, map, "#121518"),
             panel_2: color(display, map, "#171b1e"),
@@ -5633,8 +6215,25 @@ fn main() {
             accent: color(display, map, "#9bbbc2"),
             project: color(display, map, "#29353a"),
         };
+        let light_colors = Palette {
+            bg: color(display, map, "#f7f8fa"),
+            panel: color(display, map, "#ffffff"),
+            panel_2: color(display, map, "#eff2f5"),
+            line: color(display, map, "#cbd2d9"),
+            muted: color(display, map, "#68737d"),
+            text: color(display, map, "#34414a"),
+            bright: color(display, map, "#11181d"),
+            accent: color(display, map, "#397f91"),
+            project: color(display, map, "#dce9ed"),
+        };
         let preferences = load_ui_preferences();
+        let colors = if preferences.light_theme {
+            light_colors
+        } else {
+            dark_colors
+        };
         let background_preferences = load_background_preferences();
+        let (ai_endpoint, ai_model) = load_ai_preferences();
         let background_surface = background_preferences
             .path
             .as_ref()
@@ -5668,8 +6267,12 @@ fn main() {
             background_opacity: background_preferences.opacity,
             background_offset_x: background_preferences.offset_x,
             background_offset_y: background_preferences.offset_y,
+            background_zoom: background_preferences.zoom,
             logo_surface,
             colors,
+            dark_colors,
+            light_colors,
+            light_theme: preferences.light_theme,
             width,
             height,
             mouse_x: -100,
@@ -5692,6 +6295,8 @@ fn main() {
             selection_head: None,
             clipboard: String::new(),
             code_zoom: preferences.code_zoom,
+            font_search: String::new(),
+            font_search_focused: false,
             edit_menu_open: false,
             workspace_search: String::new(),
             workspace_search_focused: false,
@@ -5704,6 +6309,7 @@ fn main() {
             terminal_menu_open: false,
             graph_current: true,
             graph_zoom: 1.0,
+            graph_mode: 0,
             package_open: false,
             package_targets: [false, false, false, false],
             build_started: None,
@@ -5720,6 +6326,10 @@ fn main() {
             extension_search_focused: false,
             selected_language: Some(1),
             version_menu_open: false,
+            ai_endpoint,
+            ai_model,
+            ai_key: String::new(),
+            ai_field_focused: None,
             create_kind: None,
             new_file_name: String::new(),
             project_language: 1,
