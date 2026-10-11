@@ -11,6 +11,8 @@ use crate::editor_core;
 
 #[path = "windows_platform.rs"]
 mod platform;
+#[path = "windows_preferences.rs"]
+mod preferences;
 #[path = "windows_renderer.rs"]
 mod renderer;
 #[path = "windows_terminal.rs"]
@@ -149,6 +151,7 @@ impl WindowsAppState {
     }
 
     fn new() -> Self {
+        let preferences = preferences::load();
         let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let (project_entries, project_entry_paths) = Self::scan_project(&project_root);
         let create_location = project_root.clone();
@@ -164,8 +167,8 @@ impl WindowsAppState {
             create_name: String::new(),
             create_error: String::new(),
             create_location,
-            project_language: 0,
-            project_environment: 0,
+            project_language: preferences.project_language,
+            project_environment: preferences.project_environment,
             lines: vec![
                 "use tc_ide::workspace::Project;".into(),
                 String::new(),
@@ -186,9 +189,9 @@ impl WindowsAppState {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             ime_composition: String::new(),
-            light_theme: false,
-            ui_chinese: false,
-            code_zoom: 0,
+            light_theme: preferences.light_theme,
+            ui_chinese: preferences.ui_chinese,
+            code_zoom: preferences.code_zoom,
             terminal_open: false,
             terminal_motion: 0.0,
             terminal_velocity: 0.0,
@@ -570,6 +573,16 @@ impl WindowsAppState {
         self.workspace_search_focused = false;
     }
 
+    fn save_preferences(&self) {
+        let _ = preferences::save(&preferences::WindowsPreferences {
+            light_theme: self.light_theme,
+            ui_chinese: self.ui_chinese,
+            code_zoom: self.code_zoom,
+            project_language: self.project_language,
+            project_environment: self.project_environment,
+        });
+    }
+
     fn refresh_project(&mut self) {
         (self.project_entries, self.project_entry_paths) = Self::scan_project(&self.project_root);
     }
@@ -944,6 +957,7 @@ fn perform_command(window: Hwnd, command: Wparam) {
             platform::COMMAND_OPEN_TERMINAL => app.toggle_terminal(),
             _ => {}
         }
+        app.save_preferences();
     });
     if matches!(
         command,
@@ -1194,6 +1208,7 @@ unsafe extern "system" fn window_proc(
                         }
                         _ => return,
                     }
+                    app.save_preferences();
                     return;
                 }
                 if app.workspace_search_focused {
