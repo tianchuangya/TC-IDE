@@ -340,11 +340,27 @@ extern "C" {
         height: c_int,
     );
     fn cairo_surface_destroy(surface: *mut CairoSurface);
+    fn cairo_image_surface_create_from_png(filename: *const c_char) -> *mut CairoSurface;
+    fn cairo_image_surface_get_width(surface: *mut CairoSurface) -> c_int;
+    fn cairo_image_surface_get_height(surface: *mut CairoSurface) -> c_int;
     fn cairo_surface_flush(surface: *mut CairoSurface);
     fn cairo_create(surface: *mut CairoSurface) -> *mut CairoContext;
     fn cairo_destroy(context: *mut CairoContext);
     fn cairo_set_source_rgb(context: *mut CairoContext, red: f64, green: f64, blue: f64);
     fn cairo_move_to(context: *mut CairoContext, x: f64, y: f64);
+    fn cairo_save(context: *mut CairoContext);
+    fn cairo_restore(context: *mut CairoContext);
+    fn cairo_rectangle(context: *mut CairoContext, x: f64, y: f64, width: f64, height: f64);
+    fn cairo_clip(context: *mut CairoContext);
+    fn cairo_translate(context: *mut CairoContext, tx: f64, ty: f64);
+    fn cairo_scale(context: *mut CairoContext, sx: f64, sy: f64);
+    fn cairo_set_source_surface(
+        context: *mut CairoContext,
+        surface: *mut CairoSurface,
+        x: f64,
+        y: f64,
+    );
+    fn cairo_paint_with_alpha(context: *mut CairoContext, alpha: f64);
     fn pango_cairo_create_layout(context: *mut CairoContext) -> *mut PangoLayout;
     fn pango_cairo_show_layout(context: *mut CairoContext, layout: *mut PangoLayout);
     fn pango_layout_set_text(layout: *mut PangoLayout, text: *const c_char, length: c_int);
@@ -381,6 +397,7 @@ const CONTROL_MASK: c_uint = 1 << 2;
 const BUTTON1_MASK: c_uint = 1 << 8;
 const ESCAPE_KEYSYM: c_ulong = 0xff1b;
 const BACKSPACE_KEYSYM: c_ulong = 0xff08;
+const DELETE_KEYSYM: c_ulong = 0xffff;
 const RETURN_KEYSYM: c_ulong = 0xff0d;
 const TAB_KEYSYM: c_ulong = 0xff09;
 const LEFT_KEYSYM: c_ulong = 0xff51;
@@ -428,6 +445,7 @@ struct ParsedComment<'a> {
     code: &'a str,
     text: &'a str,
     content_column: usize,
+    content_end: usize,
 }
 
 struct BubbleLayout {
@@ -459,64 +477,64 @@ const NODES: &[Node] = &[
         label: "TC-IDE",
         detail: "project",
         level: Level::Project,
-        nx: 0.50,
-        ny: 0.48,
+        nx: 0.12,
+        ny: 0.50,
     },
     Node {
         label: "graph.rs",
         detail: "src/editor",
         level: Level::File,
-        nx: 0.24,
-        ny: 0.25,
+        nx: 0.34,
+        ny: 0.20,
     },
     Node {
         label: "workspace.rs",
         detail: "src",
         level: Level::File,
-        nx: 0.72,
-        ny: 0.22,
+        nx: 0.34,
+        ny: 0.50,
     },
     Node {
         label: "render.rs",
         detail: "src",
         level: Level::File,
-        nx: 0.77,
-        ny: 0.70,
+        nx: 0.34,
+        ny: 0.80,
     },
     Node {
         label: "GraphController",
         detail: "class",
         level: Level::Class,
-        nx: 0.15,
-        ny: 0.51,
+        nx: 0.56,
+        ny: 0.20,
     },
     Node {
         label: "build_graph()",
         detail: "fn - L42",
         level: Level::Function,
-        nx: 0.30,
-        ny: 0.76,
+        nx: 0.78,
+        ny: 0.20,
     },
     Node {
         label: "analyze_workspace()",
         detail: "fn - L18",
         level: Level::Function,
-        nx: 0.90,
-        ny: 0.39,
+        nx: 0.78,
+        ny: 0.42,
     },
     Node {
         label: "resolve_symbols()",
         detail: "fn - L67",
         level: Level::Function,
-        nx: 0.58,
-        ny: 0.08,
+        nx: 0.78,
+        ny: 0.58,
     },
     Node {
         label: "render_graph()",
         detail: "fn - L12",
         level: Level::Function,
-        nx: 0.93,
-        ny: 0.86,
+        nx: 0.78,
+        ny: 0.80,
     },
 ];
 
@@ -529,9 +547,6 @@ const EDGES: &[(usize, usize)] = &[
     (2, 6),
     (2, 7),
     (3, 8),
-    (5, 6),
-    (5, 7),
-    (5, 8),
 ];
 
 struct Palette {
@@ -559,6 +574,12 @@ struct App {
     code_font: *mut XFontStruct,
     code_font_base: i32,
     code_font_family: usize,
+    background_surface: *mut CairoSurface,
+    background_path: Option<PathBuf>,
+    background_opacity: f64,
+    background_offset_x: f64,
+    background_offset_y: f64,
+    logo_surface: *mut CairoSurface,
     colors: Palette,
     width: i32,
     height: i32,
@@ -585,10 +606,13 @@ struct App {
     edit_menu_open: bool,
     workspace_search: String,
     workspace_search_focused: bool,
+    project_tree_expanded: bool,
+    collapsed_folders: BTreeSet<String>,
     terminal_open: bool,
     terminal_focused: bool,
     terminal_active: usize,
     terminals: Vec<TerminalSession>,
+    terminal_menu_open: bool,
     graph_current: bool,
     graph_zoom: f32,
     package_open: bool,
@@ -744,6 +768,120 @@ impl App {
         save_ui_preferences(self.ui_chinese, self.code_font_family, self.code_zoom);
     }
 
+    unsafe fn replace_background(&mut self, path: Option<PathBuf>) {
+        if !self.background_surface.is_null() {
+            cairo_surface_destroy(self.background_surface);
+            self.background_surface = ptr::null_mut();
+        }
+        self.background_path = path.clone();
+        if let Some(path) = path {
+            if let Ok(value) = CString::new(path.to_string_lossy().as_bytes()) {
+                let surface = cairo_image_surface_create_from_png(value.as_ptr());
+                if !surface.is_null()
+                    && cairo_image_surface_get_width(surface) > 0
+                    && cairo_image_surface_get_height(surface) > 0
+                {
+                    self.background_surface = surface;
+                } else if !surface.is_null() {
+                    cairo_surface_destroy(surface);
+                }
+            }
+        }
+        save_background_preferences(
+            self.background_path.as_deref(),
+            self.background_opacity,
+            self.background_offset_x,
+            self.background_offset_y,
+        );
+    }
+
+    unsafe fn choose_background(&mut self) {
+        let output = Command::new("zenity")
+            .args([
+                "--file-selection",
+                "--title=TC-IDE Background",
+                "--file-filter=Images | *.png *.jpg *.jpeg *.webp",
+            ])
+            .output();
+        match output {
+            Ok(output) if output.status.success() => {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    let source = PathBuf::from(path);
+                    let selected = if source
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .map(|value| value.eq_ignore_ascii_case("png"))
+                        .unwrap_or(false)
+                    {
+                        source
+                    } else {
+                        let cache = runtime_cache_root()
+                            .parent()
+                            .unwrap_or_else(|| std::path::Path::new("."))
+                            .join("background.png");
+                        if let Some(parent) = cache.parent() {
+                            let _ = fs::create_dir_all(parent);
+                        }
+                        let converted = Command::new("ffmpeg")
+                            .args(["-y", "-loglevel", "error", "-i"])
+                            .arg(&source)
+                            .arg(&cache)
+                            .status()
+                            .map(|status| status.success())
+                            .unwrap_or(false);
+                        if !converted {
+                            self.status_message = self
+                                .tr(
+                                    "Could not convert this background image",
+                                    "无法转换该背景图片",
+                                )
+                                .into();
+                            return;
+                        }
+                        cache
+                    };
+                    self.replace_background(Some(selected));
+                    self.status_message = self
+                        .tr("Editor background updated", "编辑器背景已更新")
+                        .into();
+                }
+            }
+            _ => {
+                self.status_message = self
+                    .tr(
+                        "Install zenity to choose a background image",
+                        "需要安装 zenity 才能选择背景图片",
+                    )
+                    .into();
+            }
+        }
+    }
+
+    unsafe fn draw_background_region(&self, x: i32, y: i32, width: i32, height: i32) {
+        if self.background_surface.is_null() || self.background_opacity <= 0.0 {
+            return;
+        }
+        let image_w = cairo_image_surface_get_width(self.background_surface).max(1) as f64;
+        let image_h = cairo_image_surface_get_height(self.background_surface).max(1) as f64;
+        let scale = (width as f64 / image_w).max(height as f64 / image_h);
+        let drawn_w = image_w * scale;
+        let drawn_h = image_h * scale;
+        let excess_x = (drawn_w - width as f64).max(0.0);
+        let excess_y = (drawn_h - height as f64).max(0.0);
+        let offset_x = -excess_x * (self.background_offset_x + 1.0) * 0.5;
+        let offset_y = -excess_y * (self.background_offset_y + 1.0) * 0.5;
+        cairo_save(self.cairo);
+        cairo_rectangle(self.cairo, x as f64, y as f64, width as f64, height as f64);
+        cairo_clip(self.cairo);
+        cairo_translate(self.cairo, x as f64 + offset_x, y as f64 + offset_y);
+        cairo_scale(self.cairo, scale, scale);
+        cairo_set_source_surface(self.cairo, self.background_surface, 0.0, 0.0);
+        cairo_paint_with_alpha(self.cairo, self.background_opacity.clamp(0.0, 1.0));
+        cairo_restore(self.cairo);
+        cairo_surface_flush(self.cairo_surface);
+    }
+
     fn detected_language_for_file(&self, name: &str) -> &'static str {
         self.language_pack_index_for_file(name)
             .map(|index| self.languages[index].name)
@@ -832,27 +970,26 @@ impl App {
 
     fn comment_parts<'a>(&self, line: &'a str) -> Option<ParsedComment<'a>> {
         let file = &self.files[self.selected_file].name;
-        let marker = comment_markers_for_file(file)
-            .iter()
-            .filter_map(|marker| line.find(marker).map(|index| (index, *marker)))
-            .min_by_key(|(index, _)| *index)?;
-        if marker.1 == "#" && marker.0 == 0 && line.starts_with("#!") {
+        let (marker_start, content_column, content_end) = comment_content_bounds(line, file)?;
+        let text = &line[content_column..content_end];
+        Some(ParsedComment {
+            code: &line[..marker_start],
+            text,
+            content_column,
+            content_end,
+        })
+    }
+
+    fn active_comment_edit_bounds(&self) -> Option<(usize, usize)> {
+        if !self
+            .expanded_comments
+            .contains(&(self.selected_file, self.caret_line))
+        {
             return None;
         }
-        let after = &line[marker.0 + marker.1.len()..];
-        let leading = after.len() - after.trim_start().len();
-        let mut text = after.trim();
-        if marker.1 == "/*" {
-            text = text.strip_suffix("*/").unwrap_or(text).trim_end();
-        }
-        if marker.1 == "<!--" {
-            text = text.strip_suffix("-->").unwrap_or(text).trim_end();
-        }
-        Some(ParsedComment {
-            code: &line[..marker.0],
-            text,
-            content_column: marker.0 + marker.1.len() + leading,
-        })
+        let parsed = self.comment_parts(&self.files[self.selected_file].lines[self.caret_line])?;
+        (self.caret_column >= parsed.content_column && self.caret_column <= parsed.content_end)
+            .then_some((parsed.content_column, parsed.content_end))
     }
 
     fn filtered_language_indices(&self) -> Vec<usize> {
@@ -906,6 +1043,181 @@ impl App {
         self.set_color(color);
         XSetLineAttributes(self.display, self.gc, width, 0, 1, 1);
         XDrawLine(self.display, self.canvas, self.gc, a.0, a.1, b.0, b.1);
+    }
+
+    unsafe fn chevron(&self, x: i32, y: i32, expanded: bool) {
+        let s = |v| self.s(v);
+        if expanded {
+            self.line(self.colors.muted, 1, (x, y - s(3)), (x + s(4), y + s(2)));
+            self.line(
+                self.colors.muted,
+                1,
+                (x + s(4), y + s(2)),
+                (x + s(8), y - s(3)),
+            );
+        } else {
+            self.line(self.colors.muted, 1, (x, y - s(4)), (x + s(5), y));
+            self.line(self.colors.muted, 1, (x + s(5), y), (x, y + s(4)));
+        }
+    }
+
+    unsafe fn package_icon(&self, kind: usize, x: i32, y: i32, label: &str) {
+        let s = |v| self.s(v);
+        let color = self.colors.accent;
+        match kind {
+            0 => {
+                for (dx, dy) in [(-13, -13), (2, -13), (-13, 2), (2, 2)] {
+                    self.outline(color, x + s(dx), y + s(dy), s(11), s(11));
+                }
+            }
+            1 => {
+                let points = [
+                    (-15, -7),
+                    (-7, -15),
+                    (7, -15),
+                    (15, -7),
+                    (15, 8),
+                    (0, 16),
+                    (-15, 8),
+                ];
+                for pair in points.windows(2) {
+                    self.line(
+                        color,
+                        2,
+                        (x + s(pair[0].0), y + s(pair[0].1)),
+                        (x + s(pair[1].0), y + s(pair[1].1)),
+                    );
+                }
+                self.line(
+                    color,
+                    2,
+                    (x + s(points[6].0), y + s(points[6].1)),
+                    (x + s(points[0].0), y + s(points[0].1)),
+                );
+            }
+            2 => {
+                self.circle(self.colors.bg, color, x, y, s(16));
+                self.line(color, 2, (x, y - s(10)), (x - s(8), y + s(9)));
+                self.line(color, 2, (x, y - s(10)), (x + s(8), y + s(9)));
+                self.line(color, 2, (x - s(5), y + s(3)), (x + s(5), y + s(3)));
+            }
+            _ => {
+                self.outline(color, x - s(16), y - s(12), s(32), s(24));
+                self.line(color, 1, (x - s(12), y + s(5)), (x + s(12), y + s(5)));
+                self.circle(self.colors.bg, color, x + s(9), y - s(4), s(2));
+            }
+        }
+        self.text(self.colors.bright, x + s(24), y + s(6), label);
+    }
+
+    unsafe fn abstract_vortex(&self, cx: i32, cy: i32, elapsed: f32, absorbing: bool) {
+        let s = |v| self.s(v);
+        for ring in 0..10 {
+            let phase = elapsed * if absorbing { -235.0 } else { 210.0 } + ring as f32 * 29.0;
+            let wobble = (elapsed * 3.1 + ring as f32 * 1.7).sin();
+            let radius_x = s(18 + ring * 7) + (wobble * s(3) as f32) as i32;
+            let radius_y = s(11 + ring * 4) - (wobble * s(2) as f32) as i32;
+            let drift_x = ((ring as f32 * 0.9 + elapsed * 2.0).sin() * s(4) as f32) as i32;
+            let drift_y = ((ring as f32 * 1.3 - elapsed * 1.6).cos() * s(3) as f32) as i32;
+            let color = if absorbing {
+                if ring % 3 == 0 {
+                    self.colors.line
+                } else {
+                    self.colors.bg
+                }
+            } else if ring % 3 == 0 {
+                self.colors.bright
+            } else {
+                self.colors.accent
+            };
+            self.set_color(color);
+            XSetLineAttributes(
+                self.display,
+                self.gc,
+                if ring % 4 == 0 { 3 } else { 2 },
+                0,
+                1,
+                1,
+            );
+            let sweep = (205 + ((ring * 17) % 95)) * 64;
+            XDrawArc(
+                self.display,
+                self.canvas,
+                self.gc,
+                cx + drift_x - radius_x,
+                cy + drift_y - radius_y,
+                (radius_x * 2).max(1) as u32,
+                (radius_y * 2).max(1) as u32,
+                phase as i32 * 64,
+                if absorbing { -sweep } else { sweep },
+            );
+        }
+        self.circle(
+            if absorbing {
+                self.colors.bg
+            } else {
+                self.colors.bright
+            },
+            if absorbing {
+                self.colors.line
+            } else {
+                self.colors.accent
+            },
+            cx,
+            cy,
+            s(5),
+        );
+    }
+
+    fn file_tree_path(&self, file: &FileBuffer) -> String {
+        self.project_path
+            .as_ref()
+            .and_then(|root| file.path.strip_prefix(root).ok())
+            .map(|path| path.to_string_lossy().into_owned())
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| file.name.clone())
+    }
+
+    fn file_visible_in_tree(&self, file: &FileBuffer) -> bool {
+        let path = self.file_tree_path(file);
+        let needle = self.workspace_search.to_ascii_lowercase();
+        if !needle.is_empty() {
+            return path.to_ascii_lowercase().contains(&needle);
+        }
+        !self
+            .collapsed_folders
+            .iter()
+            .any(|folder| path == *folder || path.starts_with(&format!("{folder}/")))
+    }
+
+    fn file_tree_row(&self, wanted: usize) -> Option<i32> {
+        if !self.project_tree_expanded && self.workspace_search.is_empty() {
+            return None;
+        }
+        let needle = self.workspace_search.to_ascii_lowercase();
+        let mut row = 176;
+        for folder in &self.folders {
+            let has_match = needle.is_empty()
+                || folder.to_ascii_lowercase().contains(&needle)
+                || self.files.iter().any(|file| {
+                    let path = self.file_tree_path(file);
+                    path.starts_with(&format!("{folder}/"))
+                        && path.to_ascii_lowercase().contains(&needle)
+                });
+            if has_match {
+                row += 28;
+            }
+        }
+        for (index, file) in self.files.iter().enumerate() {
+            if !self.file_visible_in_tree(file) {
+                continue;
+            }
+            if index == wanted {
+                return Some(self.s(row));
+            }
+            row += 29;
+        }
+        None
     }
 
     unsafe fn circle(&self, fill: c_ulong, stroke: c_ulong, x: i32, y: i32, radius: i32) {
@@ -1209,9 +1521,22 @@ impl App {
             (0, header - 1),
             (self.width, header - 1),
         );
-        self.circle(self.colors.project, self.colors.bright, s(27), s(23), s(13));
-        self.text(self.colors.bright, s(15), s(29), "TC");
-        self.text(self.colors.accent, s(42), s(29), "IDE");
+        if !self.logo_surface.is_null() {
+            let image_w = cairo_image_surface_get_width(self.logo_surface).max(1) as f64;
+            let image_h = cairo_image_surface_get_height(self.logo_surface).max(1) as f64;
+            let target_h = s(54) as f64;
+            let scale = target_h / image_h;
+            cairo_save(self.cairo);
+            cairo_translate(self.cairo, s(7) as f64, -s(4) as f64);
+            cairo_scale(self.cairo, scale, scale);
+            cairo_set_source_surface(self.cairo, self.logo_surface, 0.0, 0.0);
+            cairo_paint_with_alpha(self.cairo, 1.0);
+            cairo_restore(self.cairo);
+            let _ = image_w;
+        } else {
+            self.text(self.colors.bright, s(15), s(29), "TC");
+            self.text(self.colors.accent, s(42), s(29), "IDE");
+        }
         self.outline(
             if self.new_menu_open {
                 self.colors.accent
@@ -1223,7 +1548,8 @@ impl App {
             s(88),
             s(27),
         );
-        self.text(self.colors.text, s(124), s(29), self.tr("New  v", "新建 v"));
+        self.text(self.colors.text, s(124), s(29), self.tr("New", "新建"));
+        self.chevron(s(181), s(24), self.new_menu_open);
         self.outline(
             if self.edit_menu_open {
                 self.colors.accent
@@ -1296,8 +1622,9 @@ impl App {
             self.colors.text,
             self.width - s(119),
             s(29),
-            self.tr("Package v", "打包 v"),
+            self.tr("Package", "打包"),
         );
+        self.chevron(self.width - s(39), s(24), self.package_open);
     }
 
     unsafe fn draw_workspace(&self) {
@@ -1311,12 +1638,8 @@ impl App {
             (width, self.height - s(24)),
         );
         self.text(self.colors.muted, s(14), s(71), self.tr("PROJECT", "项目"));
-        self.text(
-            self.colors.bright,
-            s(15),
-            s(101),
-            &format!("v  {}", self.project_name),
-        );
+        self.text(self.colors.bright, s(34), s(101), &self.project_name);
+        self.chevron(s(17), s(96), self.project_tree_expanded);
         self.rect(self.colors.bg, s(10), s(112), width - s(20), s(32));
         self.outline(
             if self.workspace_search_focused {
@@ -1339,28 +1662,49 @@ impl App {
                 &self.workspace_search
             },
         );
-        let mut row_y = 176;
-        for folder in &self.folders {
-            self.text(self.colors.text, s(16), s(row_y), &format!("  v  {folder}"));
-            row_y += 28;
-        }
-        let needle = self.workspace_search.to_ascii_lowercase();
-        for (index, file) in self.files.iter().enumerate().filter(|(_, file)| {
-            needle.is_empty() || file.name.to_ascii_lowercase().contains(&needle)
-        }) {
-            let y = row_y + index as i32 * 29;
-            if s(y) > self.height - s(65) {
-                break;
+        if self.project_tree_expanded || !self.workspace_search.is_empty() {
+            let mut row_y = 176;
+            for folder in &self.folders {
+                if !self.workspace_search.is_empty()
+                    && !folder
+                        .to_ascii_lowercase()
+                        .contains(&self.workspace_search.to_ascii_lowercase())
+                    && !self.files.iter().any(|file| {
+                        let path = self.file_tree_path(file);
+                        path.starts_with(&format!("{folder}/"))
+                            && path
+                                .to_ascii_lowercase()
+                                .contains(&self.workspace_search.to_ascii_lowercase())
+                    })
+                {
+                    continue;
+                }
+                let expanded = !self.collapsed_folders.contains(folder);
+                self.chevron(s(18), s(row_y - 5), expanded);
+                self.text(self.colors.text, s(34), s(row_y), folder);
+                row_y += 28;
             }
-            if index == self.selected_file {
-                self.rect(self.colors.panel_2, s(7), s(y - 21), width - s(14), s(27));
+            for (index, file) in self
+                .files
+                .iter()
+                .enumerate()
+                .filter(|(_, file)| self.file_visible_in_tree(file))
+            {
+                let y = row_y;
+                row_y += 29;
+                if s(y) > self.height - s(65) {
+                    break;
+                }
+                if index == self.selected_file {
+                    self.rect(self.colors.panel_2, s(7), s(y - 21), width - s(14), s(27));
+                }
+                let color = if index == self.selected_file {
+                    self.colors.bright
+                } else {
+                    self.colors.muted
+                };
+                self.text(color, s(45), s(y), &self.file_tree_path(file));
             }
-            let color = if index == self.selected_file {
-                self.colors.bright
-            } else {
-                self.colors.muted
-            };
-            self.text(color, s(16), s(y), &format!("       {}", file.name));
         }
     }
 
@@ -1398,7 +1742,7 @@ impl App {
         let x = self.width - s(410);
         let y = s(43);
         let w = s(380);
-        let h = s(390);
+        let h = s(555);
         self.rect(self.colors.panel_2, x, y, w, h);
         self.outline(self.colors.line, x, y, w, h);
         self.text(
@@ -1509,6 +1853,66 @@ impl App {
             y + s(365),
             self.tr("Ctrl+wheel also changes size", "Ctrl+滚轮也可调整字号"),
         );
+        self.line(
+            self.colors.line,
+            1,
+            (x + s(12), y + s(382)),
+            (x + w - s(12), y + s(382)),
+        );
+        self.text(
+            self.colors.muted,
+            x + s(16),
+            y + s(410),
+            self.tr("Editor background", "编辑器背景"),
+        );
+        self.outline(self.colors.line, x + s(156), y + s(391), s(112), s(27));
+        self.text(
+            self.colors.text,
+            x + s(169),
+            y + s(411),
+            self.tr("CHOOSE PNG", "选择 PNG"),
+        );
+        self.outline(self.colors.line, x + s(276), y + s(391), s(82), s(27));
+        self.text(
+            self.colors.text,
+            x + s(289),
+            y + s(411),
+            self.tr("CLEAR", "清除"),
+        );
+        self.text(
+            self.colors.muted,
+            x + s(16),
+            y + s(450),
+            self.tr("Opacity", "不透明度"),
+        );
+        self.outline(self.colors.line, x + s(156), y + s(430), s(34), s(27));
+        self.text(self.colors.text, x + s(168), y + s(451), "-");
+        self.text(
+            self.colors.bright,
+            x + s(208),
+            y + s(451),
+            &format!("{}%", (self.background_opacity * 100.0).round() as i32),
+        );
+        self.outline(self.colors.line, x + s(276), y + s(430), s(34), s(27));
+        self.text(self.colors.text, x + s(288), y + s(451), "+");
+        self.text(
+            self.colors.muted,
+            x + s(16),
+            y + s(490),
+            self.tr("Crop position", "取景位置"),
+        );
+        for (index, label) in ["←", "→", "↑", "↓"].iter().enumerate() {
+            let bx = x + s(156 + index as i32 * 48);
+            self.outline(self.colors.line, bx, y + s(469), s(34), s(27));
+            self.text(self.colors.text, bx + s(9), y + s(490), label);
+        }
+        let background_name = self
+            .background_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.tr("No image selected", "未选择图片").to_string());
+        self.text(self.colors.muted, x + s(16), y + s(530), &background_name);
     }
 
     unsafe fn draw_new_menu(&self) {
@@ -1586,6 +1990,7 @@ impl App {
             right - left - 1,
             self.height - s(70),
         );
+        self.draw_background_region(left + 1, s(84), right - left - 1, self.height - s(154));
         self.rect(
             self.colors.panel_2,
             left + 1,
@@ -1800,12 +2205,13 @@ impl App {
             } else {
                 self.colors.line
             };
-            self.line(
-                color,
-                if related { 2 } else { 1 },
-                self.node_position(&NODES[a]),
-                self.node_position(&NODES[b]),
-            );
+            let from = self.node_position(&NODES[a]);
+            let to = self.node_position(&NODES[b]);
+            let middle_x = (from.0 + to.0) / 2;
+            let width = if related { 2 } else { 1 };
+            self.line(color, width, from, (middle_x, from.1));
+            self.line(color, width, (middle_x, from.1), (middle_x, to.1));
+            self.line(color, width, (middle_x, to.1), to);
         }
 
         let elapsed = self.started.elapsed().as_secs_f32();
@@ -1859,27 +2265,25 @@ impl App {
             x + s(14),
             y + h - s(10),
             self.tr(
-                "wheel: zoom - project -> file -> class -> function / call",
-                "滚轮缩放：项目 → 文件 → Class → 函数 / 调用",
+                "wheel: zoom hierarchy - hover code to trace calls",
+                "滚轮缩放层级；悬停代码可追踪声明与调用",
             ),
         );
     }
 
     unsafe fn draw_code_relations(&self) {
-        if !self.graph_current {
-            return;
-        }
-        let Some(active) = self.hovered else {
-            return;
-        };
         let Some((line, start_byte, end_byte)) = self.hovered_code_span else {
             return;
         };
         let s = |v| self.s(v);
-        let editor_right = (self.width as f32 * 0.61) as i32;
-        let (box_x, box_y, box_w, box_h) = self.code_symbol_bounds(line, start_byte, end_byte);
-        let start = (box_x + box_w, box_y + box_h / 2);
-        let junction = (editor_right - s(18), start.1);
+        let editor_left = (self.width as f32 * 0.17) as i32;
+        let symbol = &self.files[self.selected_file].lines[line][start_byte..end_byte];
+        if symbol.len() < 2 {
+            return;
+        }
+        let (box_x, box_y, _box_w, box_h) = self.code_symbol_bounds(line, start_byte, end_byte);
+        let start = (box_x, box_y + box_h / 2);
+        let gutter = editor_left + s(27);
         self.circle(
             self.colors.panel_2,
             self.colors.bright,
@@ -1887,30 +2291,115 @@ impl App {
             start.1,
             s(4),
         );
-        self.line(self.colors.accent, 2, start, junction);
-        let mut targets = vec![active];
-        for &(from, to) in EDGES {
-            if from == active && !targets.contains(&to) {
-                targets.push(to);
+        self.line(self.colors.accent, 2, start, (gutter, start.1));
+        let mut drawn = 0;
+        for (file_index, file) in self.files.iter().enumerate() {
+            let mut file_has_relation = false;
+            for (target_line, value) in file.lines.iter().enumerate() {
+                for (target_start, _) in value.match_indices(symbol) {
+                    let target_end = target_start + symbol.len();
+                    if !identifier_match_is_exact(value, target_start, target_end) {
+                        continue;
+                    }
+                    if file_index == self.selected_file
+                        && target_line == line
+                        && target_start == start_byte
+                    {
+                        continue;
+                    }
+                    file_has_relation = true;
+                    if file_index != self.selected_file || drawn >= 12 {
+                        continue;
+                    }
+                    let (target_x, target_y, target_w, target_h) =
+                        self.code_symbol_bounds(target_line, target_start, target_end);
+                    let end = (target_x, target_y + target_h / 2);
+                    self.line(self.colors.accent, 1, (gutter, start.1), (gutter, end.1));
+                    self.line(
+                        self.colors.accent,
+                        1,
+                        (gutter, end.1),
+                        (end.0 - s(7), end.1),
+                    );
+                    self.outline(self.colors.accent, target_x, target_y, target_w, target_h);
+                    let role = symbol_role(value, symbol);
+                    self.text(
+                        self.colors.muted,
+                        target_x + target_w + s(8),
+                        target_y + s(19),
+                        self.tr(role.0, role.1),
+                    );
+                    let mut arrow = [
+                        XPoint {
+                            x: end.0 as i16,
+                            y: end.1 as i16,
+                        },
+                        XPoint {
+                            x: (end.0 - s(8)) as i16,
+                            y: (end.1 - s(4)) as i16,
+                        },
+                        XPoint {
+                            x: (end.0 - s(8)) as i16,
+                            y: (end.1 + s(4)) as i16,
+                        },
+                    ];
+                    self.set_color(self.colors.accent);
+                    XFillPolygon(
+                        self.display,
+                        self.canvas,
+                        self.gc,
+                        arrow.as_mut_ptr(),
+                        3,
+                        0,
+                        0,
+                    );
+                    drawn += 1;
+                }
             }
-        }
-        for target in targets {
-            let end = self.node_position(&NODES[target]);
-            let bend = (editor_right + s(18), end.1);
-            self.line(self.colors.accent, 2, junction, bend);
-            self.line(self.colors.accent, 2, bend, (end.0 - s(8), end.1));
+            if file_index == self.selected_file || !file_has_relation {
+                continue;
+            }
+            let Some(tree_y) = self.file_tree_row(file_index) else {
+                continue;
+            };
+            let tree_right = editor_left - s(9);
+            self.line(
+                self.colors.accent,
+                1,
+                (gutter, start.1),
+                (editor_left, start.1),
+            );
+            self.line(
+                self.colors.accent,
+                1,
+                (editor_left, start.1),
+                (editor_left, tree_y),
+            );
+            self.line(
+                self.colors.accent,
+                1,
+                (editor_left, tree_y),
+                (tree_right, tree_y),
+            );
+            self.outline(
+                self.colors.accent,
+                s(8),
+                tree_y - s(20),
+                editor_left - s(17),
+                s(26),
+            );
             let mut arrow = [
                 XPoint {
-                    x: end.0 as i16,
-                    y: end.1 as i16,
+                    x: tree_right as i16,
+                    y: tree_y as i16,
                 },
                 XPoint {
-                    x: (end.0 - s(10)) as i16,
-                    y: (end.1 - s(5)) as i16,
+                    x: (tree_right + s(8)) as i16,
+                    y: (tree_y - s(4)) as i16,
                 },
                 XPoint {
-                    x: (end.0 - s(10)) as i16,
-                    y: (end.1 + s(5)) as i16,
+                    x: (tree_right + s(8)) as i16,
+                    y: (tree_y + s(4)) as i16,
                 },
             ];
             self.set_color(self.colors.accent);
@@ -1924,8 +2413,8 @@ impl App {
                 0,
             );
         }
-        let travel = ((self.started.elapsed().as_secs_f32() * 1.8) % 1.0).clamp(0.0, 1.0);
-        let pulse_x = start.0 + ((junction.0 - start.0) as f32 * travel) as i32;
+        let travel = ((self.started.elapsed().as_secs_f32() * 1.6) % 1.0).clamp(0.0, 1.0);
+        let pulse_x = start.0 + ((gutter - start.0) as f32 * travel) as i32;
         self.circle(
             self.colors.bright,
             self.colors.accent,
@@ -1962,9 +2451,12 @@ impl App {
                 .unwrap_or(self.tr("No active project", "没有活动项目")),
         );
         if self.terminal_open {
-            let mut tab_x = self.width - s(520);
-            for (index, terminal) in self.terminals.iter().enumerate() {
-                let width = s(130);
+            let controls_x = self.width - s(700);
+            self.outline(self.colors.line, controls_x, top + s(4), s(30), s(25));
+            self.text(self.colors.text, controls_x + s(10), top + s(21), "+");
+            let mut tab_x = controls_x + s(38);
+            for (index, terminal) in self.terminals.iter().take(4).enumerate() {
+                let width = s(106);
                 if index == self.terminal_active {
                     self.rect(self.colors.project, tab_x, top + s(4), width, s(25));
                 }
@@ -1980,8 +2472,40 @@ impl App {
                 );
                 tab_x += width + s(4);
             }
-            self.outline(self.colors.line, tab_x, top + s(4), s(28), s(25));
-            self.text(self.colors.text, tab_x + s(9), top + s(21), "+");
+            if self.terminals.len() > 4 {
+                self.outline(self.colors.line, tab_x, top + s(4), s(82), s(25));
+                self.text(
+                    self.colors.text,
+                    tab_x + s(9),
+                    top + s(21),
+                    &format!("{} +{}", self.tr("More", "更多"), self.terminals.len() - 4),
+                );
+                if self.terminal_menu_open {
+                    let menu_h = s(29) * self.terminals.len() as i32;
+                    self.rect(self.colors.panel, tab_x, top + s(32), s(180), menu_h);
+                    self.outline(self.colors.line, tab_x, top + s(32), s(180), menu_h);
+                    for (index, item) in self.terminals.iter().enumerate() {
+                        self.text(
+                            if index == self.terminal_active {
+                                self.colors.accent
+                            } else {
+                                self.colors.text
+                            },
+                            tab_x + s(12),
+                            top + s(53 + index as i32 * 29),
+                            &item.name,
+                        );
+                    }
+                }
+            }
+            let detach_x = self.width - s(92);
+            self.outline(self.colors.line, detach_x, top + s(4), s(74), s(25));
+            self.text(
+                self.colors.text,
+                detach_x + s(9),
+                top + s(21),
+                self.tr("POP OUT", "弹出"),
+            );
             let terminal = &self.terminals[self.terminal_active.min(self.terminals.len() - 1)];
             if let Ok(lines) = terminal.output.lock() {
                 let visible = lines.iter().rev().take(6).collect::<Vec<_>>();
@@ -2615,11 +3139,12 @@ impl App {
     unsafe fn draw_build_animation(&self) {
         let s = |v| self.s(v);
         let elapsed = self.build_started.unwrap().elapsed().as_secs_f32();
+        let absorb_seconds = self.build_absorb_seconds();
         let cx = self.width / 2;
         let cy = self.height / 2;
-        if elapsed < 2.4 {
-            let t = (elapsed / 2.4).clamp(0.0, 1.0);
-            if t > 0.72 {
+        if elapsed < absorb_seconds {
+            let t = (elapsed / absorb_seconds).clamp(0.0, 1.0);
+            if t > 0.76 {
                 let left = (self.width as f32 * 0.17) as i32;
                 let right = (self.width as f32 * 0.61) as i32;
                 self.rect(
@@ -2640,22 +3165,36 @@ impl App {
                     "render_graph(nodes)",
                 ),
                 (s(310), self.height - s(260), "workspace.index()"),
+                (s(510), s(205), "let package_target"),
+                (self.width - s(540), s(360), "runtime_cache"),
+                (s(360), self.height - s(190), "const BUILD_MODE"),
+                (self.width - s(390), self.height - s(235), "artifact_path"),
             ];
             for (index, (sx, sy, label)) in sources.iter().enumerate() {
-                let local = (t + index as f32 * 0.035).min(1.0);
+                let delayed = ((t - index as f32 * 0.018) / 0.84).clamp(0.0, 1.0);
+                let local = delayed.powf(2.35);
+                let swirl = (local * std::f32::consts::PI * 2.6 + index as f32).sin();
                 let px = *sx + ((cx - *sx) as f32 * local) as i32;
-                let py = *sy + ((cy - *sy) as f32 * local) as i32;
-                let color = if local > 0.82 {
+                let py = *sy
+                    + ((cy - *sy) as f32 * local) as i32
+                    + (swirl * s(18) as f32 * (1.0 - local)) as i32;
+                let color = if local > 0.9 {
                     self.colors.line
                 } else {
                     self.colors.text
                 };
+                let stretch = (local.powf(3.0) * s(58) as f32) as i32;
+                if stretch > s(3) {
+                    self.line(
+                        self.colors.muted,
+                        1,
+                        (px - stretch, py + s(4)),
+                        (px - s(4), py + s(4)),
+                    );
+                }
                 self.text(color, px, py, label);
-                self.line(self.colors.accent, 1, (px, py + s(5)), (cx, cy));
             }
-            let pulse = ((elapsed * 7.0).sin().abs() * s(8) as f32) as i32;
-            self.circle(self.colors.bg, self.colors.accent, cx, cy, s(34) + pulse);
-            self.circle(self.colors.bg, self.colors.line, cx, cy, s(53) - pulse / 2);
+            self.abstract_vortex(cx, cy, elapsed, true);
             self.text(
                 self.colors.muted,
                 cx - s(104),
@@ -2666,16 +3205,8 @@ impl App {
                 ),
             );
         } else {
-            let t = ((elapsed - 2.4) / 2.2).clamp(0.0, 1.0);
-            let radius = s(28) + (t * s(24) as f32) as i32;
-            self.circle(self.colors.bright, self.colors.accent, cx, cy, radius);
-            self.circle(
-                self.colors.panel,
-                self.colors.bright,
-                cx,
-                cy,
-                radius + s(13),
-            );
+            let t = ((elapsed - absorb_seconds) / 1.7).clamp(0.0, 1.0);
+            self.abstract_vortex(cx, cy, elapsed, false);
             let labels = [
                 (".exe", -190, -85),
                 (".deb", 180, -80),
@@ -2687,11 +3218,10 @@ impl App {
                     continue;
                 }
                 let spread = ((t - 0.08 * index as f32).max(0.0)).min(1.0);
-                let px = cx + (*dx as f32 * spread) as i32;
-                let py = cy + (*dy as f32 * spread) as i32;
-                self.line(self.colors.accent, 2, (cx, cy), (px, py));
-                self.rect(self.colors.bright, px - s(42), py - s(17), s(84), s(31));
-                self.text(self.colors.bg, px - s(28), py + s(5), label);
+                let eased = 1.0 - (1.0 - spread).powf(2.6);
+                let px = cx + (*dx as f32 * eased) as i32;
+                let py = cy + (*dy as f32 * eased) as i32;
+                self.package_icon(index, px, py, label);
             }
             let state = if t < 0.85 {
                 self.tr("WHITE HOLE IS EMITTING PACKAGES", "白洞正在吐出安装包")
@@ -2732,7 +3262,9 @@ impl App {
         }
         if self
             .build_started
-            .map(|started| started.elapsed() > Duration::from_millis(5000))
+            .map(|started| {
+                started.elapsed() > Duration::from_secs_f32(self.build_absorb_seconds() + 1.9)
+            })
             .unwrap_or(false)
         {
             self.build_started = None;
@@ -2767,6 +3299,88 @@ impl App {
         self.terminals = default_terminals();
         self.terminal_active = 0;
         self.terminal_focused = false;
+        self.terminal_menu_open = false;
+    }
+
+    fn add_terminal(&mut self) {
+        let number = self.terminals.len() + 1;
+        self.terminals.push(TerminalSession {
+            name: format!("Terminal {number}"),
+            input: String::new(),
+            output: Arc::new(Mutex::new(terminal_banner())),
+        });
+        self.terminal_active = self.terminals.len() - 1;
+        self.terminal_focused = true;
+    }
+
+    fn pop_out_terminal(&mut self) {
+        let cwd = self.project_path.clone().unwrap_or_else(projects_root);
+        let script = "printf '\\033[38;5;117m  _______ _             _____ _                          __     __     \\n |__   __(_)           / ____| |                         \\ \\   / /     \\n    | |   _  __ _ _ __| |    | |__  _   _  __ _ _ __    \\ \\_/ /_ _   \\n    | |  | |/ _` |  __| |    |  _ \\| | | |/ _` |  _ \\    \\   / _` |  \\n    | |  | | (_| | |  | |____| | | | |_| | (_| | | | |    | | (_| |  \\n    |_|  |_|\\__,_|_|   \\_____|_| |_|\\__,_|\\__,_|_| |_|    |_|\\__,_|  \\n\\033[0mGitHub: https://github.com/tianchuangya/TC-IDE\\nTC-IDE · Native semantic workspace\\n\\n'; exec bash";
+        let cwd_text = cwd.to_string_lossy().into_owned();
+        let launched = Command::new("gnome-terminal")
+            .args([
+                "--title=TC-IDE Terminal",
+                "--working-directory",
+                &cwd_text,
+                "--",
+                "bash",
+                "-lc",
+                script,
+            ])
+            .spawn()
+            .is_ok();
+        if !launched {
+            let _ = Command::new("x-terminal-emulator")
+                .args(["-T", "TC-IDE Terminal", "-e", "bash", "-lc", script])
+                .current_dir(&cwd)
+                .spawn();
+        }
+        self.status_message = self
+            .tr(
+                "Terminal opened in a separate window",
+                "终端已在独立窗口中打开",
+            )
+            .into();
+    }
+
+    fn save_project_package_targets(&self) {
+        let Some(root) = &self.project_path else {
+            return;
+        };
+        let value = self
+            .package_targets
+            .iter()
+            .map(|enabled| if *enabled { "1" } else { "0" })
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = fs::write(root.join(".tc-ide-package-targets"), value);
+    }
+
+    fn build_absorb_seconds(&self) -> f32 {
+        let lines = self
+            .files
+            .iter()
+            .map(|file| file.lines.len())
+            .sum::<usize>() as f32;
+        let targets = self
+            .package_targets
+            .iter()
+            .filter(|enabled| **enabled)
+            .count() as f32;
+        (1.35 + lines * 0.006 + targets * 0.12).clamp(1.5, 5.5)
+    }
+
+    fn load_project_package_targets(&mut self) {
+        self.package_targets = [false; 4];
+        let Some(root) = &self.project_path else {
+            return;
+        };
+        let Ok(value) = fs::read_to_string(root.join(".tc-ide-package-targets")) else {
+            return;
+        };
+        for (index, item) in value.trim().split(',').take(4).enumerate() {
+            self.package_targets[index] = item == "1";
+        }
     }
 
     fn run_terminal_command(&mut self) {
@@ -2836,7 +3450,27 @@ impl App {
         if a == b {
             return false;
         }
-        let (start, end) = if a <= b { (a, b) } else { (b, a) };
+        let (mut start, mut end) = if a <= b { (a, b) } else { (b, a) };
+        if let Some((comment_start, comment_end)) = self.active_comment_edit_bounds() {
+            if start.0 != self.caret_line || end.0 != self.caret_line {
+                self.selection_anchor = None;
+                self.selection_head = None;
+                self.status_message = self
+                    .tr(
+                        "Comment editing cannot delete code outside the bubble",
+                        "注释编辑不能删除气泡之外的代码",
+                    )
+                    .into();
+                return false;
+            }
+            start.1 = start.1.clamp(comment_start, comment_end);
+            end.1 = end.1.clamp(comment_start, comment_end);
+            if start == end {
+                self.selection_anchor = None;
+                self.selection_head = None;
+                return false;
+            }
+        }
         let tail = self.files[self.selected_file].lines[end.0][end.1..].to_string();
         self.files[self.selected_file].lines[start.0].truncate(start.1);
         self.files[self.selected_file].lines[start.0].push_str(&tail);
@@ -2857,11 +3491,21 @@ impl App {
             return;
         }
         self.delete_selection();
+        let comment_bounds = self.active_comment_edit_bounds();
         let parts = self
             .clipboard
             .split('\n')
             .map(str::to_string)
             .collect::<Vec<_>>();
+        if comment_bounds.is_some() && parts.len() > 1 {
+            self.status_message = self
+                .tr(
+                    "Multiline paste is disabled while editing one comment bubble",
+                    "编辑单个注释气泡时不允许粘贴多行内容",
+                )
+                .into();
+            return;
+        }
         if parts.len() == 1 {
             self.files[self.selected_file].lines[self.caret_line]
                 .insert_str(self.caret_column, &parts[0]);
@@ -3045,6 +3689,9 @@ impl App {
         self.project_name = name.to_string();
         self.project_path = Some(root.clone());
         self.folders = folders;
+        self.project_tree_expanded = true;
+        self.collapsed_folders.clear();
+        self.workspace_search.clear();
         self.files = vec![FileBuffer {
             name: file_name,
             path: file_path,
@@ -3058,6 +3705,7 @@ impl App {
         self.caret_line = 0;
         self.caret_column = 0;
         self.graph_current = false;
+        self.load_project_package_targets();
         self.reset_terminals_for_project();
         self.status_message = format!(
             "Project {name} created at {} with {language} {version} / {environment}",
@@ -3073,10 +3721,10 @@ impl App {
             if button == 1
                 && x >= menu_x
                 && x <= menu_x + s(190)
-                && y >= menu_y
+                && y >= menu_y + s(29)
                 && y <= menu_y + s(92)
             {
-                let kind = if y < menu_y + s(65) {
+                let kind = if y < menu_y + s(66) {
                     CreateKind::File
                 } else {
                     CreateKind::Folder
@@ -3287,6 +3935,55 @@ impl App {
                         return;
                     }
                 }
+                if y >= menu_y + s(389) && y <= menu_y + s(421) {
+                    if x >= menu_x + s(156) && x <= menu_x + s(268) {
+                        unsafe { self.choose_background() };
+                        return;
+                    }
+                    if x >= menu_x + s(276) && x <= menu_x + s(358) {
+                        unsafe { self.replace_background(None) };
+                        self.status_message = self
+                            .tr("Editor background cleared", "编辑器背景已清除")
+                            .into();
+                        return;
+                    }
+                }
+                if y >= menu_y + s(428) && y <= menu_y + s(460) {
+                    if x >= menu_x + s(156) && x <= menu_x + s(190) {
+                        self.background_opacity = (self.background_opacity - 0.05).max(0.0);
+                    } else if x >= menu_x + s(276) && x <= menu_x + s(310) {
+                        self.background_opacity = (self.background_opacity + 0.05).min(1.0);
+                    } else {
+                        return;
+                    }
+                    save_background_preferences(
+                        self.background_path.as_deref(),
+                        self.background_opacity,
+                        self.background_offset_x,
+                        self.background_offset_y,
+                    );
+                    return;
+                }
+                if y >= menu_y + s(467)
+                    && y <= menu_y + s(501)
+                    && x >= menu_x + s(156)
+                    && x <= menu_x + s(346)
+                {
+                    let index = ((x - menu_x - s(156)) / s(48).max(1)).clamp(0, 3);
+                    match index {
+                        0 => self.background_offset_x = (self.background_offset_x - 0.1).max(-1.0),
+                        1 => self.background_offset_x = (self.background_offset_x + 0.1).min(1.0),
+                        2 => self.background_offset_y = (self.background_offset_y - 0.1).max(-1.0),
+                        _ => self.background_offset_y = (self.background_offset_y + 0.1).min(1.0),
+                    }
+                    save_background_preferences(
+                        self.background_path.as_deref(),
+                        self.background_opacity,
+                        self.background_offset_x,
+                        self.background_offset_y,
+                    );
+                    return;
+                }
             }
             self.settings_open = false;
         }
@@ -3409,6 +4106,7 @@ impl App {
                     let center = menu_y + s(51 + index as i32 * 31);
                     if (y - center).abs() < s(15) {
                         self.package_targets[index] = !self.package_targets[index];
+                        self.save_project_package_targets();
                         return;
                     }
                 }
@@ -3439,22 +4137,40 @@ impl App {
                     self.terminal_focused = false;
                     return;
                 }
-                let first = self.width - s(520);
-                if x >= first {
-                    let index = ((x - first) / (s(134).max(1))) as usize;
-                    if index < self.terminals.len() {
+                let controls_x = self.width - s(700);
+                if x >= controls_x && x <= controls_x + s(30) {
+                    self.add_terminal();
+                    return;
+                }
+                let first = controls_x + s(38);
+                if x >= first && x < first + s(440) {
+                    let index = ((x - first) / s(110).max(1)) as usize;
+                    if index < self.terminals.len().min(4) {
                         self.terminal_active = index;
                         self.terminal_focused = true;
-                    } else {
-                        let number = self.terminals.len() + 1;
-                        self.terminals.push(TerminalSession {
-                            name: format!("Terminal {number}"),
-                            input: String::new(),
-                            output: Arc::new(Mutex::new(vec!["terminal ready".into()])),
-                        });
-                        self.terminal_active = self.terminals.len() - 1;
                     }
                     return;
+                }
+                let more_x = first + s(440);
+                if self.terminals.len() > 4 && x >= more_x && x <= more_x + s(82) {
+                    self.terminal_menu_open = !self.terminal_menu_open;
+                    return;
+                }
+                if x >= self.width - s(92) {
+                    self.pop_out_terminal();
+                    return;
+                }
+            }
+            if self.terminal_menu_open {
+                let menu_x = self.width - s(700) + s(38 + 440);
+                for index in 0..self.terminals.len() {
+                    let row = terminal_top + s(53 + index as i32 * 29);
+                    if x >= menu_x && x <= menu_x + s(180) && (y - row).abs() < s(14) {
+                        self.terminal_active = index;
+                        self.terminal_menu_open = false;
+                        self.terminal_focused = true;
+                        return;
+                    }
                 }
             }
             self.terminal_focused = true;
@@ -3496,7 +4212,11 @@ impl App {
                 {
                     if y <= layout.top + s(27) && x <= layout.left + s(28) {
                         let key = (self.selected_file, index);
-                        if !self.expanded_comments.remove(&key) {
+                        if self.expanded_comments.remove(&key) {
+                            self.editor_focused = false;
+                            self.selection_anchor = None;
+                            self.selection_head = None;
+                        } else {
                             self.expanded_comments.insert(key);
                         }
                         return;
@@ -3521,18 +4241,43 @@ impl App {
             }
         }
         if x < workspace_right {
+            if button == 1 && y >= s(77) && y <= s(108) {
+                self.project_tree_expanded = !self.project_tree_expanded;
+                return;
+            }
             if y >= s(112) && y <= s(144) {
                 self.workspace_search_focused = true;
                 self.editor_focused = false;
                 return;
             }
-            let file_start = 176 + self.folders.len() as i32 * 28;
+            if !self.project_tree_expanded && self.workspace_search.is_empty() {
+                return;
+            }
             let needle = self.workspace_search.to_ascii_lowercase();
-            for (index, file) in self.files.iter().enumerate() {
-                if !needle.is_empty() && !file.name.to_ascii_lowercase().contains(&needle) {
+            let mut center = 176;
+            for folder in self.folders.clone() {
+                let has_match = needle.is_empty()
+                    || folder.to_ascii_lowercase().contains(&needle)
+                    || self.files.iter().any(|file| {
+                        let path = self.file_tree_path(file);
+                        path.starts_with(&format!("{folder}/"))
+                            && path.to_ascii_lowercase().contains(&needle)
+                    });
+                if !has_match {
                     continue;
                 }
-                let center = file_start + index as i32 * 29;
+                if (y - s(center)).abs() < s(14) {
+                    if !self.collapsed_folders.remove(&folder) {
+                        self.collapsed_folders.insert(folder);
+                    }
+                    return;
+                }
+                center += 28;
+            }
+            for (index, file) in self.files.iter().enumerate() {
+                if !self.file_visible_in_tree(file) {
+                    continue;
+                }
                 if (y - s(center)).abs() < s(15) {
                     self.selected_file = index;
                     self.caret_line = 0;
@@ -3548,6 +4293,7 @@ impl App {
                     self.hovered_from_code = false;
                     return;
                 }
+                center += 29;
             }
         }
         if x >= workspace_right && x < graph_left && y > s(85) && y < self.height - s(60) {
@@ -3722,10 +4468,15 @@ impl App {
             match input.to_ascii_lowercase().as_str() {
                 "s" => self.save_current_file(),
                 "a" => {
-                    let last = self.files[self.selected_file].lines.len() - 1;
-                    self.selection_anchor = Some((0, 0));
-                    self.selection_head =
-                        Some((last, self.files[self.selected_file].lines[last].len()));
+                    if let Some((start, end)) = self.active_comment_edit_bounds() {
+                        self.selection_anchor = Some((self.caret_line, start));
+                        self.selection_head = Some((self.caret_line, end));
+                    } else {
+                        let last = self.files[self.selected_file].lines.len() - 1;
+                        self.selection_anchor = Some((0, 0));
+                        self.selection_head =
+                            Some((last, self.files[self.selected_file].lines[last].len()));
+                    }
                 }
                 "c" => self.copy_selection(),
                 "x" => {
@@ -3762,12 +4513,16 @@ impl App {
             TAB_KEYSYM => self.accept_completion(),
             BACKSPACE_KEYSYM => {
                 if !self.delete_selection() {
-                    if self.caret_column > 0 {
+                    let lower_bound = self
+                        .active_comment_edit_bounds()
+                        .map(|(start, _)| start)
+                        .unwrap_or(0);
+                    if self.caret_column > lower_bound {
                         let line = &mut self.files[self.selected_file].lines[self.caret_line];
                         let previous = previous_char_boundary(line, self.caret_column);
                         line.replace_range(previous..self.caret_column, "");
                         self.caret_column = previous;
-                    } else if self.caret_line > 0 {
+                    } else if lower_bound == 0 && self.caret_line > 0 {
                         let current = self.files[self.selected_file].lines.remove(self.caret_line);
                         self.caret_line -= 1;
                         self.caret_column =
@@ -3776,7 +4531,40 @@ impl App {
                     }
                 }
             }
+            DELETE_KEYSYM => {
+                if !self.delete_selection() {
+                    let len = self.files[self.selected_file].lines[self.caret_line].len();
+                    let upper_bound = self
+                        .active_comment_edit_bounds()
+                        .map(|(_, end)| end)
+                        .unwrap_or(len);
+                    if self.caret_column < upper_bound {
+                        let next = next_char_boundary(
+                            &self.files[self.selected_file].lines[self.caret_line],
+                            self.caret_column,
+                        );
+                        self.files[self.selected_file].lines[self.caret_line]
+                            .replace_range(self.caret_column..next, "");
+                    } else if upper_bound == len
+                        && self.caret_line + 1 < self.files[self.selected_file].lines.len()
+                    {
+                        let next = self.files[self.selected_file]
+                            .lines
+                            .remove(self.caret_line + 1);
+                        self.files[self.selected_file].lines[self.caret_line].push_str(&next);
+                    }
+                }
+            }
             RETURN_KEYSYM => {
+                if self.active_comment_edit_bounds().is_some() {
+                    self.status_message = self
+                        .tr(
+                            "Use a block comment for multiline bubble content",
+                            "单行注释气泡不能换行，多行内容请使用块注释",
+                        )
+                        .into();
+                    return true;
+                }
                 self.delete_selection();
                 let tail = self.files[self.selected_file].lines[self.caret_line]
                     .split_off(self.caret_column);
@@ -3787,12 +4575,16 @@ impl App {
                     .insert(self.caret_line, tail);
             }
             LEFT_KEYSYM => {
-                if self.caret_column > 0 {
+                let lower_bound = self
+                    .active_comment_edit_bounds()
+                    .map(|(start, _)| start)
+                    .unwrap_or(0);
+                if self.caret_column > lower_bound {
                     self.caret_column = previous_char_boundary(
                         &self.files[self.selected_file].lines[self.caret_line],
                         self.caret_column,
                     );
-                } else if self.caret_line > 0 {
+                } else if lower_bound == 0 && self.caret_line > 0 {
                     self.caret_line -= 1;
                     self.caret_column = self.files[self.selected_file].lines[self.caret_line].len();
                 }
@@ -3801,12 +4593,18 @@ impl App {
             }
             RIGHT_KEYSYM => {
                 let len = self.files[self.selected_file].lines[self.caret_line].len();
-                if self.caret_column < len {
+                let upper_bound = self
+                    .active_comment_edit_bounds()
+                    .map(|(_, end)| end)
+                    .unwrap_or(len);
+                if self.caret_column < upper_bound {
                     self.caret_column = next_char_boundary(
                         &self.files[self.selected_file].lines[self.caret_line],
                         self.caret_column,
                     );
-                } else if self.caret_line + 1 < self.files[self.selected_file].lines.len() {
+                } else if upper_bound == len
+                    && self.caret_line + 1 < self.files[self.selected_file].lines.len()
+                {
                     self.caret_line += 1;
                     self.caret_column = 0;
                 }
@@ -3814,6 +4612,9 @@ impl App {
                 self.selection_head = None;
             }
             UP_KEYSYM => {
+                if self.active_comment_edit_bounds().is_some() {
+                    return true;
+                }
                 let visual = self.files[self.selected_file].lines[self.caret_line]
                     [..self.caret_column]
                     .chars()
@@ -3827,6 +4628,9 @@ impl App {
                 self.selection_head = None;
             }
             DOWN_KEYSYM => {
+                if self.active_comment_edit_bounds().is_some() {
+                    return true;
+                }
                 let visual = self.files[self.selected_file].lines[self.caret_line]
                     [..self.caret_column]
                     .chars()
@@ -3862,15 +4666,28 @@ impl App {
         if x < left || x >= graph || y < s(85) {
             return;
         }
+        let comment_bounds = self.active_comment_edit_bounds();
         let line = (((y - s(119) + s(14)) / s(28).max(1)).max(0) as usize)
             .min(self.files[self.selected_file].lines.len() - 1);
         let column = self.byte_index_at_code_x(
             &self.files[self.selected_file].lines[line],
             (x - left - s(52)).max(0),
         );
-        self.selection_head = Some((line, column));
-        self.caret_line = line;
-        self.caret_column = column;
+        if let Some((start, end)) = comment_bounds {
+            let column = if line < self.caret_line {
+                start
+            } else if line > self.caret_line {
+                end
+            } else {
+                column.clamp(start, end)
+            };
+            self.selection_head = Some((self.caret_line, column));
+            self.caret_column = column;
+        } else {
+            self.selection_head = Some((line, column));
+            self.caret_line = line;
+            self.caret_column = column;
+        }
     }
 
     fn update_hover(&mut self) {
@@ -3883,23 +4700,18 @@ impl App {
                 / self.code_line_step().max(1))
             .max(0) as usize;
             if let Some(line) = self.files[self.selected_file].lines.get(row) {
-                for (symbol, node) in [
-                    ("GraphController", 4),
-                    ("build_graph", 5),
-                    ("analyze_workspace", 6),
-                    ("resolve_symbols", 7),
-                    ("render_graph", 8),
-                ] {
-                    for (start, _) in line.match_indices(symbol) {
-                        let end = start + symbol.len();
-                        let symbol_x = left + s(52) + self.code_text_width(&line[..start]);
-                        let symbol_right = symbol_x + self.code_text_width(&line[start..end]);
-                        if self.mouse_x >= symbol_x - s(3) && self.mouse_x <= symbol_right + s(3) {
-                            self.hovered = Some(node);
-                            self.hovered_from_code = true;
-                            self.hovered_code_span = Some((row, start, end));
-                            return;
-                        }
+                let byte = self.byte_index_at_code_x(line, (self.mouse_x - left - s(52)).max(0));
+                if let Some((start, end)) = identifier_span_at(line, byte) {
+                    let symbol_x = left + s(52) + self.code_text_width(&line[..start]);
+                    let symbol_right = symbol_x + self.code_text_width(&line[start..end]);
+                    if self.mouse_x >= symbol_x - s(3) && self.mouse_x <= symbol_right + s(3) {
+                        let symbol = &line[start..end];
+                        self.hovered = NODES
+                            .iter()
+                            .position(|node| node.label.trim_end_matches("()") == symbol);
+                        self.hovered_from_code = true;
+                        self.hovered_code_span = Some((row, start, end));
+                        return;
                     }
                 }
             }
@@ -4019,6 +4831,73 @@ fn ui_settings_path() -> PathBuf {
         .join("tc-ide/interface.conf")
 }
 
+fn background_settings_path() -> PathBuf {
+    ui_settings_path().with_file_name("background.conf")
+}
+
+struct BackgroundPreferences {
+    path: Option<PathBuf>,
+    opacity: f64,
+    offset_x: f64,
+    offset_y: f64,
+}
+
+fn load_background_preferences() -> BackgroundPreferences {
+    let content = fs::read_to_string(background_settings_path()).unwrap_or_default();
+    let value = |key: &str| {
+        content.lines().find_map(|line| {
+            line.split_once('=')
+                .filter(|(name, _)| *name == key)
+                .map(|(_, value)| value)
+        })
+    };
+    BackgroundPreferences {
+        path: env::var_os("TC_IDE_BACKGROUND")
+            .map(PathBuf::from)
+            .or_else(|| {
+                value("path")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            }),
+        opacity: value("opacity")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.22_f64)
+            .clamp(0.0, 1.0),
+        offset_x: value("offset_x")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.0_f64)
+            .clamp(-1.0, 1.0),
+        offset_y: value("offset_y")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.0_f64)
+            .clamp(-1.0, 1.0),
+    }
+}
+
+fn save_background_preferences(
+    path: Option<&std::path::Path>,
+    opacity: f64,
+    offset_x: f64,
+    offset_y: f64,
+) {
+    let config = background_settings_path();
+    if let Some(parent) = config.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let path = path
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let _ = fs::write(
+        config,
+        format!(
+            "path={path}\nopacity={}\noffset_x={}\noffset_y={}\n",
+            opacity.clamp(0.0, 1.0),
+            offset_x.clamp(-1.0, 1.0),
+            offset_y.clamp(-1.0, 1.0)
+        ),
+    );
+}
+
 struct UiPreferences {
     chinese: bool,
     font_family: usize,
@@ -4080,6 +4959,17 @@ fn bundled_font_path() -> Option<PathBuf> {
     })
 }
 
+fn bundled_asset_path(relative: &str) -> Option<PathBuf> {
+    let relative = PathBuf::from(relative);
+    let installed = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(&relative)));
+    installed.filter(|path| path.exists()).or_else(|| {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative);
+        source.exists().then_some(source)
+    })
+}
+
 unsafe fn register_bundled_fonts() {
     let Some(path) = bundled_font_path() else {
         return;
@@ -4106,9 +4996,23 @@ fn default_terminals() -> Vec<TerminalSession> {
         .map(|name| TerminalSession {
             name: (*name).into(),
             input: String::new(),
-            output: Arc::new(Mutex::new(vec![format!("{} terminal ready", name)])),
+            output: Arc::new(Mutex::new(terminal_banner())),
         })
         .collect()
+}
+
+fn terminal_banner() -> Vec<String> {
+    [
+        "████████╗██╗ █████╗ ███╗   ██╗ ██████╗██╗  ██╗██╗   ██╗ █████╗ ███╗   ██╗ ██████╗ ██╗   ██╗ █████╗",
+        "╚══██╔══╝██║██╔══██╗████╗  ██║██╔════╝██║  ██║██║   ██║██╔══██╗████╗  ██║██╔════╝ ╚██╗ ██╔╝██╔══██╗",
+        "   ██║   ██║███████║██╔██╗ ██║██║     ███████║██║   ██║███████║██╔██╗ ██║██║  ███╗ ╚████╔╝ ███████║",
+        "   ██║   ██║██╔══██║██║╚██╗██║██║     ██╔══██║██║   ██║██╔══██║██║╚██╗██║██║   ██║  ╚██╔╝  ██╔══██║",
+        "   ██║   ██║██║  ██║██║ ╚████║╚██████╗██║  ██║╚██████╔╝██║  ██║██║ ╚████║╚██████╔╝   ██║   ██║  ██║",
+        "GitHub  https://github.com/tianchuangya/TC-IDE   ·   Native semantic workspace",
+    ]
+    .iter()
+    .map(|line| (*line).to_string())
+    .collect()
 }
 
 fn expand_home(value: &str) -> PathBuf {
@@ -4173,6 +5077,35 @@ fn comment_markers_for_file(name: &str) -> &'static [&'static str] {
     }
 }
 
+fn comment_content_bounds(line: &str, file: &str) -> Option<(usize, usize, usize)> {
+    let (marker_start, marker) = comment_markers_for_file(file)
+        .iter()
+        .filter_map(|marker| line.find(marker).map(|index| (index, *marker)))
+        .min_by_key(|(index, _)| *index)?;
+    if marker == "#" && marker_start == 0 && line.starts_with("#!") {
+        return None;
+    }
+    let marker_end = marker_start + marker.len();
+    let after = &line[marker_end..];
+    let leading = after.len() - after.trim_start().len();
+    let content_start = marker_end + leading;
+    let closing = match marker {
+        "/*" => "*/",
+        "<!--" => "-->",
+        _ => "",
+    };
+    let raw_end = if closing.is_empty() {
+        line.len()
+    } else {
+        after
+            .find(closing)
+            .map(|offset| marker_end + offset)
+            .unwrap_or(line.len())
+    };
+    let content_end = content_start + line[content_start..raw_end].trim_end().len();
+    Some((marker_start, content_start, content_end))
+}
+
 fn char_to_byte_index(value: &str, character: usize) -> usize {
     value
         .char_indices()
@@ -4213,6 +5146,50 @@ fn identifiers_in(value: &str) -> Vec<String> {
         })
         .map(str::to_string)
         .collect()
+}
+
+fn identifier_span_at(value: &str, byte: usize) -> Option<(usize, usize)> {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut cursor = byte.min(bytes.len().saturating_sub(1));
+    if !bytes[cursor].is_ascii_alphanumeric() && bytes[cursor] != b'_' {
+        if cursor == 0 || (!bytes[cursor - 1].is_ascii_alphanumeric() && bytes[cursor - 1] != b'_')
+        {
+            return None;
+        }
+        cursor -= 1;
+    }
+    let mut start = cursor;
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+        start -= 1;
+    }
+    let mut end = cursor + 1;
+    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+        end += 1;
+    }
+    (end > start + 1).then_some((start, end))
+}
+
+fn identifier_match_is_exact(value: &str, start: usize, end: usize) -> bool {
+    let bytes = value.as_bytes();
+    let valid = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    (start == 0 || !valid(bytes[start - 1])) && (end == bytes.len() || !valid(bytes[end]))
+}
+
+fn symbol_role(line: &str, symbol: &str) -> (&'static str, &'static str) {
+    let trimmed = line.trim_start();
+    if trimmed.contains(&format!("fn {symbol}"))
+        || trimmed.contains(&format!("def {symbol}"))
+        || trimmed.contains(&format!("function {symbol}"))
+        || trimmed.contains(&format!("class {symbol}"))
+        || trimmed.contains(&format!("struct {symbol}"))
+    {
+        ("declaration", "声明")
+    } else {
+        ("call / reference", "调用 / 引用")
+    }
 }
 
 fn syntax_tokens(value: &str, keywords: &[&str]) -> Vec<(String, u8)> {
@@ -4656,6 +5633,22 @@ fn main() {
             project: color(display, map, "#29353a"),
         };
         let preferences = load_ui_preferences();
+        let background_preferences = load_background_preferences();
+        let background_surface = background_preferences
+            .path
+            .as_ref()
+            .and_then(|path| CString::new(path.to_string_lossy().as_bytes()).ok())
+            .map(|path| cairo_image_surface_create_from_png(path.as_ptr()))
+            .filter(|surface| {
+                !surface.is_null()
+                    && cairo_image_surface_get_width(*surface) > 0
+                    && cairo_image_surface_get_height(*surface) > 0
+            })
+            .unwrap_or(ptr::null_mut());
+        let logo_surface = bundled_asset_path("assets/tc-ide-icon.png")
+            .and_then(|path| CString::new(path.to_string_lossy().as_bytes()).ok())
+            .map(|path| cairo_image_surface_create_from_png(path.as_ptr()))
+            .unwrap_or(ptr::null_mut());
         let mut app = App {
             display,
             window,
@@ -4669,6 +5662,12 @@ fn main() {
             code_font,
             code_font_base: if width > 2200 { 18 } else { 14 },
             code_font_family: preferences.font_family,
+            background_surface,
+            background_path: background_preferences.path,
+            background_opacity: background_preferences.opacity,
+            background_offset_x: background_preferences.offset_x,
+            background_offset_y: background_preferences.offset_y,
+            logo_surface,
             colors,
             width,
             height,
@@ -4695,14 +5694,17 @@ fn main() {
             edit_menu_open: false,
             workspace_search: String::new(),
             workspace_search_focused: false,
+            project_tree_expanded: true,
+            collapsed_folders: BTreeSet::new(),
             terminal_open: false,
             terminal_focused: false,
             terminal_active: 0,
             terminals: default_terminals(),
+            terminal_menu_open: false,
             graph_current: true,
             graph_zoom: 1.0,
             package_open: false,
-            package_targets: [true, true, true, true],
+            package_targets: [false, false, false, false],
             build_started: None,
             new_menu_open: false,
             workspace_context_menu: None,
@@ -4767,6 +5769,12 @@ fn main() {
             if used < frame {
                 thread::sleep(frame - used);
             }
+        }
+        if !app.background_surface.is_null() {
+            cairo_surface_destroy(app.background_surface);
+        }
+        if !app.logo_surface.is_null() {
+            cairo_surface_destroy(app.logo_surface);
         }
         cairo_destroy(app.cairo);
         cairo_surface_destroy(app.cairo_surface);
@@ -4866,6 +5874,15 @@ mod tests {
         assert_eq!(comment_markers_for_file("main.py"), &["#"]);
         assert_eq!(comment_markers_for_file("query.sql"), &["--"]);
         assert!(comment_markers_for_file("data.json").is_empty());
+        assert_eq!(
+            comment_content_bounds("let n = 1; // keep", "main.c"),
+            Some((11, 14, 18))
+        );
+        assert_eq!(
+            comment_content_bounds("/* editable */ tail", "main.c"),
+            Some((0, 3, 11))
+        );
+        assert_eq!(comment_content_bounds("#include <stdio.h>", "main.c"), None);
     }
 
     #[test]
@@ -4898,6 +5915,32 @@ mod tests {
         assert!(symbols.contains(&"Widget".to_string()));
         assert!(symbols.contains(&"build_widget".to_string()));
         assert!(symbols.contains(&"WidgetConfig".to_string()));
+    }
+
+    #[test]
+    fn identifier_relations_use_exact_symbol_boundaries() {
+        let line = "let graph = build_graph(graph_data);";
+        let start = line.find("build_graph").unwrap();
+        assert_eq!(
+            identifier_span_at(line, start + 4),
+            Some((start, start + 11))
+        );
+        assert!(identifier_match_is_exact(line, start, start + 11));
+        let graph = line.find("graph").unwrap();
+        assert!(identifier_match_is_exact(line, graph, graph + 5));
+        assert!(!identifier_match_is_exact("build_graph_more", 0, 11));
+    }
+
+    #[test]
+    fn symbol_roles_distinguish_declarations_from_calls() {
+        assert_eq!(
+            symbol_role("pub fn build_graph() {", "build_graph").0,
+            "declaration"
+        );
+        assert_eq!(
+            symbol_role("build_graph();", "build_graph").0,
+            "call / reference"
+        );
     }
 
     #[test]
