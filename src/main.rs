@@ -1,6 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::{c_void, CString};
 use std::fs;
@@ -406,6 +406,10 @@ const RIGHT_KEYSYM: c_ulong = 0xff53;
 const DOWN_KEYSYM: c_ulong = 0xff54;
 const LC_ALL: c_int = 6;
 
+fn shortcut_from_keysym(keysym: c_ulong) -> Option<char> {
+    char::from_u32(keysym as u32).map(|value| value.to_ascii_lowercase())
+}
+
 const CODE_FONT_FAMILIES: &[&str] = &[
     "JetBrains Mono",
     "Fira Code",
@@ -449,6 +453,13 @@ struct ParsedComment<'a> {
     text: &'a str,
     content_column: usize,
     content_end: usize,
+}
+
+struct EditMotion {
+    line: usize,
+    start: usize,
+    end: usize,
+    started: Instant,
 }
 
 struct BubbleLayout {
@@ -599,6 +610,10 @@ struct App {
     workspace_search: String,
     workspace_search_focused: bool,
     project_tree_expanded: bool,
+    project_tree_amount: f32,
+    project_tree_velocity: f32,
+    folder_tree_motion: BTreeMap<String, (f32, f32)>,
+    tree_motion_updated: Instant,
     collapsed_folders: BTreeSet<String>,
     terminal_open: bool,
     terminal_focused: bool,
@@ -640,6 +655,7 @@ struct App {
     project_language_menu: bool,
     project_environment_menu: bool,
     expanded_comments: BTreeSet<(usize, usize)>,
+    edit_motion: Option<EditMotion>,
     status_message: String,
     started: Instant,
 }
@@ -1057,9 +1073,11 @@ impl App {
         if let Some(candidate) = self.completions().first().cloned() {
             let prefix = self.current_prefix();
             let suffix = &candidate[prefix.len()..];
+            let start = self.caret_column;
             self.files[self.selected_file].lines[self.caret_line]
                 .insert_str(self.caret_column, suffix);
             self.caret_column += suffix.len();
+            self.start_edit_motion(self.caret_line, start, self.caret_column);
             self.status_message = format!("Completed {candidate}");
         }
     }
@@ -1142,19 +1160,18 @@ impl App {
     }
 
     unsafe fn chevron(&self, x: i32, y: i32, expanded: bool) {
+        self.chevron_progress(x, y, if expanded { 1.0 } else { 0.0 });
+    }
+
+    unsafe fn chevron_progress(&self, x: i32, y: i32, progress: f32) {
         let s = |v| self.s(v);
-        if expanded {
-            self.line(self.colors.muted, 1, (x, y - s(3)), (x + s(4), y + s(2)));
-            self.line(
-                self.colors.muted,
-                1,
-                (x + s(4), y + s(2)),
-                (x + s(8), y - s(3)),
-            );
-        } else {
-            self.line(self.colors.muted, 1, (x, y - s(4)), (x + s(5), y));
-            self.line(self.colors.muted, 1, (x + s(5), y), (x, y + s(4)));
-        }
+        let t = progress.clamp(0.0, 1.0);
+        let mix = |from: i32, to: i32| from + ((to - from) as f32 * t) as i32;
+        let a = (x + s(mix(0, 0)), y + s(mix(-4, -3)));
+        let b = (x + s(mix(5, 4)), y + s(mix(0, 2)));
+        let c = (x + s(mix(0, 8)), y + s(mix(4, -3)));
+        self.line(self.colors.muted, 1, a, b);
+        self.line(self.colors.muted, 1, b, c);
     }
 
     unsafe fn package_icon(&self, kind: usize, x: i32, y: i32, label: &str) {
@@ -1284,6 +1301,57 @@ impl App {
             .collapsed_folders
             .iter()
             .any(|folder| path == *folder || path.starts_with(&format!("{folder}/")))
+    }
+
+    fn folder_reveal_amount(&self, folder: &str) -> f32 {
+        let mut amount = self.project_tree_amount.clamp(0.0, 1.0);
+        for parent in &self.folders {
+            if folder != parent && folder.starts_with(&format!("{parent}/")) {
+                amount *= self
+                    .folder_tree_motion
+                    .get(parent)
+                    .map(|motion| motion.0.clamp(0.0, 1.0))
+                    .unwrap_or(1.0);
+            }
+        }
+        amount
+    }
+
+    fn file_reveal_amount(&self, file: &FileBuffer) -> f32 {
+        let path = self.file_tree_path(file);
+        let mut amount = self.project_tree_amount.clamp(0.0, 1.0);
+        for folder in &self.folders {
+            if path == *folder || path.starts_with(&format!("{folder}/")) {
+                amount *= self
+                    .folder_tree_motion
+                    .get(folder)
+                    .map(|motion| motion.0.clamp(0.0, 1.0))
+                    .unwrap_or(1.0);
+            }
+        }
+        amount
+    }
+
+    fn spring_step(value: &mut f32, velocity: &mut f32, target: f32, dt: f32) {
+        *velocity += (target - *value) * 235.0 * dt;
+        *velocity *= (-17.0 * dt).exp();
+        *value += *velocity * dt;
+        *value = value.clamp(-0.08, 1.08);
+        if (*value - target).abs() < 0.001 && velocity.abs() < 0.01 {
+            *value = target;
+            *velocity = 0.0;
+        }
+    }
+
+    fn start_edit_motion(&mut self, line: usize, start: usize, end: usize) {
+        if end > start {
+            self.edit_motion = Some(EditMotion {
+                line,
+                start,
+                end,
+                started: Instant::now(),
+            });
+        }
     }
 
     fn file_tree_row(&self, wanted: usize) -> Option<i32> {
@@ -1829,7 +1897,7 @@ impl App {
         );
         self.text(self.colors.muted, s(14), s(116), self.tr("PROJECT", "项目"));
         self.text(self.colors.bright, s(34), s(145), &self.project_name);
-        self.chevron(s(17), s(140), self.project_tree_expanded);
+        self.chevron_progress(s(17), s(140), self.project_tree_amount);
         self.text(
             self.colors.muted,
             width - s(72),
@@ -1840,8 +1908,13 @@ impl App {
                 self.tr("SHOW", "展开")
             },
         );
-        if self.project_tree_expanded || !self.workspace_search.is_empty() {
-            let mut row_y = 176;
+        let root_amount = if self.workspace_search.is_empty() {
+            self.project_tree_amount.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        if root_amount > 0.01 || !self.workspace_search.is_empty() {
+            let mut row_y = 148.0_f32;
             for folder in &self.folders {
                 if !self.workspace_search.is_empty()
                     && !folder
@@ -1857,19 +1930,41 @@ impl App {
                 {
                     continue;
                 }
+                let reveal = if self.workspace_search.is_empty() {
+                    self.folder_reveal_amount(folder)
+                } else {
+                    1.0
+                };
+                row_y += 28.0 * reveal;
+                if reveal < 0.08 {
+                    continue;
+                }
                 let expanded = !self.collapsed_folders.contains(folder);
-                self.chevron(s(18), s(row_y - 5), expanded);
-                self.text(self.colors.text, s(34), s(row_y), folder);
-                row_y += 28;
+                let arrow_progress = self
+                    .folder_tree_motion
+                    .get(folder)
+                    .map(|motion| motion.0)
+                    .unwrap_or(if expanded { 1.0 } else { 0.0 });
+                self.chevron_progress(s(18), s(row_y as i32 - 5), arrow_progress);
+                self.text(self.colors.text, s(34), s(row_y as i32), folder);
             }
-            for (index, file) in self
-                .files
-                .iter()
-                .enumerate()
-                .filter(|(_, file)| self.file_visible_in_tree(file))
-            {
-                let y = row_y;
-                row_y += 29;
+            for (index, file) in self.files.iter().enumerate().filter(|(_, file)| {
+                self.workspace_search.is_empty()
+                    || self
+                        .file_tree_path(file)
+                        .to_ascii_lowercase()
+                        .contains(&self.workspace_search.to_ascii_lowercase())
+            }) {
+                let reveal = if self.workspace_search.is_empty() {
+                    self.file_reveal_amount(file)
+                } else {
+                    1.0
+                };
+                row_y += 29.0 * reveal;
+                if reveal < 0.08 {
+                    continue;
+                }
+                let y = row_y as i32;
                 if s(y) > self.height - s(65) {
                     break;
                 }
@@ -2303,7 +2398,40 @@ impl App {
                 }
             } else {
                 let _ = color;
-                self.highlighted_text(left + s(52), y, line, detected);
+                if let Some(motion) = self.edit_motion.as_ref().filter(|motion| {
+                    motion.line == index
+                        && motion.start <= motion.end
+                        && motion.end <= line.len()
+                        && motion.started.elapsed() < Duration::from_millis(260)
+                }) {
+                    let progress = (motion.started.elapsed().as_secs_f32() / 0.26).clamp(0.0, 1.0);
+                    let eased = 1.0 - (1.0 - progress).powi(3);
+                    let code_x = left + s(52);
+                    let before = &line[..motion.start];
+                    let inserted = &line[motion.start..motion.end];
+                    let after = &line[motion.end..];
+                    self.highlighted_text(code_x, y, before, detected);
+                    let insert_x = code_x + self.code_text_width(before);
+                    let lift = ((1.0 - eased) * s(9) as f32) as i32;
+                    self.pango_text(self.colors.bright, insert_x, y + lift, inserted, true);
+                    self.highlighted_text(
+                        insert_x + self.code_text_width(inserted),
+                        y,
+                        after,
+                        detected,
+                    );
+                    let trail = ((1.0 - eased) * self.code_text_width(inserted) as f32) as i32;
+                    if trail > 1 {
+                        self.line(
+                            self.colors.accent,
+                            1,
+                            (insert_x, y + s(7)),
+                            (insert_x + trail, y + s(7)),
+                        );
+                    }
+                } else {
+                    self.highlighted_text(left + s(52), y, line, detected);
+                }
             }
             if self.editor_focused
                 && index == self.caret_line
@@ -3711,6 +3839,36 @@ impl App {
     }
 
     fn update_background(&mut self) {
+        let now = Instant::now();
+        let dt = now
+            .duration_since(self.tree_motion_updated)
+            .as_secs_f32()
+            .min(0.04);
+        self.tree_motion_updated = now;
+        let root_target = if self.project_tree_expanded { 1.0 } else { 0.0 };
+        Self::spring_step(
+            &mut self.project_tree_amount,
+            &mut self.project_tree_velocity,
+            root_target,
+            dt,
+        );
+        for folder in self.folders.clone() {
+            let target = if self.collapsed_folders.contains(&folder) {
+                0.0
+            } else {
+                1.0
+            };
+            let motion = self.folder_tree_motion.entry(folder).or_insert((1.0, 0.0));
+            Self::spring_step(&mut motion.0, &mut motion.1, target, dt);
+        }
+        if self
+            .edit_motion
+            .as_ref()
+            .map(|motion| motion.started.elapsed() > Duration::from_millis(260))
+            .unwrap_or(false)
+        {
+            self.edit_motion = None;
+        }
         if let Some((index, started)) = self.downloading {
             if started.elapsed() > Duration::from_millis(900) {
                 self.languages[index].installed = true;
@@ -4030,9 +4188,11 @@ impl App {
             return;
         }
         if parts.len() == 1 {
+            let start = self.caret_column;
             self.files[self.selected_file].lines[self.caret_line]
                 .insert_str(self.caret_column, &parts[0]);
             self.caret_column += parts[0].len();
+            self.start_edit_motion(self.caret_line, start, self.caret_column);
         } else {
             let tail =
                 self.files[self.selected_file].lines[self.caret_line].split_off(self.caret_column);
@@ -4045,33 +4205,67 @@ impl App {
             self.caret_line += parts.len() - 1;
             self.caret_column = parts.last().map(|part| part.len()).unwrap_or(0);
             self.files[self.selected_file].lines[self.caret_line].push_str(&tail);
+            self.start_edit_motion(self.caret_line, 0, self.caret_column);
         }
+        self.status_message = self.tr("Pasted from clipboard", "已从剪贴板粘贴").into();
     }
 
     fn copy_selection(&mut self) {
         self.clipboard = self.selected_text();
         if self.clipboard.is_empty() {
+            self.status_message = self.tr("Nothing is selected", "尚未选择任何内容").into();
             return;
         }
-        if let Ok(mut child) = Command::new("xsel")
-            .args(["--clipboard", "--input"])
-            .stdin(Stdio::piped())
-            .spawn()
-        {
-            if let Some(stdin) = child.stdin.as_mut() {
-                let _ = stdin.write_all(self.clipboard.as_bytes());
+        let mut exported = false;
+        for (program, arguments) in [
+            ("xsel", &["--clipboard", "--input"][..]),
+            ("xclip", &["-selection", "clipboard", "-in"][..]),
+        ] {
+            if let Ok(mut child) = Command::new(program)
+                .args(arguments)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    exported = stdin.write_all(self.clipboard.as_bytes()).is_ok();
+                }
+                if exported {
+                    break;
+                }
             }
         }
+        self.status_message = if exported {
+            format!(
+                "{} ({} chars)",
+                self.tr("Copied to system clipboard", "已复制到系统剪贴板"),
+                self.clipboard.chars().count()
+            )
+        } else {
+            self.tr(
+                "Copied inside TC-IDE; system clipboard helper unavailable",
+                "已复制到 TC-IDE 内部；系统剪贴板工具不可用",
+            )
+            .into()
+        };
     }
 
     fn paste_clipboard(&mut self) {
-        if let Ok(output) = Command::new("xsel")
-            .args(["--clipboard", "--output"])
-            .output()
-        {
-            if output.status.success() && !output.stdout.is_empty() {
-                self.clipboard = String::from_utf8_lossy(&output.stdout).into_owned();
+        for (program, arguments) in [
+            ("xsel", &["--clipboard", "--output"][..]),
+            ("xclip", &["-selection", "clipboard", "-out"][..]),
+        ] {
+            if let Ok(output) = Command::new(program).args(arguments).output() {
+                if output.status.success() && !output.stdout.is_empty() {
+                    self.clipboard = String::from_utf8_lossy(&output.stdout).into_owned();
+                    break;
+                }
             }
+        }
+        if self.clipboard.is_empty() {
+            self.status_message = self.tr("The clipboard is empty", "剪贴板为空").into();
+            return;
         }
         self.insert_clipboard();
     }
@@ -4239,6 +4433,9 @@ impl App {
         self.project_path = Some(root.clone());
         self.folders = folders;
         self.project_tree_expanded = true;
+        self.project_tree_amount = 1.0;
+        self.project_tree_velocity = 0.0;
+        self.folder_tree_motion.clear();
         self.collapsed_folders.clear();
         self.workspace_search.clear();
         self.files = vec![FileBuffer {
@@ -5054,6 +5251,11 @@ impl App {
         if x >= workspace_right && x < graph_left && y > s(85) && y < self.height - s(60) {
             self.editor_focused = true;
             self.terminal_focused = false;
+            self.workspace_search_focused = false;
+            self.graph_search_focused = false;
+            self.extension_search_focused = false;
+            self.font_search_focused = false;
+            self.ai_field_focused = None;
             let base = s(119);
             let step = s(28);
             let line = ((y - base + step / 2) / step).max(0) as usize;
@@ -5269,9 +5471,10 @@ impl App {
             return false;
         }
         if control {
-            match input.to_ascii_lowercase().as_str() {
-                "s" => self.save_current_file(),
-                "a" => {
+            let shortcut = shortcut_from_keysym(keysym).unwrap_or('\0');
+            match shortcut {
+                's' => self.save_current_file(),
+                'a' => {
                     if let Some((start, end)) = self.active_comment_edit_bounds() {
                         self.selection_anchor = Some((self.caret_line, start));
                         self.selection_head = Some((self.caret_line, end));
@@ -5282,13 +5485,13 @@ impl App {
                             Some((last, self.files[self.selected_file].lines[last].len()));
                     }
                 }
-                "c" => self.copy_selection(),
-                "x" => {
+                'c' => self.copy_selection(),
+                'x' => {
                     self.copy_selection();
                     self.delete_selection();
                 }
-                "v" => self.paste_clipboard(),
-                "+" | "=" => {
+                'v' => self.paste_clipboard(),
+                '+' | '=' => {
                     self.code_zoom = (self.code_zoom + 1).min(8);
                     self.reload_code_font();
                     self.status_message = format!(
@@ -5297,7 +5500,7 @@ impl App {
                         (self.code_font_base + self.code_zoom * 2).clamp(10, 36)
                     );
                 }
-                "-" => {
+                '-' => {
                     self.code_zoom = (self.code_zoom - 1).max(-2);
                     self.reload_code_font();
                     self.status_message = format!(
@@ -5451,9 +5654,12 @@ impl App {
             _ => {
                 if count > 0 && !input.chars().any(char::is_control) {
                     self.delete_selection();
+                    let line = self.caret_line;
+                    let start = self.caret_column;
                     self.files[self.selected_file].lines[self.caret_line]
                         .insert_str(self.caret_column, input);
                     self.caret_column += input.len();
+                    self.start_edit_motion(line, start, self.caret_column);
                 }
             }
         }
@@ -6575,6 +6781,10 @@ fn main() {
             workspace_search: String::new(),
             workspace_search_focused: false,
             project_tree_expanded: true,
+            project_tree_amount: 1.0,
+            project_tree_velocity: 0.0,
+            folder_tree_motion: BTreeMap::new(),
+            tree_motion_updated: Instant::now(),
             collapsed_folders: BTreeSet::new(),
             terminal_open: false,
             terminal_focused: false,
@@ -6616,6 +6826,7 @@ fn main() {
             project_language_menu: false,
             project_environment_menu: false,
             expanded_comments: BTreeSet::new(),
+            edit_motion: None,
             status_message: "Ready".into(),
             started: Instant::now(),
         };
@@ -6687,6 +6898,26 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_shortcuts_use_keysyms_instead_of_control_text() {
+        assert_eq!(shortcut_from_keysym('C' as c_ulong), Some('c'));
+        assert_eq!(shortcut_from_keysym('v' as c_ulong), Some('v'));
+        assert_eq!(shortcut_from_keysym('S' as c_ulong), Some('s'));
+    }
+
+    #[test]
+    fn tree_spring_moves_toward_both_states() {
+        let (mut value, mut velocity) = (1.0, 0.0);
+        for _ in 0..90 {
+            App::spring_step(&mut value, &mut velocity, 0.0, 1.0 / 60.0);
+        }
+        assert!(value.abs() < 0.01);
+        for _ in 0..90 {
+            App::spring_step(&mut value, &mut velocity, 1.0, 1.0 / 60.0);
+        }
+        assert!((value - 1.0).abs() < 0.01);
+    }
 
     #[test]
     fn graph_starts_at_project_scope() {
