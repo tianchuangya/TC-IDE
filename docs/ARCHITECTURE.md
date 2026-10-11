@@ -12,6 +12,27 @@ TC-IDE 不是网页套壳。界面状态、布局、动画和绘制都由 Rust �
 4. `tc_ui`：原生窗口、GPU 场景、输入与统一动画时钟。
 5. `tc_packager`：Windows、Debian、macOS、AppImage、RPM 构建任务和黑洞/白洞状态动画。
 
+## 平台边界
+
+TC-IDE 不把 Linux 可执行文件改名后当作 Windows 或 macOS 包。入口按目标系统编译：
+
+- `linux_app`：现有 X11/Cairo/Pango 后端；
+- `windows_app`：Win32 原生窗口后端，后续接入 DirectWrite/Direct2D、Windows Clipboard、IFileDialog、ConPTY 与 Shell API；
+- `macos_app`：独立的 Cocoa/Metal 后端入口，后续接入 NSPasteboard、NSOpenPanel 与 PTY；
+- 工作区、文本缓冲、语义图、动画状态和打包任务将逐步下沉为共享的纯 Rust 核心，不允许调用平台 API。
+
+每一项桌面能力都通过平台适配器提供，不能从共享核心直接调用 `X11`、`Win32`、`Cocoa`、`bash`、`cmd.exe` 或系统文件选择器。普通 CI 在 Ubuntu、Windows 和 macOS 上分别编译；只有三个后端达到功能一致并经过对应系统运行测试后，才允许正式发布各自安装包。
+
+| 能力 | Linux | Windows | macOS |
+| --- | --- | --- | --- |
+| 原生窗口 | X11（已实现） | Win32 基础窗口（已建立） | 独立入口（待实现） |
+| 文本/GPU 渲染 | Cairo/Pango | DirectWrite/Direct2D（待实现） | CoreText/Metal（待实现） |
+| 系统剪贴板 | X11 selection | Windows Clipboard（待实现） | NSPasteboard（待实现） |
+| 文件选择 | zenity（将替换为适配器） | IFileDialog（待实现） | NSOpenPanel（待实现） |
+| 集成终端 | shell/PTY | ConPTY + PowerShell（待实现） | PTY + 用户 shell（待实现） |
+| 打开输出目录 | xdg-open/gio | Explorer/ShellExecute（待实现） | NSWorkspace/open（待实现） |
+| 安装包 | deb/AppImage（待接入真实打包） | MSIX/NSIS（待实现） | dmg/pkg（待实现） |
+
 ## 关系图的层级语义
 
 ```text
@@ -35,4 +56,3 @@ TC-IDE project
 - 动画使用单调时钟和统一场景插值，不为每个组件创建独立计时器；
 - 大图采用视口裁剪、层级细节与增量布局；
 - 文本变化只更新受影响的字形实例。
-

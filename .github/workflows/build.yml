@@ -22,3 +22,21 @@ jobs:
         run: cargo check --all-targets
       - name: Test
         run: cargo test --all-targets
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check native Win32 backend
+        run: cargo check --all-targets
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check isolated macOS backend
+        run: cargo check --all-targets
