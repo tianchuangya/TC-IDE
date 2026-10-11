@@ -41,18 +41,41 @@ const WM_COMMAND: Uint = 0x0111;
 const WM_DESTROY: Uint = 0x0002;
 const WM_DPICHANGED: Uint = 0x02e0;
 const WM_ERASEBKGND: Uint = 0x0014;
+const WM_IME_COMPOSITION: Uint = 0x010f;
+const WM_IME_ENDCOMPOSITION: Uint = 0x010e;
+const WM_IME_STARTCOMPOSITION: Uint = 0x010d;
 const WM_KEYDOWN: Uint = 0x0100;
 const WM_LBUTTONDOWN: Uint = 0x0201;
+const WM_LBUTTONUP: Uint = 0x0202;
+const WM_MOUSEMOVE: Uint = 0x0200;
 const WM_PAINT: Uint = 0x000f;
 const WM_SIZE: Uint = 0x0005;
 const WM_TIMER: Uint = 0x0113;
 const WS_OVERLAPPEDWINDOW: Dword = 0x00cf0000;
 const WS_VISIBLE: Dword = 0x10000000;
 const VK_BACK: u32 = 0x08;
+const VK_DELETE: u32 = 0x2e;
 const VK_DOWN: u32 = 0x28;
+const VK_END: u32 = 0x23;
+const VK_HOME: u32 = 0x24;
 const VK_LEFT: u32 = 0x25;
 const VK_RIGHT: u32 = 0x27;
 const VK_UP: u32 = 0x26;
+const GCS_COMPSTR: Lparam = 0x0008;
+const GCS_RESULTSTR: Lparam = 0x0800;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct TextPosition {
+    line: usize,
+    column: usize,
+}
+
+#[derive(Clone)]
+struct EditorSnapshot {
+    lines: Vec<String>,
+    caret: TextPosition,
+    selection_anchor: Option<TextPosition>,
+}
 
 thread_local! {
     static APP: RefCell<WindowsAppState> = RefCell::new(WindowsAppState::new());
@@ -62,9 +85,17 @@ thread_local! {
 struct WindowsAppState {
     file_name: String,
     file_path: Option<PathBuf>,
+    project_root: PathBuf,
+    project_entries: Vec<String>,
+    project_entry_paths: Vec<PathBuf>,
     lines: Vec<String>,
     caret_line: usize,
     caret_column: usize,
+    selection_anchor: Option<TextPosition>,
+    dragging_selection: bool,
+    undo_stack: Vec<EditorSnapshot>,
+    redo_stack: Vec<EditorSnapshot>,
+    ime_composition: String,
     terminal_open: bool,
     terminal_motion: f32,
     terminal_velocity: f32,
@@ -78,9 +109,14 @@ struct WindowsAppState {
 
 impl WindowsAppState {
     fn new() -> Self {
+        let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let (project_entries, project_entry_paths) = Self::scan_project(&project_root);
         Self {
             file_name: "main.rs".into(),
             file_path: None,
+            project_root,
+            project_entries,
+            project_entry_paths,
             lines: vec![
                 "use tc_ide::workspace::Project;".into(),
                 String::new(),
@@ -96,6 +132,11 @@ impl WindowsAppState {
             ],
             caret_line: 0,
             caret_column: 0,
+            selection_anchor: None,
+            dragging_selection: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            ime_composition: String::new(),
             terminal_open: false,
             terminal_motion: 0.0,
             terminal_velocity: 0.0,
@@ -116,31 +157,149 @@ impl WindowsAppState {
     }
 
     fn byte_at_caret(&self) -> usize {
-        self.lines[self.caret_line]
+        Self::byte_at(&self.lines[self.caret_line], self.caret_column)
+    }
+
+    fn byte_at(value: &str, column: usize) -> usize {
+        value
             .char_indices()
-            .nth(self.caret_column)
+            .nth(column)
             .map(|(index, _)| index)
-            .unwrap_or_else(|| self.lines[self.caret_line].len())
+            .unwrap_or(value.len())
+    }
+
+    fn position(&self) -> TextPosition {
+        TextPosition {
+            line: self.caret_line,
+            column: self.caret_column,
+        }
+    }
+
+    fn snapshot(&self) -> EditorSnapshot {
+        EditorSnapshot {
+            lines: self.lines.clone(),
+            caret: self.position(),
+            selection_anchor: self.selection_anchor,
+        }
+    }
+
+    fn restore(&mut self, snapshot: EditorSnapshot) {
+        self.lines = snapshot.lines;
+        self.caret_line = snapshot.caret.line;
+        self.caret_column = snapshot.caret.column;
+        self.selection_anchor = snapshot.selection_anchor;
+        self.clamp_caret();
+        self.last_edit = Some(Instant::now());
+    }
+
+    fn record_undo(&mut self) {
+        self.undo_stack.push(self.snapshot());
+        if self.undo_stack.len() > 200 {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    fn selection_range(&self) -> Option<(TextPosition, TextPosition)> {
+        let anchor = self.selection_anchor?;
+        let caret = self.position();
+        (anchor != caret).then_some(if anchor < caret {
+            (anchor, caret)
+        } else {
+            (caret, anchor)
+        })
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        if start.line == end.line {
+            let line = &self.lines[start.line];
+            return Some(
+                line[Self::byte_at(line, start.column)..Self::byte_at(line, end.column)].into(),
+            );
+        }
+        let mut result = String::new();
+        result.push_str(
+            &self.lines[start.line][Self::byte_at(&self.lines[start.line], start.column)..],
+        );
+        for line in (start.line + 1)..end.line {
+            result.push('\n');
+            result.push_str(&self.lines[line]);
+        }
+        result.push('\n');
+        result.push_str(&self.lines[end.line][..Self::byte_at(&self.lines[end.line], end.column)]);
+        Some(result)
+    }
+
+    fn delete_selection_raw(&mut self) -> bool {
+        let Some((start, end)) = self.selection_range() else {
+            return false;
+        };
+        if start.line == end.line {
+            let start_byte = Self::byte_at(&self.lines[start.line], start.column);
+            let end_byte = Self::byte_at(&self.lines[start.line], end.column);
+            self.lines[start.line].replace_range(start_byte..end_byte, "");
+        } else {
+            let prefix = self.lines[start.line]
+                [..Self::byte_at(&self.lines[start.line], start.column)]
+                .to_string();
+            let suffix = self.lines[end.line][Self::byte_at(&self.lines[end.line], end.column)..]
+                .to_string();
+            self.lines
+                .splice(start.line..=end.line, [format!("{prefix}{suffix}")]);
+        }
+        self.caret_line = start.line;
+        self.caret_column = start.column;
+        self.selection_anchor = None;
+        true
+    }
+
+    fn insert_text(&mut self, value: &str) {
+        self.record_undo();
+        self.delete_selection_raw();
+        for value in value.replace("\r\n", "\n").replace('\r', "\n").chars() {
+            if value == '\n' {
+                self.newline_raw();
+            } else if !value.is_control() {
+                let byte = self.byte_at_caret();
+                self.lines[self.caret_line].insert(byte, value);
+                self.caret_column += 1;
+            }
+        }
+        self.last_edit = Some(Instant::now());
+        self.status = "Edited with Unicode-aware caret mapping".into();
     }
 
     fn insert_char(&mut self, value: char) {
-        let byte = self.byte_at_caret();
-        self.lines[self.caret_line].insert(byte, value);
-        self.caret_column += 1;
-        self.last_edit = Some(Instant::now());
-        self.status = "Edited with DirectWrite caret mapping".into();
+        self.insert_text(&value.to_string());
     }
 
     fn newline(&mut self) {
+        self.record_undo();
+        self.delete_selection_raw();
+        self.newline_raw();
+        self.last_edit = Some(Instant::now());
+    }
+
+    fn newline_raw(&mut self) {
         let byte = self.byte_at_caret();
         let tail = self.lines[self.caret_line].split_off(byte);
         self.caret_line += 1;
         self.lines.insert(self.caret_line, tail);
         self.caret_column = 0;
-        self.last_edit = Some(Instant::now());
     }
 
     fn backspace(&mut self) {
+        if self.selection_range().is_some() {
+            self.record_undo();
+            self.delete_selection_raw();
+            self.last_edit = Some(Instant::now());
+            return;
+        }
+        if self.caret_column == 0 && self.caret_line == 0 {
+            return;
+        }
+        self.record_undo();
         if self.caret_column > 0 {
             let end = self.byte_at_caret();
             self.caret_column -= 1;
@@ -153,6 +312,90 @@ impl WindowsAppState {
             self.lines[self.caret_line].push_str(&current);
         }
         self.last_edit = Some(Instant::now());
+    }
+
+    fn delete_forward(&mut self) {
+        if self.selection_range().is_some() {
+            self.record_undo();
+            self.delete_selection_raw();
+        } else {
+            let line_len = self.lines[self.caret_line].chars().count();
+            if self.caret_column < line_len {
+                self.record_undo();
+                let start = self.byte_at_caret();
+                let end = Self::byte_at(&self.lines[self.caret_line], self.caret_column + 1);
+                self.lines[self.caret_line].replace_range(start..end, "");
+            } else if self.caret_line + 1 < self.lines.len() {
+                self.record_undo();
+                let next = self.lines.remove(self.caret_line + 1);
+                self.lines[self.caret_line].push_str(&next);
+            } else {
+                return;
+            }
+        }
+        self.last_edit = Some(Instant::now());
+    }
+
+    fn move_left(&mut self) {
+        if self.caret_column > 0 {
+            self.caret_column -= 1;
+        } else if self.caret_line > 0 {
+            self.caret_line -= 1;
+            self.caret_column = self.lines[self.caret_line].chars().count();
+        }
+    }
+
+    fn move_right(&mut self) {
+        if self.caret_column < self.lines[self.caret_line].chars().count() {
+            self.caret_column += 1;
+        } else if self.caret_line + 1 < self.lines.len() {
+            self.caret_line += 1;
+            self.caret_column = 0;
+        }
+    }
+
+    fn select_all(&mut self) {
+        self.selection_anchor = Some(TextPosition { line: 0, column: 0 });
+        self.caret_line = self.lines.len().saturating_sub(1);
+        self.caret_column = self.lines[self.caret_line].chars().count();
+        self.status = "Selected all text".into();
+    }
+
+    fn cut_selection(&mut self) -> Option<String> {
+        let value = self.selected_text()?;
+        self.record_undo();
+        self.delete_selection_raw();
+        self.last_edit = Some(Instant::now());
+        Some(value)
+    }
+
+    fn undo(&mut self) {
+        if let Some(snapshot) = self.undo_stack.pop() {
+            self.redo_stack.push(self.snapshot());
+            self.restore(snapshot);
+            self.status = "Undo".into();
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(snapshot) = self.redo_stack.pop() {
+            self.undo_stack.push(self.snapshot());
+            self.restore(snapshot);
+            self.status = "Redo".into();
+        }
+    }
+
+    fn set_caret(&mut self, position: TextPosition, extend_selection: bool) {
+        if extend_selection {
+            if self.selection_anchor.is_none() {
+                self.selection_anchor = Some(self.position());
+            }
+        } else {
+            self.selection_anchor = None;
+        }
+        self.caret_line = position.line.min(self.lines.len().saturating_sub(1));
+        self.caret_column = position.column;
+        self.clamp_caret();
     }
 
     fn save(&mut self) {
@@ -178,8 +421,16 @@ impl WindowsAppState {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "untitled".into());
                 self.file_path = Some(path.clone());
+                if let Some(parent) = path.parent() {
+                    self.project_root = parent.to_path_buf();
+                    (self.project_entries, self.project_entry_paths) = Self::scan_project(parent);
+                }
                 self.caret_line = 0;
                 self.caret_column = 0;
+                self.selection_anchor = None;
+                self.undo_stack.clear();
+                self.redo_stack.clear();
+                self.ime_composition.clear();
                 self.started = Instant::now();
                 self.status = format!("Opened {}", path.display());
             }
@@ -187,17 +438,54 @@ impl WindowsAppState {
         }
     }
 
+    fn scan_project(root: &std::path::Path) -> (Vec<String>, Vec<PathBuf>) {
+        let mut entries = fs::read_dir(root)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| {
+                let is_directory = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+                (
+                    !is_directory,
+                    format!(
+                        "{}{}",
+                        if is_directory { "▸ " } else { "  " },
+                        entry.file_name().to_string_lossy()
+                    ),
+                    entry.path(),
+                )
+            })
+            .collect::<Vec<_>>();
+        entries.sort();
+        let entries = entries.into_iter().take(14).collect::<Vec<_>>();
+        (
+            entries.iter().map(|(_, name, _)| name.clone()).collect(),
+            entries.into_iter().map(|(_, _, path)| path).collect(),
+        )
+    }
+
+    fn open_project(&mut self, root: PathBuf) {
+        self.project_root = root;
+        (self.project_entries, self.project_entry_paths) = Self::scan_project(&self.project_root);
+        self.file_path = None;
+        self.file_name = "Select a file".into();
+        self.lines = vec!["// Choose a source file from the project tree".into()];
+        self.caret_line = 0;
+        self.caret_column = 0;
+        self.selection_anchor = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.terminal = None;
+        self.status = format!("Opened project {}", self.project_root.display());
+        self.started = Instant::now();
+    }
+
     fn ensure_terminal(&mut self) {
         if self.terminal.is_some() {
             return;
         }
-        let cwd = self
-            .file_path
-            .as_ref()
-            .and_then(|path| path.parent())
-            .map(PathBuf::from)
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
+        let cwd = self.project_root.clone();
         match unsafe { ConPtySession::spawn(&cwd, 120, 30) } {
             Ok(session) => {
                 self.terminal = Some(session);
@@ -286,6 +574,18 @@ extern "system" {
     fn GetModuleHandleW(module_name: *const u16) -> Hinstance;
 }
 
+#[link(name = "imm32")]
+extern "system" {
+    fn ImmGetContext(window: Hwnd) -> *mut c_void;
+    fn ImmGetCompositionStringW(
+        context: *mut c_void,
+        index: Dword,
+        buffer: *mut c_void,
+        buffer_bytes: Dword,
+    ) -> i32;
+    fn ImmReleaseContext(window: Hwnd, context: *mut c_void) -> Bool;
+}
+
 #[link(name = "user32")]
 extern "system" {
     fn BeginPaint(window: Hwnd, paint: *mut PaintStruct) -> Hdc;
@@ -312,6 +612,8 @@ extern "system" {
     fn LoadCursorW(instance: Hinstance, cursor_name: *const u16) -> Hcursor;
     fn PostQuitMessage(exit_code: i32);
     fn RegisterClassW(class: *const WindowClass) -> u16;
+    fn ReleaseCapture() -> Bool;
+    fn SetCapture(window: Hwnd) -> Hwnd;
     fn SetTimer(window: Hwnd, event: usize, milliseconds: Uint, callback: *const c_void) -> usize;
     fn ShowWindow(window: Hwnd, command: i32) -> Bool;
     fn TranslateMessage(message: *const Msg) -> Bool;
@@ -328,6 +630,77 @@ fn invalidate(window: Hwnd) {
     }
 }
 
+fn ime_string(window: Hwnd, index: Dword) -> String {
+    unsafe {
+        let context = ImmGetContext(window);
+        if context.is_null() {
+            return String::new();
+        }
+        let bytes = ImmGetCompositionStringW(context, index, ptr::null_mut(), 0);
+        if bytes <= 0 {
+            ImmReleaseContext(window, context);
+            return String::new();
+        }
+        let mut value = vec![0u16; bytes as usize / std::mem::size_of::<u16>()];
+        let written =
+            ImmGetCompositionStringW(context, index, value.as_mut_ptr().cast(), bytes as Dword);
+        ImmReleaseContext(window, context);
+        if written <= 0 {
+            String::new()
+        } else {
+            String::from_utf16_lossy(&value[..written as usize / 2])
+        }
+    }
+}
+
+fn character_cells(value: char) -> usize {
+    match value as u32 {
+        0x1100..=0x115f
+        | 0x2329..=0x232a
+        | 0x2e80..=0xa4cf
+        | 0xac00..=0xd7a3
+        | 0xf900..=0xfaff
+        | 0xfe10..=0xfe6f
+        | 0xff00..=0xff60
+        | 0xffe0..=0xffe6
+        | 0x1f300..=0x1faff
+        | 0x20000..=0x3fffd => 2,
+        _ => 1,
+    }
+}
+
+fn editor_position_at(window: Hwnd, x: i32, y: i32) -> Option<TextPosition> {
+    let mut area = unsafe { std::mem::zeroed::<Rect>() };
+    unsafe { GetClientRect(window, &mut area) };
+    let width = area.right.max(1) as f32;
+    let scale = platform::dpi_for_window(window) as f32 / 96.0;
+    let tree_w = (width * 0.19).max(220.0 * scale);
+    let graph_w = (width * 0.27).max(300.0 * scale);
+    let editor_right = width - graph_w;
+    let code_top = (48.0 + 58.0) * scale;
+    if x as f32 <= tree_w + 42.0 * scale || x as f32 >= editor_right || y as f32 <= code_top {
+        return None;
+    }
+    let line = ((y as f32 - code_top) / (25.0 * scale)).floor() as usize;
+    APP.with(|cell| {
+        let app = cell.borrow();
+        let value = app.lines.get(line)?;
+        let target = ((x as f32 - tree_w - 52.0 * scale) / (8.9 * scale)).max(0.0);
+        let mut cells = 0.0;
+        for (column, ch) in value.chars().enumerate() {
+            let width = character_cells(ch) as f32;
+            if target < cells + width * 0.5 {
+                return Some(TextPosition { line, column });
+            }
+            cells += width;
+        }
+        Some(TextPosition {
+            line,
+            column: value.chars().count(),
+        })
+    })
+}
+
 fn perform_command(window: Hwnd, command: Wparam) {
     APP.with(|cell| {
         let mut app = cell.borrow_mut();
@@ -338,31 +711,41 @@ fn perform_command(window: Hwnd, command: Wparam) {
                 }
             }
             platform::COMMAND_COPY_DIAGNOSTIC => {
-                let selected = app.lines.get(app.caret_line).cloned().unwrap_or_default();
+                let selected = app
+                    .selected_text()
+                    .unwrap_or_else(|| app.lines.get(app.caret_line).cloned().unwrap_or_default());
                 match platform::write_clipboard(window, &selected) {
-                    Ok(()) => app.status = "Copied current line as Unicode text".into(),
+                    Ok(()) => app.status = "Copied Unicode text".into(),
                     Err(error) => app.status = format!("Clipboard write failed: {error}"),
                 }
             }
             platform::COMMAND_PASTE => match platform::read_clipboard(window) {
-                Ok(value) => {
-                    for value in value.replace("\r\n", "\n").chars() {
-                        if value == '\n' {
-                            app.newline();
-                        } else if !value.is_control() {
-                            app.insert_char(value);
-                        }
-                    }
-                }
+                Ok(value) => app.insert_text(&value),
                 Err(error) => app.status = format!("Clipboard read failed: {error}"),
             },
-            platform::COMMAND_OPEN_FOLDER => match std::env::current_dir() {
-                Ok(path) if platform::open_in_explorer(window, &path) => {
-                    app.status = format!("Opened Explorer at {}", path.display());
+            platform::COMMAND_SELECT_ALL => app.select_all(),
+            platform::COMMAND_CUT => {
+                if let Some(value) = app.cut_selection() {
+                    match platform::write_clipboard(window, &value) {
+                        Ok(()) => app.status = "Cut selection".into(),
+                        Err(error) => app.status = format!("Clipboard write failed: {error}"),
+                    }
                 }
-                Ok(path) => app.status = format!("Could not open Explorer at {}", path.display()),
-                Err(error) => app.status = format!("Could not resolve project directory: {error}"),
-            },
+            }
+            platform::COMMAND_UNDO => app.undo(),
+            platform::COMMAND_REDO => app.redo(),
+            platform::COMMAND_OPEN_FOLDER => {
+                if let Some(path) = platform::choose_folder(window) {
+                    app.open_project(path);
+                }
+            }
+            platform::COMMAND_REVEAL_FOLDER => {
+                if platform::open_in_explorer(window, &app.project_root) {
+                    app.status = format!("Opened Explorer at {}", app.project_root.display());
+                } else {
+                    app.status = "Could not open the current project in Explorer".into();
+                }
+            }
             platform::COMMAND_OPEN_TERMINAL => app.toggle_terminal(),
             _ => {}
         }
@@ -387,13 +770,31 @@ fn render_window(window: Hwnd) {
             let terminal_lines = app
                 .terminal
                 .as_ref()
-                .and_then(|session| session.lines.lock().ok().map(|lines| lines.clone()))
+                .and_then(|session| {
+                    session.view.lock().ok().map(|view| {
+                        let mut lines = view.lines.clone();
+                        if !view.current.is_empty() {
+                            lines.push(view.current.clone());
+                        }
+                        lines
+                    })
+                })
                 .unwrap_or_default();
             let scene = WindowsScene {
                 file_name: &app.file_name,
+                project_name: app
+                    .project_root
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("PROJECT"),
+                project_entries: &app.project_entries,
                 lines: &app.lines,
                 caret_line: app.caret_line,
                 caret_column: app.caret_column,
+                selection: app
+                    .selection_range()
+                    .map(|(start, end)| ((start.line, start.column), (end.line, end.column))),
+                ime_composition: &app.ime_composition,
                 status: &app.status,
                 terminal_lines: &terminal_lines,
                 terminal_input: &app.terminal_input,
@@ -472,13 +873,44 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
+        WM_IME_STARTCOMPOSITION => {
+            APP.with(|cell| cell.borrow_mut().ime_composition.clear());
+            invalidate(window);
+            0
+        }
+        WM_IME_COMPOSITION => {
+            if l_param & GCS_RESULTSTR != 0 {
+                let result = ime_string(window, GCS_RESULTSTR as Dword);
+                APP.with(|cell| {
+                    let mut app = cell.borrow_mut();
+                    app.ime_composition.clear();
+                    if !result.is_empty() {
+                        app.insert_text(&result);
+                    }
+                });
+            } else if l_param & GCS_COMPSTR != 0 {
+                let composition = ime_string(window, GCS_COMPSTR as Dword);
+                APP.with(|cell| cell.borrow_mut().ime_composition = composition);
+            }
+            invalidate(window);
+            0
+        }
+        WM_IME_ENDCOMPOSITION => {
+            APP.with(|cell| cell.borrow_mut().ime_composition.clear());
+            invalidate(window);
+            0
+        }
         WM_KEYDOWN => {
             if platform::control_pressed() {
                 let command = match w_param as u32 {
+                    0x41 => platform::COMMAND_SELECT_ALL,
                     0x43 => platform::COMMAND_COPY_DIAGNOSTIC,
                     0x4f => platform::COMMAND_OPEN_FILE,
                     0x54 => platform::COMMAND_OPEN_TERMINAL,
                     0x56 => platform::COMMAND_PASTE,
+                    0x58 => platform::COMMAND_CUT,
+                    0x59 => platform::COMMAND_REDO,
+                    0x5a => platform::COMMAND_UNDO,
                     0x53 => {
                         APP.with(|cell| cell.borrow_mut().save());
                         invalidate(window);
@@ -494,22 +926,38 @@ unsafe extern "system" fn window_proc(
             APP.with(|cell| {
                 let mut app = cell.borrow_mut();
                 if !app.terminal_open {
+                    let old = app.position();
                     match w_param as u32 {
                         VK_BACK => app.backspace(),
-                        VK_LEFT => app.caret_column = app.caret_column.saturating_sub(1),
-                        VK_RIGHT => app.caret_column += 1,
+                        VK_DELETE => app.delete_forward(),
+                        VK_HOME => app.caret_column = 0,
+                        VK_END => {
+                            app.caret_column = app.lines[app.caret_line].chars().count();
+                        }
+                        VK_LEFT => app.move_left(),
+                        VK_RIGHT => app.move_right(),
                         VK_UP => app.caret_line = app.caret_line.saturating_sub(1),
                         VK_DOWN => app.caret_line += 1,
                         _ => return,
                     }
                     app.clamp_caret();
+                    if !matches!(w_param as u32, VK_BACK | VK_DELETE) {
+                        if platform::shift_pressed() {
+                            if app.selection_anchor.is_none() {
+                                app.selection_anchor = Some(old);
+                            }
+                        } else {
+                            app.selection_anchor = None;
+                        }
+                    }
                 }
             });
             invalidate(window);
             0
         }
         WM_LBUTTONDOWN => {
-            let y = ((l_param >> 16) as u16) as i32;
+            let x = (l_param as u16 as i16) as i32;
+            let y = ((l_param >> 16) as u16 as i16) as i32;
             let mut area = unsafe { std::mem::zeroed::<Rect>() };
             unsafe { GetClientRect(window, &mut area) };
             let scale = platform::dpi_for_window(window) as f32 / 96.0;
@@ -520,7 +968,50 @@ unsafe extern "system" fn window_proc(
             if y >= terminal_top && y <= terminal_top + (34.0 * scale) as i32 {
                 APP.with(|cell| cell.borrow_mut().toggle_terminal());
                 invalidate(window);
+            } else if x as f32 <= (area.right as f32 * 0.19).max(220.0 * scale) {
+                let first_row = (48.0 + 25.0) * scale;
+                if y as f32 >= first_row {
+                    let row = ((y as f32 - first_row) / (35.0 * scale)).floor() as usize;
+                    if row >= 2 {
+                        APP.with(|cell| {
+                            let mut app = cell.borrow_mut();
+                            if let Some(path) = app.project_entry_paths.get(row - 2).cloned() {
+                                if path.is_dir() {
+                                    app.open_project(path);
+                                } else {
+                                    app.open_file(path);
+                                }
+                            }
+                        });
+                        invalidate(window);
+                    }
+                }
+            } else if let Some(position) = editor_position_at(window, x, y) {
+                APP.with(|cell| {
+                    let mut app = cell.borrow_mut();
+                    app.set_caret(position, platform::shift_pressed());
+                    app.dragging_selection = true;
+                });
+                unsafe { SetCapture(window) };
+                invalidate(window);
             }
+            0
+        }
+        WM_MOUSEMOVE => {
+            let dragging = APP.with(|cell| cell.borrow().dragging_selection);
+            if dragging && w_param & 1 != 0 {
+                let x = (l_param as u16 as i16) as i32;
+                let y = ((l_param >> 16) as u16 as i16) as i32;
+                if let Some(position) = editor_position_at(window, x, y) {
+                    APP.with(|cell| cell.borrow_mut().set_caret(position, true));
+                    invalidate(window);
+                }
+            }
+            0
+        }
+        WM_LBUTTONUP => {
+            APP.with(|cell| cell.borrow_mut().dragging_selection = false);
+            unsafe { ReleaseCapture() };
             0
         }
         WM_SIZE => {
@@ -612,5 +1103,48 @@ pub fn run() {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TextPosition, WindowsAppState};
+
+    #[test]
+    fn multiline_selection_cut_and_undo_are_lossless() {
+        let mut app = WindowsAppState::new();
+        app.lines = vec!["alpha".into(), "beta".into()];
+        app.selection_anchor = Some(TextPosition { line: 0, column: 2 });
+        app.caret_line = 1;
+        app.caret_column = 2;
+
+        assert_eq!(app.cut_selection().as_deref(), Some("pha\nbe"));
+        assert_eq!(app.lines, ["alta"]);
+        app.undo();
+        assert_eq!(app.lines, ["alpha", "beta"]);
+    }
+
+    #[test]
+    fn unicode_edits_stay_on_character_boundaries() {
+        let mut app = WindowsAppState::new();
+        app.lines = vec!["你好 world".into()];
+        app.caret_line = 0;
+        app.caret_column = 2;
+        app.insert_text("真的");
+        assert_eq!(app.lines, ["你好真的 world"]);
+        app.backspace();
+        assert_eq!(app.lines, ["你好真 world"]);
+    }
+
+    #[test]
+    fn arrow_navigation_crosses_line_boundaries() {
+        let mut app = WindowsAppState::new();
+        app.lines = vec!["one".into(), "two".into()];
+        app.caret_line = 1;
+        app.caret_column = 0;
+        app.move_left();
+        assert_eq!((app.caret_line, app.caret_column), (0, 3));
+        app.move_right();
+        assert_eq!((app.caret_line, app.caret_column), (1, 0));
     }
 }

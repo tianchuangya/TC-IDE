@@ -20,33 +20,141 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn strip_vt(value: &str) -> String {
-    let mut result = String::with_capacity(value.len());
-    let mut chars = value.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '\u{1b}' {
-            if ch != '\r' {
-                result.push(ch);
-            }
-            continue;
-        }
-        if chars.peek() == Some(&'[') {
-            chars.next();
-            for next in chars.by_ref() {
-                if ('@'..='~').contains(&next) {
-                    break;
-                }
-            }
+#[derive(Default)]
+pub struct TerminalView {
+    pub lines: Vec<String>,
+    pub current: String,
+}
+
+enum EscapeState {
+    Text,
+    Escape,
+    Csi(String),
+    Osc,
+    OscEscape,
+}
+
+struct TerminalParser {
+    lines: Vec<String>,
+    current: Vec<char>,
+    cursor: usize,
+    state: EscapeState,
+}
+
+impl TerminalParser {
+    fn new() -> Self {
+        Self {
+            lines: vec![
+                "TianChuangYa  /  TC-IDE native ConPTY".into(),
+                "GitHub: https://github.com/tianchuangya/TC-IDE".into(),
+            ],
+            current: Vec::new(),
+            cursor: 0,
+            state: EscapeState::Text,
         }
     }
-    result
+
+    fn feed(&mut self, value: &str) {
+        for ch in value.chars() {
+            let state = std::mem::replace(&mut self.state, EscapeState::Text);
+            self.state = match state {
+                EscapeState::Text => self.feed_text(ch),
+                EscapeState::Escape if ch == '[' => EscapeState::Csi(String::new()),
+                EscapeState::Escape if ch == ']' => EscapeState::Osc,
+                EscapeState::Escape => EscapeState::Text,
+                EscapeState::Csi(mut sequence) => {
+                    if ('@'..='~').contains(&ch) {
+                        self.apply_csi(&sequence, ch);
+                        EscapeState::Text
+                    } else {
+                        sequence.push(ch);
+                        EscapeState::Csi(sequence)
+                    }
+                }
+                EscapeState::Osc if ch == '\u{7}' => EscapeState::Text,
+                EscapeState::Osc if ch == '\u{1b}' => EscapeState::OscEscape,
+                EscapeState::Osc => EscapeState::Osc,
+                EscapeState::OscEscape if ch == '\\' => EscapeState::Text,
+                EscapeState::OscEscape => EscapeState::Osc,
+            };
+        }
+    }
+
+    fn feed_text(&mut self, ch: char) -> EscapeState {
+        match ch {
+            '\u{1b}' => return EscapeState::Escape,
+            '\r' => self.cursor = 0,
+            '\n' => {
+                self.lines.push(self.current.iter().collect());
+                self.current.clear();
+                self.cursor = 0;
+                if self.lines.len() > 800 {
+                    let remove = self.lines.len() - 800;
+                    self.lines.drain(..remove);
+                }
+            }
+            '\u{8}' => self.cursor = self.cursor.saturating_sub(1),
+            value if !value.is_control() => {
+                while self.current.len() < self.cursor {
+                    self.current.push(' ');
+                }
+                if self.cursor < self.current.len() {
+                    self.current[self.cursor] = value;
+                } else {
+                    self.current.push(value);
+                }
+                self.cursor += 1;
+            }
+            _ => {}
+        }
+        EscapeState::Text
+    }
+
+    fn apply_csi(&mut self, sequence: &str, command: char) {
+        let params = sequence
+            .trim_start_matches('?')
+            .split(';')
+            .map(|value| value.parse::<usize>().unwrap_or(0))
+            .collect::<Vec<_>>();
+        let first = params.first().copied().unwrap_or(0);
+        match command {
+            'C' => self.cursor = self.cursor.saturating_add(first.max(1)),
+            'D' => self.cursor = self.cursor.saturating_sub(first.max(1)),
+            'G' => self.cursor = first.max(1) - 1,
+            'K' => match first {
+                1 => {
+                    for value in self.current.iter_mut().take(self.cursor.saturating_add(1)) {
+                        *value = ' ';
+                    }
+                }
+                2 => {
+                    self.current.clear();
+                    self.cursor = 0;
+                }
+                _ => self.current.truncate(self.cursor),
+            },
+            'J' if first == 2 || first == 3 => {
+                self.lines.clear();
+                self.current.clear();
+                self.cursor = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn publish(&self, target: &Arc<Mutex<TerminalView>>) {
+        if let Ok(mut view) = target.lock() {
+            view.lines.clone_from(&self.lines);
+            view.current = self.current.iter().collect();
+        }
+    }
 }
 
 pub struct ConPtySession {
     pseudo_console: HPCON,
     input: HANDLE,
     process: HANDLE,
-    pub lines: Arc<Mutex<Vec<String>>>,
+    pub view: Arc<Mutex<TerminalView>>,
 }
 
 impl ConPtySession {
@@ -130,16 +238,14 @@ impl ConPtySession {
         }
         let _ = unsafe { CloseHandle(process_info.hThread) };
 
-        let lines = Arc::new(Mutex::new(vec![
-            "TianChuangYa  /  TC-IDE native ConPTY".into(),
-            "GitHub: https://github.com/tianchuangya/TC-IDE".into(),
-        ]));
-        let output_lines = Arc::clone(&lines);
+        let view = Arc::new(Mutex::new(TerminalView::default()));
+        let output_view = Arc::clone(&view);
         let output_read_raw = output_read.0 as usize;
         thread::spawn(move || {
             let output_read = HANDLE(output_read_raw as *mut c_void);
             let mut buffer = [0u8; 4096];
-            let mut pending = String::new();
+            let mut parser = TerminalParser::new();
+            parser.publish(&output_view);
             loop {
                 let mut read = 0u32;
                 if unsafe { ReadFile(output_read, Some(&mut buffer), Some(&mut read), None) }
@@ -148,22 +254,8 @@ impl ConPtySession {
                 {
                     break;
                 }
-                pending.push_str(&String::from_utf8_lossy(&buffer[..read as usize]));
-                let clean = strip_vt(&pending);
-                let complete = clean.ends_with('\n');
-                let mut pieces = clean.split('\n').map(str::to_string).collect::<Vec<_>>();
-                pending = if complete {
-                    String::new()
-                } else {
-                    pieces.pop().unwrap_or_default()
-                };
-                if let Ok(mut target) = output_lines.lock() {
-                    target.extend(pieces.into_iter().filter(|line| !line.is_empty()));
-                    if target.len() > 800 {
-                        let remove = target.len() - 800;
-                        target.drain(..remove);
-                    }
-                }
+                parser.feed(&String::from_utf8_lossy(&buffer[..read as usize]));
+                parser.publish(&output_view);
             }
             let _ = unsafe { CloseHandle(output_read) };
         });
@@ -172,7 +264,7 @@ impl ConPtySession {
             pseudo_console,
             input: input_write,
             process: process_info.hProcess,
-            lines,
+            view,
         })
     }
 
@@ -205,10 +297,20 @@ impl Drop for ConPtySession {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_vt;
+    use super::TerminalParser;
 
     #[test]
-    fn strips_common_virtual_terminal_sequences() {
-        assert_eq!(strip_vt("\u{1b}[31mred\u{1b}[0m\r\n"), "red\n");
+    fn parses_virtual_terminal_sequences_and_live_prompt() {
+        let mut parser = TerminalParser::new();
+        parser.feed("\u{1b}[31mred\u{1b}[0m\r\nPS C:\\\\repo> ");
+        assert_eq!(parser.lines.last().map(String::as_str), Some("red"));
+        assert_eq!(parser.current.iter().collect::<String>(), "PS C:\\\\repo> ");
+    }
+
+    #[test]
+    fn carriage_return_overwrites_the_current_line() {
+        let mut parser = TerminalParser::new();
+        parser.feed("progress 10%\rprogress 90%\u{1b}[K");
+        assert_eq!(parser.current.iter().collect::<String>(), "progress 90%");
     }
 }

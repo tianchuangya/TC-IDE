@@ -21,9 +21,13 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
 
 pub struct WindowsScene<'a> {
     pub file_name: &'a str,
+    pub project_name: &'a str,
+    pub project_entries: &'a [String],
     pub lines: &'a [String],
     pub caret_line: usize,
     pub caret_column: usize,
+    pub selection: Option<((usize, usize), (usize, usize))>,
+    pub ime_composition: &'a str,
     pub status: &'a str,
     pub terminal_lines: &'a [String],
     pub terminal_input: &'a str,
@@ -44,6 +48,26 @@ pub struct DirectEditorRenderer {
 }
 
 impl DirectEditorRenderer {
+    fn character_cells(value: char) -> usize {
+        match value as u32 {
+            0x1100..=0x115f
+            | 0x2329..=0x232a
+            | 0x2e80..=0xa4cf
+            | 0xac00..=0xd7a3
+            | 0xf900..=0xfaff
+            | 0xfe10..=0xfe6f
+            | 0xff00..=0xff60
+            | 0xffe0..=0xffe6
+            | 0x1f300..=0x1faff
+            | 0x20000..=0x3fffd => 2,
+            _ => 1,
+        }
+    }
+
+    fn visual_cells(value: &str, columns: usize) -> usize {
+        value.chars().take(columns).map(Self::character_cells).sum()
+    }
+
     pub unsafe fn new(dpi: u32) -> Result<Self> {
         let d2d_factory: ID2D1Factory =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }?;
@@ -228,6 +252,7 @@ impl DirectEditorRenderer {
         let bright = unsafe { Self::brush(&target_base, 0xf5f5f7, 1.0) }?;
         let accent = unsafe { Self::brush(&target_base, 0x0a84ff, 1.0) }?;
         let selection = unsafe { Self::brush(&target_base, 0x193451, 1.0) }?;
+        let selected_text = unsafe { Self::brush(&target_base, 0x0a84ff, 0.46) }?;
         let width = width as f32;
         let height = height as f32;
         let scale = self.dpi / 96.0;
@@ -305,7 +330,10 @@ impl DirectEditorRenderer {
             )
         };
 
-        let tree_items = ["PROJECT", "TC-IDE", "src", scene.file_name];
+        let tree_items = std::iter::once("PROJECT".to_string())
+            .chain(std::iter::once(format!("▾ {}", scene.project_name)))
+            .chain(scene.project_entries.iter().cloned())
+            .collect::<Vec<_>>();
         for (index, item) in tree_items.iter().enumerate() {
             let delay = index as f32 * 0.045;
             let local = ((scene.animation_seconds - delay) / 0.28).clamp(0.0, 1.0);
@@ -317,7 +345,11 @@ impl DirectEditorRenderer {
                 Self::text(
                     &target_base,
                     &self.ui_format,
-                    if index == 3 { &bright } else { &text },
+                    if item.trim_start().ends_with(scene.file_name) {
+                        &bright
+                    } else {
+                        &text
+                    },
                     item,
                     D2D_RECT_F {
                         left: x,
@@ -371,6 +403,28 @@ impl DirectEditorRenderer {
                     )
                 };
             }
+            if let Some(((start_line, start_column), (end_line, end_column))) = scene.selection {
+                if index >= start_line && index <= end_line {
+                    let left_column = if index == start_line { start_column } else { 0 };
+                    let right_column = if index == end_line {
+                        end_column
+                    } else {
+                        value.chars().count()
+                    };
+                    let left_cells = Self::visual_cells(value, left_column) as f32;
+                    let right_cells = Self::visual_cells(value, right_column) as f32;
+                    unsafe {
+                        Self::fill(
+                            &target_base,
+                            &selected_text,
+                            tree_w + (52.0 + left_cells * 8.9) * scale,
+                            y - 2.0 * scale,
+                            tree_w + (52.0 + right_cells * 8.9) * scale,
+                            y + 21.0 * scale,
+                        )
+                    };
+                }
+            }
             unsafe {
                 Self::text(
                     &target_base,
@@ -412,7 +466,12 @@ impl DirectEditorRenderer {
                 )
             };
         }
-        let caret_x = tree_w + (52.0 + scene.caret_column as f32 * 8.9) * scale;
+        let caret_cells = scene
+            .lines
+            .get(scene.caret_line)
+            .map(|line| Self::visual_cells(line, scene.caret_column))
+            .unwrap_or(0);
+        let caret_x = tree_w + (52.0 + caret_cells as f32 * 8.9) * scale;
         let caret_y = code_top + scene.caret_line as f32 * line_step;
         if (scene.animation_seconds * 2.0) as u32 & 1 == 0 {
             unsafe {
@@ -423,6 +482,39 @@ impl DirectEditorRenderer {
                     caret_y,
                     caret_x + 1.5 * scale,
                     caret_y + 21.0 * scale,
+                )
+            };
+        }
+        if !scene.ime_composition.is_empty() {
+            unsafe {
+                Self::text(
+                    &target_base,
+                    &self.code_format,
+                    &bright,
+                    scene.ime_composition,
+                    D2D_RECT_F {
+                        left: caret_x + 2.0 * scale,
+                        top: caret_y,
+                        right: editor_right - 10.0 * scale,
+                        bottom: caret_y + line_step,
+                    },
+                )
+            };
+            unsafe {
+                Self::fill(
+                    &target_base,
+                    &accent,
+                    caret_x + 2.0 * scale,
+                    caret_y + 21.0 * scale,
+                    caret_x
+                        + (2.0
+                            + Self::visual_cells(
+                                scene.ime_composition,
+                                scene.ime_composition.chars().count(),
+                            ) as f32
+                                * 8.9)
+                            * scale,
+                    caret_y + 23.0 * scale,
                 )
             };
         }

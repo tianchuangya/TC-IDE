@@ -29,6 +29,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - name: Test Windows editor and ConPTY state
+        run: cargo test --all-targets
       - name: Build and link native Win32 backend
         run: cargo build --release
 

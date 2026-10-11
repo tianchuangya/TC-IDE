@@ -33,7 +33,7 @@ TC-IDE 不把 Linux 可执行文件改名后当作 Windows 或 macOS 包。入�
 | 打开输出目录 | xdg-open/gio | Explorer/ShellExecuteW（已接入） | NSWorkspace/open（待实现） |
 | 安装包 | deb/AppImage（待接入真实打包） | MSIX/NSIS（待实现） | dmg/pkg（待实现） |
 
-Windows 后端还启用了 Per-monitor DPI V2，并处理 `WM_DPICHANGED` 推荐窗口尺寸。其原生菜单和快捷键会实际执行文件选择、UTF-16 剪贴板读写与 Explorer 打开目录。Direct2D 将项目树、可编辑代码、调用层级和底部终端统一绘制；ConPTY 在项目目录启动 PowerShell，通过管道双向传输输入输出。当前仍需在真实 Windows 设备上补齐语法布局、IME 和终端 VT 属性的完整运行测试。
+Windows 后端还启用了 Per-monitor DPI V2，并处理 `WM_DPICHANGED` 推荐窗口尺寸。其原生菜单和快捷键会实际执行文件选择、UTF-16 剪贴板读写与 Explorer 打开目录。Direct2D 将项目树、可编辑代码、调用层级和底部终端统一绘制；文本模型保留跨行选区、Unicode 光标、200 步撤销/重做和 IME 组合文本。ConPTY 在项目目录启动 PowerShell，通过管道双向传输输入输出，并使用有光标状态的增量 VT 解析器保留未换行提示符。当前仍需在真实 Windows 设备上验证不同 IME、终端全屏应用和字形精确度。
 
 ## 关系图的层级语义
 

@@ -18,6 +18,11 @@ pub const COMMAND_COPY_DIAGNOSTIC: Wparam = 1002;
 pub const COMMAND_PASTE: Wparam = 1003;
 pub const COMMAND_OPEN_FOLDER: Wparam = 1004;
 pub const COMMAND_OPEN_TERMINAL: Wparam = 1005;
+pub const COMMAND_SELECT_ALL: Wparam = 1006;
+pub const COMMAND_CUT: Wparam = 1007;
+pub const COMMAND_UNDO: Wparam = 1008;
+pub const COMMAND_REDO: Wparam = 1009;
+pub const COMMAND_REVEAL_FOLDER: Wparam = 1010;
 
 const CF_UNICODETEXT: Uint = 13;
 const GMEM_MOVEABLE: Uint = 0x0002;
@@ -30,6 +35,7 @@ const SW_SHOWNORMAL: i32 = 1;
 const SWP_NOACTIVATE: Uint = 0x0010;
 const SWP_NOZORDER: Uint = 0x0004;
 const VK_CONTROL: i32 = 0x11;
+const VK_SHIFT: i32 = 0x10;
 
 #[repr(C)]
 pub struct Rect {
@@ -64,6 +70,18 @@ struct OpenFileName {
     reserved: *mut c_void,
     reserved_dword: Dword,
     flags_ex: Dword,
+}
+
+#[repr(C)]
+struct BrowseInfo {
+    owner: Hwnd,
+    root: *const c_void,
+    display_name: *mut u16,
+    title: *const u16,
+    flags: Uint,
+    callback: *mut c_void,
+    parameter: Lparam,
+    image: i32,
 }
 
 #[link(name = "kernel32")]
@@ -116,6 +134,13 @@ extern "system" {
         directory: *const u16,
         show: i32,
     ) -> Handle;
+    fn SHBrowseForFolderW(info: *const BrowseInfo) -> *mut c_void;
+    fn SHGetPathFromIDListW(item: *const c_void, path: *mut u16) -> Bool;
+}
+
+#[link(name = "ole32")]
+extern "system" {
+    fn CoTaskMemFree(memory: *const c_void);
 }
 
 pub fn wide(value: &str) -> Vec<u16> {
@@ -175,16 +200,26 @@ pub fn control_pressed() -> bool {
     unsafe { GetKeyState(VK_CONTROL) < 0 }
 }
 
+pub fn shift_pressed() -> bool {
+    unsafe { GetKeyState(VK_SHIFT) < 0 }
+}
+
 pub fn install_native_menu(window: Hwnd) {
     unsafe {
         let menu = CreateMenu();
         let file_menu = CreatePopupMenu();
+        let edit_menu = CreatePopupMenu();
         let platform_menu = CreatePopupMenu();
         let open_file = wide("Open file...\tCtrl+O");
-        let open_folder = wide("Open project folder in Explorer");
+        let open_folder = wide("Open project folder...");
+        let reveal_folder = wide("Reveal current project in Explorer");
         let open_terminal = wide("Toggle integrated ConPTY terminal\tCtrl+T");
-        let copy = wide("Copy API diagnostic\tCtrl+C");
-        let paste = wide("Read system clipboard\tCtrl+V");
+        let undo = wide("Undo\tCtrl+Z");
+        let redo = wide("Redo\tCtrl+Y");
+        let select_all = wide("Select all\tCtrl+A");
+        let copy = wide("Copy\tCtrl+C");
+        let cut = wide("Cut\tCtrl+X");
+        let paste = wide("Paste\tCtrl+V");
         AppendMenuW(file_menu, MF_STRING, COMMAND_OPEN_FILE, open_file.as_ptr());
         AppendMenuW(
             file_menu,
@@ -193,21 +228,33 @@ pub fn install_native_menu(window: Hwnd) {
             open_folder.as_ptr(),
         );
         AppendMenuW(
+            file_menu,
+            MF_STRING,
+            COMMAND_REVEAL_FOLDER,
+            reveal_folder.as_ptr(),
+        );
+        AppendMenuW(
             platform_menu,
             MF_STRING,
             COMMAND_OPEN_TERMINAL,
             open_terminal.as_ptr(),
         );
+        AppendMenuW(edit_menu, MF_STRING, COMMAND_UNDO, undo.as_ptr());
+        AppendMenuW(edit_menu, MF_STRING, COMMAND_REDO, redo.as_ptr());
         AppendMenuW(
-            platform_menu,
+            edit_menu,
             MF_STRING,
-            COMMAND_COPY_DIAGNOSTIC,
-            copy.as_ptr(),
+            COMMAND_SELECT_ALL,
+            select_all.as_ptr(),
         );
-        AppendMenuW(platform_menu, MF_STRING, COMMAND_PASTE, paste.as_ptr());
+        AppendMenuW(edit_menu, MF_STRING, COMMAND_COPY_DIAGNOSTIC, copy.as_ptr());
+        AppendMenuW(edit_menu, MF_STRING, COMMAND_CUT, cut.as_ptr());
+        AppendMenuW(edit_menu, MF_STRING, COMMAND_PASTE, paste.as_ptr());
         let file_label = wide("File");
+        let edit_label = wide("Edit");
         let platform_label = wide("Windows API");
         AppendMenuW(menu, MF_POPUP, file_menu as Wparam, file_label.as_ptr());
+        AppendMenuW(menu, MF_POPUP, edit_menu as Wparam, edit_label.as_ptr());
         AppendMenuW(
             menu,
             MF_POPUP,
@@ -257,6 +304,37 @@ pub fn choose_file(window: Hwnd) -> Option<PathBuf> {
         .position(|unit| *unit == 0)
         .unwrap_or(file.len());
     Some(PathBuf::from(String::from_utf16_lossy(&file[..length])))
+}
+
+pub fn choose_folder(window: Hwnd) -> Option<PathBuf> {
+    let title = wide("Open a project folder in TC-IDE");
+    let mut display_name = [0u16; 260];
+    let info = BrowseInfo {
+        owner: window,
+        root: ptr::null(),
+        display_name: display_name.as_mut_ptr(),
+        title: title.as_ptr(),
+        // BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX
+        flags: 0x0001 | 0x0040 | 0x0010,
+        callback: ptr::null_mut(),
+        parameter: 0,
+        image: 0,
+    };
+    let item = unsafe { SHBrowseForFolderW(&info) };
+    if item.is_null() {
+        return None;
+    }
+    let mut path = [0u16; 32_768];
+    let ok = unsafe { SHGetPathFromIDListW(item, path.as_mut_ptr()) != 0 };
+    unsafe { CoTaskMemFree(item) };
+    if !ok {
+        return None;
+    }
+    let length = path
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(path.len());
+    Some(PathBuf::from(String::from_utf16_lossy(&path[..length])))
 }
 
 pub fn write_clipboard(window: Hwnd, value: &str) -> Result<(), &'static str> {

@@ -7,7 +7,9 @@ TC-IDE 是一个 Rust 原生、低色彩噪声、强调空间关系与丝滑动�
 当前第一个可运行原型包含：
 
 - Linux 使用原生 X11 窗口与 60 FPS 动画循环；Windows 已建立独立 Win32 原生窗口后端，macOS 已隔离独立入口，三平台由 CI 分别编译，功能一致性仍在推进；
-- Windows 后端已连接 Per-monitor DPI、UTF-16 系统剪贴板、原生文件选择器、Explorer/ShellExecuteW，并使用 DirectWrite/Direct2D 绘制可编辑文本、调用层级与动效；底部终端已接入真实 ConPTY PowerShell 数据流；
+- Windows 后端已连接 Per-monitor DPI、UTF-16 系统剪贴板、原生文件选择器、Explorer/ShellExecuteW，并使用 DirectWrite/Direct2D 绘制可编辑文本、调用层级与动效；支持鼠标拖选、Shift 扩选、Unicode 剪贴板、撤销/重做和中文 IME 组合输入；
+- Windows 原生项目选择器会真正切换当前工作目录，项目树读取实际文件和文件夹，单击文件可打开编辑，单击文件夹可继续聚焦浏览；终端也会在该项目目录启动；
+- Windows 底部终端已接入真实 ConPTY PowerShell 数据流，增量终端缓冲会保留未换行提示符，并处理回车覆盖、退格、清行/清屏、CSI 光标和 OSC 序列；
 - 根据显示器分辨率自动设置窗口尺寸与界面缩放；文字由 Pango/Fontconfig 渲染，并随程序内置 JetBrains Mono；
 - 双缓冲场景绘制，减少持续动画时的闪烁；
 - 右侧使用可切换“跟随 / 调用者 / 被调用”的调用层级树展示 `项目 → 文件 → Class → 函数`；默认聚焦当前文件，也可切换当前文件夹或整个项目，支持范围内搜索、文件节点折叠和滚轮浏览，避免大型项目一次铺满；
