@@ -462,6 +462,21 @@ struct EditMotion {
     started: Instant,
 }
 
+#[derive(Clone, Copy)]
+struct UiMotion {
+    value: f32,
+    velocity: f32,
+}
+
+impl UiMotion {
+    const fn new(value: f32) -> Self {
+        Self {
+            value,
+            velocity: 0.0,
+        }
+    }
+}
+
 struct BubbleLayout {
     left: i32,
     top: i32,
@@ -556,6 +571,7 @@ struct Palette {
     bright: c_ulong,
     accent: c_ulong,
     project: c_ulong,
+    shadow: c_ulong,
 }
 
 struct App {
@@ -614,6 +630,13 @@ struct App {
     project_tree_velocity: f32,
     folder_tree_motion: BTreeMap<String, (f32, f32)>,
     tree_motion_updated: Instant,
+    new_menu_motion: UiMotion,
+    edit_menu_motion: UiMotion,
+    settings_motion: UiMotion,
+    package_motion: UiMotion,
+    extensions_motion: UiMotion,
+    create_motion: UiMotion,
+    terminal_motion: UiMotion,
     collapsed_folders: BTreeSet<String>,
     terminal_open: bool,
     terminal_focused: bool,
@@ -686,42 +709,46 @@ impl App {
     fn color_rgb(&self, color: c_ulong) -> (f64, f64, f64) {
         let hex = if self.light_theme {
             if color == self.colors.bg {
-                0xf7f8fa
+                0xf5f5f7
             } else if color == self.colors.panel {
                 0xffffff
             } else if color == self.colors.panel_2 {
-                0xeff2f5
+                0xf2f2f7
             } else if color == self.colors.line {
-                0xcbd2d9
+                0xd1d1d6
             } else if color == self.colors.muted {
-                0x68737d
+                0x6e6e73
             } else if color == self.colors.text {
-                0x34414a
+                0x3a3a3c
             } else if color == self.colors.bright {
-                0x11181d
+                0x1d1d1f
             } else if color == self.colors.accent {
-                0x397f91
+                0x007aff
+            } else if color == self.colors.shadow {
+                0xc7c7cc
             } else {
-                0xdce9ed
+                0xdbeafe
             }
         } else if color == self.colors.bg {
-            0x0d0f11
+            0x000000
         } else if color == self.colors.panel {
-            0x121518
+            0x1c1c1e
         } else if color == self.colors.panel_2 {
-            0x171b1e
+            0x2c2c2e
         } else if color == self.colors.line {
-            0x30363a
+            0x38383a
         } else if color == self.colors.muted {
-            0x687278
+            0x8e8e93
         } else if color == self.colors.text {
-            0xb7c0c4
+            0xd1d1d6
         } else if color == self.colors.bright {
-            0xe1ecef
+            0xf5f5f7
         } else if color == self.colors.accent {
-            0x9bbbc2
+            0x0a84ff
+        } else if color == self.colors.shadow {
+            0x050506
         } else {
-            0x29353a
+            0x193451
         };
         (
             ((hex >> 16) & 255) as f64 / 255.0,
@@ -1140,6 +1167,61 @@ impl App {
         );
     }
 
+    unsafe fn rounded_rect(
+        &self,
+        color: c_ulong,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        radius: i32,
+    ) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let radius = radius.min(width / 2).min(height / 2).max(1);
+        self.rect(color, x + radius, y, width - radius * 2, height);
+        self.rect(color, x, y + radius, width, height - radius * 2);
+        self.set_color(color);
+        for (cx, cy) in [
+            (x + radius, y + radius),
+            (x + width - radius, y + radius),
+            (x + radius, y + height - radius),
+            (x + width - radius, y + height - radius),
+        ] {
+            XFillArc(
+                self.display,
+                self.canvas,
+                self.gc,
+                cx - radius,
+                cy - radius,
+                (radius * 2) as u32,
+                (radius * 2) as u32,
+                0,
+                360 * 64,
+            );
+        }
+    }
+
+    unsafe fn floating_panel(&self, x: i32, y: i32, width: i32, height: i32) {
+        let radius = self.s(11);
+        self.rounded_rect(
+            self.colors.shadow,
+            x + self.s(2),
+            y + self.s(5),
+            width,
+            height,
+            radius,
+        );
+        self.rounded_rect(self.colors.panel_2, x, y, width, height, radius);
+        self.line(
+            self.colors.line,
+            1,
+            (x + radius, y),
+            (x + width - radius, y),
+        );
+    }
+
     unsafe fn outline(&self, color: c_ulong, x: i32, y: i32, width: i32, height: i32) {
         self.set_color(color);
         XDrawRectangle(
@@ -1341,6 +1423,19 @@ impl App {
             *value = target;
             *velocity = 0.0;
         }
+    }
+
+    fn step_ui_motion(motion: &mut UiMotion, visible: bool, dt: f32) {
+        Self::spring_step(
+            &mut motion.value,
+            &mut motion.velocity,
+            if visible { 1.0 } else { 0.0 },
+            dt,
+        );
+    }
+
+    fn overlay_offset(&self, motion: UiMotion) -> i32 {
+        self.s(((1.0 - motion.value.clamp(0.0, 1.0)) * -12.0).round() as i32)
     }
 
     fn start_edit_motion(&mut self, line: usize, start: usize, end: usize) {
@@ -1714,22 +1809,22 @@ impl App {
         if self.workspace_context_menu.is_some() {
             self.draw_workspace_context_menu();
         }
-        if self.new_menu_open {
+        if self.new_menu_motion.value > 0.01 {
             self.draw_new_menu();
         }
-        if self.edit_menu_open {
+        if self.edit_menu_motion.value > 0.01 {
             self.draw_edit_menu();
         }
-        if self.settings_open {
+        if self.settings_motion.value > 0.01 {
             self.draw_settings_menu();
         }
-        if self.package_open {
+        if self.package_motion.value > 0.01 {
             self.draw_package_menu();
         }
-        if self.extensions_open {
+        if self.extensions_motion.value > 0.01 {
             self.draw_extensions();
         }
-        if self.create_kind.is_some() {
+        if self.create_kind.is_some() && self.create_motion.value > 0.01 {
             self.draw_create_dialog();
         }
         if self.build_started.is_some() {
@@ -1988,8 +2083,7 @@ impl App {
         let s = |v| self.s(v);
         let w = s(190);
         let h = s(92);
-        self.rect(self.colors.panel_2, x, y, w, h);
-        self.outline(self.colors.accent, x, y, w, h);
+        self.floating_panel(x, y, w, h);
         self.text(
             self.colors.muted,
             x + s(14),
@@ -2013,11 +2107,10 @@ impl App {
     unsafe fn draw_settings_menu(&self) {
         let s = |v| self.s(v);
         let x = self.width - s(410);
-        let y = s(43);
+        let y = s(43) + self.overlay_offset(self.settings_motion);
         let w = s(390);
         let h = s(690);
-        self.rect(self.colors.panel_2, x, y, w, h);
-        self.outline(self.colors.line, x, y, w, h);
+        self.floating_panel(x, y, w, h);
         self.text(
             self.colors.bright,
             x + s(16),
@@ -2251,11 +2344,10 @@ impl App {
     unsafe fn draw_new_menu(&self) {
         let s = |v| self.s(v);
         let x = s(112);
-        let y = s(43);
+        let y = s(43) + self.overlay_offset(self.new_menu_motion);
         let w = s(220);
         let h = s(126);
-        self.rect(self.colors.panel_2, x, y, w, h);
-        self.outline(self.colors.line, x, y, w, h);
+        self.floating_panel(x, y, w, h);
         self.text(
             self.colors.muted,
             x + s(15),
@@ -2277,11 +2369,10 @@ impl App {
     unsafe fn draw_edit_menu(&self) {
         let s = |v| self.s(v);
         let x = s(207);
-        let y = s(43);
+        let y = s(43) + self.overlay_offset(self.edit_menu_motion);
         let w = s(260);
         let h = s(190);
-        self.rect(self.colors.panel_2, x, y, w, h);
-        self.outline(self.colors.line, x, y, w, h);
+        self.floating_panel(x, y, w, h);
         let labels = if self.ui_chinese {
             [
                 "保存",
@@ -2894,7 +2985,8 @@ impl App {
 
     unsafe fn draw_status(&self) {
         let s = |v| self.s(v);
-        let panel_h = if self.terminal_open { s(230) } else { s(28) };
+        let terminal_progress = self.terminal_motion.value.clamp(0.0, 1.0);
+        let panel_h = s(28) + ((s(230) - s(28)) as f32 * terminal_progress) as i32;
         let top = self.height - panel_h;
         self.rect(self.colors.panel_2, 0, top, self.width, panel_h);
         self.line(self.colors.line, 1, (0, top), (self.width, top));
@@ -2902,7 +2994,7 @@ impl App {
             self.colors.bright,
             s(14),
             top + s(20),
-            if self.terminal_open {
+            if terminal_progress > 0.5 {
                 self.tr("v  TERMINAL", "v  终端")
             } else {
                 self.tr(">  TERMINAL", ">  终端")
@@ -2918,7 +3010,7 @@ impl App {
                 .as_deref()
                 .unwrap_or(self.tr("No active project", "没有活动项目")),
         );
-        if self.terminal_open {
+        if terminal_progress > 0.08 {
             let list_x = self.width - s(190);
             self.rect(
                 self.colors.panel,
@@ -3039,11 +3131,10 @@ impl App {
     unsafe fn draw_package_menu(&self) {
         let s = |v| self.s(v);
         let x = self.width - s(270);
-        let y = s(48);
+        let y = s(48) + self.overlay_offset(self.package_motion);
         let w = s(250);
         let h = s(207);
-        self.rect(self.colors.panel_2, x, y, w, h);
-        self.outline(self.colors.line, x, y, w, h);
+        self.floating_panel(x, y, w, h);
         self.text(
             self.colors.muted,
             x + s(15),
@@ -3094,9 +3185,8 @@ impl App {
         let w = s(950);
         let h = s(680);
         let x = self.width - w - s(20);
-        let y = s(52);
-        self.rect(self.colors.panel_2, x, y, w, h);
-        self.outline(self.colors.line, x, y, w, h);
+        let y = s(52) + self.overlay_offset(self.extensions_motion);
+        self.floating_panel(x, y, w, h);
         self.text(
             self.colors.bright,
             x + s(22),
@@ -3486,9 +3576,9 @@ impl App {
         let w = s(if project { 680 } else { 520 });
         let h = s(if project { 500 } else { 230 });
         let x = (self.width - w) / 2;
-        let y = (self.height - h) / 2;
-        self.rect(self.colors.panel_2, x, y, w, h);
-        self.outline(self.colors.accent, x, y, w, h);
+        let y = (self.height - h) / 2 + self.overlay_offset(self.create_motion);
+        self.floating_panel(x, y, w, h);
+        self.line(self.colors.accent, 2, (x + s(18), y), (x + w - s(18), y));
         let title = match (self.create_kind.unwrap(), self.ui_chinese) {
             (CreateKind::Project, true) => "新建项目",
             (CreateKind::Folder, true) => "新建文件夹",
@@ -3852,6 +3942,13 @@ impl App {
             root_target,
             dt,
         );
+        Self::step_ui_motion(&mut self.new_menu_motion, self.new_menu_open, dt);
+        Self::step_ui_motion(&mut self.edit_menu_motion, self.edit_menu_open, dt);
+        Self::step_ui_motion(&mut self.settings_motion, self.settings_open, dt);
+        Self::step_ui_motion(&mut self.package_motion, self.package_open, dt);
+        Self::step_ui_motion(&mut self.extensions_motion, self.extensions_open, dt);
+        Self::step_ui_motion(&mut self.create_motion, self.create_kind.is_some(), dt);
+        Self::step_ui_motion(&mut self.terminal_motion, self.terminal_open, dt);
         for folder in self.folders.clone() {
             let target = if self.collapsed_folders.contains(&folder) {
                 0.0
@@ -6685,26 +6782,28 @@ pub fn run() {
         let cairo_surface = cairo_xlib_surface_create(display, canvas, visual, width, height);
         let cairo = cairo_create(cairo_surface);
         let dark_colors = Palette {
-            bg,
-            panel: color(display, map, "#121518"),
-            panel_2: color(display, map, "#171b1e"),
-            line: color(display, map, "#30363a"),
-            muted: color(display, map, "#687278"),
-            text: color(display, map, "#b7c0c4"),
-            bright: color(display, map, "#e1ecef"),
-            accent: color(display, map, "#9bbbc2"),
-            project: color(display, map, "#29353a"),
+            bg: color(display, map, "#000000"),
+            panel: color(display, map, "#1c1c1e"),
+            panel_2: color(display, map, "#2c2c2e"),
+            line: color(display, map, "#38383a"),
+            muted: color(display, map, "#8e8e93"),
+            text: color(display, map, "#d1d1d6"),
+            bright: color(display, map, "#f5f5f7"),
+            accent: color(display, map, "#0a84ff"),
+            project: color(display, map, "#193451"),
+            shadow: color(display, map, "#050506"),
         };
         let light_colors = Palette {
-            bg: color(display, map, "#f7f8fa"),
+            bg: color(display, map, "#f5f5f7"),
             panel: color(display, map, "#ffffff"),
-            panel_2: color(display, map, "#eff2f5"),
-            line: color(display, map, "#cbd2d9"),
-            muted: color(display, map, "#68737d"),
-            text: color(display, map, "#34414a"),
-            bright: color(display, map, "#11181d"),
-            accent: color(display, map, "#397f91"),
-            project: color(display, map, "#dce9ed"),
+            panel_2: color(display, map, "#f2f2f7"),
+            line: color(display, map, "#d1d1d6"),
+            muted: color(display, map, "#6e6e73"),
+            text: color(display, map, "#3a3a3c"),
+            bright: color(display, map, "#1d1d1f"),
+            accent: color(display, map, "#007aff"),
+            project: color(display, map, "#dbeafe"),
+            shadow: color(display, map, "#c7c7cc"),
         };
         let preferences = load_ui_preferences();
         let colors = if preferences.light_theme {
@@ -6785,6 +6884,13 @@ pub fn run() {
             project_tree_velocity: 0.0,
             folder_tree_motion: BTreeMap::new(),
             tree_motion_updated: Instant::now(),
+            new_menu_motion: UiMotion::new(0.0),
+            edit_menu_motion: UiMotion::new(0.0),
+            settings_motion: UiMotion::new(0.0),
+            package_motion: UiMotion::new(0.0),
+            extensions_motion: UiMotion::new(0.0),
+            create_motion: UiMotion::new(0.0),
+            terminal_motion: UiMotion::new(0.0),
             collapsed_folders: BTreeSet::new(),
             terminal_open: false,
             terminal_focused: false,
