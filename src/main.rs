@@ -1,3 +1,4 @@
+mod editor_core;
 #[cfg(target_os = "linux")]
 mod linux_app;
 #[cfg(target_os = "macos")]

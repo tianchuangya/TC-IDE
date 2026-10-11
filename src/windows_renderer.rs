@@ -19,6 +19,8 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
 
+use crate::editor_core::{self, TokenKind};
+
 pub struct WindowsScene<'a> {
     pub file_name: &'a str,
     pub project_name: &'a str,
@@ -28,6 +30,9 @@ pub struct WindowsScene<'a> {
     pub caret_column: usize,
     pub selection: Option<((usize, usize), (usize, usize))>,
     pub ime_composition: &'a str,
+    pub completions: &'a [String],
+    pub light_theme: bool,
+    pub ui_chinese: bool,
     pub status: &'a str,
     pub terminal_lines: &'a [String],
     pub terminal_input: &'a str,
@@ -44,6 +49,7 @@ pub struct DirectEditorRenderer {
     code_format: IDWriteTextFormat,
     ui_format: IDWriteTextFormat,
     small_format: IDWriteTextFormat,
+    code_cell: f32,
     dpi: f32,
 }
 
@@ -68,7 +74,7 @@ impl DirectEditorRenderer {
         value.chars().take(columns).map(Self::character_cells).sum()
     }
 
-    pub unsafe fn new(dpi: u32) -> Result<Self> {
+    pub unsafe fn new(dpi: u32, code_zoom: i32) -> Result<Self> {
         let d2d_factory: ID2D1Factory =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }?;
         let dwrite_factory: IDWriteFactory =
@@ -81,7 +87,7 @@ impl DirectEditorRenderer {
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                15.0 * scale,
+                (15.0 + code_zoom.clamp(-2, 8) as f32) * scale,
                 w!("zh-CN"),
             )
         }?;
@@ -114,6 +120,7 @@ impl DirectEditorRenderer {
             code_format,
             ui_format,
             small_format,
+            code_cell: 8.9 + code_zoom.clamp(-2, 8) as f32 * 0.6,
             dpi: dpi.max(96) as f32,
         })
     }
@@ -243,16 +250,28 @@ impl DirectEditorRenderer {
     ) -> Result<()> {
         let target = unsafe { self.ensure_target(window, width, height) }?;
         let target_base: ID2D1RenderTarget = target.cast()?;
-        let bg = unsafe { Self::brush(&target_base, 0x000000, 1.0) }?;
-        let panel = unsafe { Self::brush(&target_base, 0x1c1c1e, 1.0) }?;
-        let raised = unsafe { Self::brush(&target_base, 0x2c2c2e, 1.0) }?;
-        let line = unsafe { Self::brush(&target_base, 0x38383a, 1.0) }?;
-        let text = unsafe { Self::brush(&target_base, 0xd1d1d6, 1.0) }?;
-        let muted = unsafe { Self::brush(&target_base, 0x8e8e93, 1.0) }?;
-        let bright = unsafe { Self::brush(&target_base, 0xf5f5f7, 1.0) }?;
+        let colors = if scene.light_theme {
+            [
+                0xf5f5f7, 0xffffff, 0xf2f2f7, 0xd1d1d6, 0x3a3a3c, 0x6e6e73, 0x1d1d1f,
+            ]
+        } else {
+            [
+                0x000000, 0x1c1c1e, 0x2c2c2e, 0x38383a, 0xd1d1d6, 0x8e8e93, 0xf5f5f7,
+            ]
+        };
+        let bg = unsafe { Self::brush(&target_base, colors[0], 1.0) }?;
+        let panel = unsafe { Self::brush(&target_base, colors[1], 1.0) }?;
+        let raised = unsafe { Self::brush(&target_base, colors[2], 1.0) }?;
+        let line = unsafe { Self::brush(&target_base, colors[3], 1.0) }?;
+        let text = unsafe { Self::brush(&target_base, colors[4], 1.0) }?;
+        let muted = unsafe { Self::brush(&target_base, colors[5], 1.0) }?;
+        let bright = unsafe { Self::brush(&target_base, colors[6], 1.0) }?;
         let accent = unsafe { Self::brush(&target_base, 0x0a84ff, 1.0) }?;
         let selection = unsafe { Self::brush(&target_base, 0x193451, 1.0) }?;
         let selected_text = unsafe { Self::brush(&target_base, 0x0a84ff, 0.46) }?;
+        let keyword = unsafe { Self::brush(&target_base, 0x64d2ff, 1.0) }?;
+        let literal = unsafe { Self::brush(&target_base, 0xff9f0a, 1.0) }?;
+        let comment = unsafe { Self::brush(&target_base, 0x8e8e93, 1.0) }?;
         let width = width as f32;
         let height = height as f32;
         let scale = self.dpi / 96.0;
@@ -417,9 +436,9 @@ impl DirectEditorRenderer {
                         Self::fill(
                             &target_base,
                             &selected_text,
-                            tree_w + (52.0 + left_cells * 8.9) * scale,
+                            tree_w + (52.0 + left_cells * self.code_cell) * scale,
                             y - 2.0 * scale,
-                            tree_w + (52.0 + right_cells * 8.9) * scale,
+                            tree_w + (52.0 + right_cells * self.code_cell) * scale,
                             y + 21.0 * scale,
                         )
                     };
@@ -444,34 +463,39 @@ impl DirectEditorRenderer {
                 .filter(|_| index == scene.caret_line)
                 .map(|age| (1.0 - (age / 0.16).clamp(0.0, 1.0)) * 7.0 * scale)
                 .unwrap_or(0.0);
-            let code_brush = if value.trim_start().starts_with("//") {
-                &muted
-            } else if value.contains("fn ") || value.contains("struct ") {
-                &accent
-            } else {
-                &text
-            };
-            unsafe {
-                Self::text(
-                    &target_base,
-                    &self.code_format,
-                    code_brush,
-                    value,
-                    D2D_RECT_F {
-                        left: tree_w + 52.0 * scale + edit_offset,
-                        top: y,
-                        right: editor_right - 10.0 * scale,
-                        bottom: y + line_step,
-                    },
-                )
-            };
+            let mut token_x = tree_w + 52.0 * scale + edit_offset;
+            for token in editor_core::syntax_tokens(value, scene.file_name) {
+                let token_cells =
+                    Self::visual_cells(&token.text, token.text.chars().count()) as f32;
+                let token_brush = match token.kind {
+                    TokenKind::Keyword => &keyword,
+                    TokenKind::Literal => &literal,
+                    TokenKind::Comment => &comment,
+                    TokenKind::Plain => &text,
+                };
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.code_format,
+                        token_brush,
+                        &token.text,
+                        D2D_RECT_F {
+                            left: token_x,
+                            top: y,
+                            right: editor_right - 10.0 * scale,
+                            bottom: y + line_step,
+                        },
+                    )
+                };
+                token_x += token_cells * self.code_cell * scale;
+            }
         }
         let caret_cells = scene
             .lines
             .get(scene.caret_line)
             .map(|line| Self::visual_cells(line, scene.caret_column))
             .unwrap_or(0);
-        let caret_x = tree_w + (52.0 + caret_cells as f32 * 8.9) * scale;
+        let caret_x = tree_w + (52.0 + caret_cells as f32 * self.code_cell) * scale;
         let caret_y = code_top + scene.caret_line as f32 * line_step;
         if (scene.animation_seconds * 2.0) as u32 & 1 == 0 {
             unsafe {
@@ -512,11 +536,61 @@ impl DirectEditorRenderer {
                                 scene.ime_composition,
                                 scene.ime_composition.chars().count(),
                             ) as f32
-                                * 8.9)
+                                * self.code_cell)
                             * scale,
                     caret_y + 23.0 * scale,
                 )
             };
+        }
+        if !scene.completions.is_empty() && scene.ime_composition.is_empty() {
+            let popup_top = caret_y + 27.0 * scale;
+            let popup_width = 230.0 * scale;
+            let popup_height = (scene.completions.len() as f32 * 28.0 + 10.0) * scale;
+            unsafe {
+                Self::rounded(
+                    &target_base,
+                    &raised,
+                    D2D_RECT_F {
+                        left: caret_x,
+                        top: popup_top,
+                        right: (caret_x + popup_width).min(editor_right - 8.0 * scale),
+                        bottom: popup_top + popup_height,
+                    },
+                    9.0 * scale,
+                )
+            };
+            for (index, candidate) in scene.completions.iter().enumerate() {
+                if index == 0 {
+                    unsafe {
+                        Self::rounded(
+                            &target_base,
+                            &selection,
+                            D2D_RECT_F {
+                                left: caret_x + 5.0 * scale,
+                                top: popup_top + (5.0 + index as f32 * 28.0) * scale,
+                                right: (caret_x + popup_width - 5.0 * scale)
+                                    .min(editor_right - 12.0 * scale),
+                                bottom: popup_top + (31.0 + index as f32 * 28.0) * scale,
+                            },
+                            6.0 * scale,
+                        )
+                    };
+                }
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.code_format,
+                        if index == 0 { &bright } else { &text },
+                        candidate,
+                        D2D_RECT_F {
+                            left: caret_x + 12.0 * scale,
+                            top: popup_top + (8.0 + index as f32 * 28.0) * scale,
+                            right: (caret_x + popup_width).min(editor_right),
+                            bottom: popup_top + (34.0 + index as f32 * 28.0) * scale,
+                        },
+                    )
+                };
+            }
         }
 
         unsafe {
@@ -524,7 +598,11 @@ impl DirectEditorRenderer {
                 &target_base,
                 &self.ui_format,
                 &bright,
-                "CALL HIERARCHY",
+                if scene.ui_chinese {
+                    "调用层级"
+                } else {
+                    "CALL HIERARCHY"
+                },
                 D2D_RECT_F {
                     left: editor_right + 18.0 * scale,
                     top: header_h + 14.0 * scale,
@@ -601,9 +679,17 @@ impl DirectEditorRenderer {
                 &self.ui_format,
                 &bright,
                 if scene.terminal_open {
-                    "v  TERMINAL"
+                    if scene.ui_chinese {
+                        "v  终端"
+                    } else {
+                        "v  TERMINAL"
+                    }
                 } else {
-                    ">  TERMINAL"
+                    if scene.ui_chinese {
+                        ">  终端"
+                    } else {
+                        ">  TERMINAL"
+                    }
                 },
                 D2D_RECT_F {
                     left: 16.0 * scale,

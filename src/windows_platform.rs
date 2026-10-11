@@ -23,6 +23,11 @@ pub const COMMAND_CUT: Wparam = 1007;
 pub const COMMAND_UNDO: Wparam = 1008;
 pub const COMMAND_REDO: Wparam = 1009;
 pub const COMMAND_REVEAL_FOLDER: Wparam = 1010;
+pub const COMMAND_THEME_DARK: Wparam = 1011;
+pub const COMMAND_THEME_LIGHT: Wparam = 1012;
+pub const COMMAND_LANGUAGE_TOGGLE: Wparam = 1013;
+pub const COMMAND_FONT_INCREASE: Wparam = 1014;
+pub const COMMAND_FONT_DECREASE: Wparam = 1015;
 
 const CF_UNICODETEXT: Uint = 13;
 const GMEM_MOVEABLE: Uint = 0x0002;
@@ -209,6 +214,7 @@ pub fn install_native_menu(window: Hwnd) {
         let menu = CreateMenu();
         let file_menu = CreatePopupMenu();
         let edit_menu = CreatePopupMenu();
+        let view_menu = CreatePopupMenu();
         let platform_menu = CreatePopupMenu();
         let open_file = wide("Open file...\tCtrl+O");
         let open_folder = wide("Open project folder...");
@@ -220,6 +226,11 @@ pub fn install_native_menu(window: Hwnd) {
         let copy = wide("Copy\tCtrl+C");
         let cut = wide("Cut\tCtrl+X");
         let paste = wide("Paste\tCtrl+V");
+        let dark = wide("Dark theme");
+        let light = wide("Light theme");
+        let language = wide("English / 中文");
+        let font_increase = wide("Increase code size\tCtrl++");
+        let font_decrease = wide("Decrease code size\tCtrl+-");
         AppendMenuW(file_menu, MF_STRING, COMMAND_OPEN_FILE, open_file.as_ptr());
         AppendMenuW(
             file_menu,
@@ -250,11 +261,33 @@ pub fn install_native_menu(window: Hwnd) {
         AppendMenuW(edit_menu, MF_STRING, COMMAND_COPY_DIAGNOSTIC, copy.as_ptr());
         AppendMenuW(edit_menu, MF_STRING, COMMAND_CUT, cut.as_ptr());
         AppendMenuW(edit_menu, MF_STRING, COMMAND_PASTE, paste.as_ptr());
+        AppendMenuW(view_menu, MF_STRING, COMMAND_THEME_DARK, dark.as_ptr());
+        AppendMenuW(view_menu, MF_STRING, COMMAND_THEME_LIGHT, light.as_ptr());
+        AppendMenuW(
+            view_menu,
+            MF_STRING,
+            COMMAND_LANGUAGE_TOGGLE,
+            language.as_ptr(),
+        );
+        AppendMenuW(
+            view_menu,
+            MF_STRING,
+            COMMAND_FONT_INCREASE,
+            font_increase.as_ptr(),
+        );
+        AppendMenuW(
+            view_menu,
+            MF_STRING,
+            COMMAND_FONT_DECREASE,
+            font_decrease.as_ptr(),
+        );
         let file_label = wide("File");
         let edit_label = wide("Edit");
+        let view_label = wide("View");
         let platform_label = wide("Windows API");
         AppendMenuW(menu, MF_POPUP, file_menu as Wparam, file_label.as_ptr());
         AppendMenuW(menu, MF_POPUP, edit_menu as Wparam, edit_label.as_ptr());
+        AppendMenuW(menu, MF_POPUP, view_menu as Wparam, view_label.as_ptr());
         AppendMenuW(
             menu,
             MF_POPUP,

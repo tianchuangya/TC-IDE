@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::ptr;
 use std::time::Instant;
 
+use crate::editor_core;
+
 #[path = "windows_platform.rs"]
 mod platform;
 #[path = "windows_renderer.rs"]
@@ -54,6 +56,7 @@ const WM_TIMER: Uint = 0x0113;
 const WS_OVERLAPPEDWINDOW: Dword = 0x00cf0000;
 const WS_VISIBLE: Dword = 0x10000000;
 const VK_BACK: u32 = 0x08;
+const VK_TAB: u32 = 0x09;
 const VK_DELETE: u32 = 0x2e;
 const VK_DOWN: u32 = 0x28;
 const VK_END: u32 = 0x23;
@@ -96,6 +99,9 @@ struct WindowsAppState {
     undo_stack: Vec<EditorSnapshot>,
     redo_stack: Vec<EditorSnapshot>,
     ime_composition: String,
+    light_theme: bool,
+    ui_chinese: bool,
+    code_zoom: i32,
     terminal_open: bool,
     terminal_motion: f32,
     terminal_velocity: f32,
@@ -137,6 +143,9 @@ impl WindowsAppState {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             ime_composition: String::new(),
+            light_theme: false,
+            ui_chinese: false,
+            code_zoom: 0,
             terminal_open: false,
             terminal_motion: 0.0,
             terminal_velocity: 0.0,
@@ -268,6 +277,31 @@ impl WindowsAppState {
         }
         self.last_edit = Some(Instant::now());
         self.status = "Edited with Unicode-aware caret mapping".into();
+    }
+
+    fn completions(&self) -> Vec<String> {
+        editor_core::completions(
+            &self.file_name,
+            &self.lines[self.caret_line],
+            self.caret_column,
+        )
+    }
+
+    fn accept_completion(&mut self) {
+        let Some(candidate) = self.completions().into_iter().next() else {
+            return;
+        };
+        let prefix =
+            editor_core::completion_prefix(&self.lines[self.caret_line], self.caret_column);
+        if prefix.is_empty() {
+            return;
+        }
+        self.selection_anchor = Some(TextPosition {
+            line: self.caret_line,
+            column: self.caret_column.saturating_sub(prefix.chars().count()),
+        });
+        self.insert_text(&candidate);
+        self.status = format!("Completed {candidate}");
     }
 
     fn insert_char(&mut self, value: char) {
@@ -432,7 +466,11 @@ impl WindowsAppState {
                 self.redo_stack.clear();
                 self.ime_composition.clear();
                 self.started = Instant::now();
-                self.status = format!("Opened {}", path.display());
+                self.status = format!(
+                    "Opened {}  ·  {}",
+                    path.display(),
+                    editor_core::language_for_file(&self.file_name)
+                );
             }
             Err(error) => self.status = format!("Open failed: {error}"),
         }
@@ -685,7 +723,8 @@ fn editor_position_at(window: Hwnd, x: i32, y: i32) -> Option<TextPosition> {
     APP.with(|cell| {
         let app = cell.borrow();
         let value = app.lines.get(line)?;
-        let target = ((x as f32 - tree_w - 52.0 * scale) / (8.9 * scale)).max(0.0);
+        let code_cell = 8.9 + app.code_zoom.clamp(-2, 8) as f32 * 0.6;
+        let target = ((x as f32 - tree_w - 52.0 * scale) / (code_cell * scale)).max(0.0);
         let mut cells = 0.0;
         for (column, ch) in value.chars().enumerate() {
             let width = character_cells(ch) as f32;
@@ -734,6 +773,24 @@ fn perform_command(window: Hwnd, command: Wparam) {
             }
             platform::COMMAND_UNDO => app.undo(),
             platform::COMMAND_REDO => app.redo(),
+            platform::COMMAND_THEME_DARK => {
+                app.light_theme = false;
+                app.status = "Dark theme enabled".into();
+            }
+            platform::COMMAND_THEME_LIGHT => {
+                app.light_theme = true;
+                app.status = "Light theme enabled".into();
+            }
+            platform::COMMAND_LANGUAGE_TOGGLE => {
+                app.ui_chinese = !app.ui_chinese;
+                app.status = if app.ui_chinese {
+                    "已切换为中文界面".into()
+                } else {
+                    "English interface enabled".into()
+                };
+            }
+            platform::COMMAND_FONT_INCREASE => app.code_zoom = (app.code_zoom + 1).min(8),
+            platform::COMMAND_FONT_DECREASE => app.code_zoom = (app.code_zoom - 1).max(-2),
             platform::COMMAND_OPEN_FOLDER => {
                 if let Some(path) = platform::choose_folder(window) {
                     app.open_project(path);
@@ -750,6 +807,12 @@ fn perform_command(window: Hwnd, command: Wparam) {
             _ => {}
         }
     });
+    if matches!(
+        command,
+        platform::COMMAND_FONT_INCREASE | platform::COMMAND_FONT_DECREASE
+    ) {
+        RENDERER.with(|cell| *cell.borrow_mut() = None);
+    }
     invalidate(window);
 }
 
@@ -780,6 +843,7 @@ fn render_window(window: Hwnd) {
                     })
                 })
                 .unwrap_or_default();
+            let completions = app.completions();
             let scene = WindowsScene {
                 file_name: &app.file_name,
                 project_name: app
@@ -795,6 +859,9 @@ fn render_window(window: Hwnd) {
                     .selection_range()
                     .map(|(start, end)| ((start.line, start.column), (end.line, end.column))),
                 ime_composition: &app.ime_composition,
+                completions: &completions,
+                light_theme: app.light_theme,
+                ui_chinese: app.ui_chinese,
                 status: &app.status,
                 terminal_lines: &terminal_lines,
                 terminal_input: &app.terminal_input,
@@ -805,7 +872,7 @@ fn render_window(window: Hwnd) {
             };
             let mut renderer = renderer_cell.borrow_mut();
             if renderer.is_none() {
-                *renderer = unsafe { DirectEditorRenderer::new(dpi) }.ok();
+                *renderer = unsafe { DirectEditorRenderer::new(dpi, app.code_zoom) }.ok();
             }
             if let Some(renderer) = renderer.as_mut() {
                 let _ = unsafe { renderer.render(window, width, height, &scene) };
@@ -911,6 +978,8 @@ unsafe extern "system" fn window_proc(
                     0x58 => platform::COMMAND_CUT,
                     0x59 => platform::COMMAND_REDO,
                     0x5a => platform::COMMAND_UNDO,
+                    0xbb | 0x6b => platform::COMMAND_FONT_INCREASE,
+                    0xbd | 0x6d => platform::COMMAND_FONT_DECREASE,
                     0x53 => {
                         APP.with(|cell| cell.borrow_mut().save());
                         invalidate(window);
@@ -930,6 +999,7 @@ unsafe extern "system" fn window_proc(
                     match w_param as u32 {
                         VK_BACK => app.backspace(),
                         VK_DELETE => app.delete_forward(),
+                        VK_TAB => app.accept_completion(),
                         VK_HOME => app.caret_column = 0,
                         VK_END => {
                             app.caret_column = app.lines[app.caret_line].chars().count();

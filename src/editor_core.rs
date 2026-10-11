@@ -1,0 +1,338 @@
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenKind {
+    Plain,
+    Keyword,
+    Literal,
+    Comment,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SyntaxToken {
+    pub text: String,
+    pub kind: TokenKind,
+}
+
+pub fn language_for_file(name: &str) -> &'static str {
+    match name
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "c" | "h" => "C",
+        "cc" | "cpp" | "cxx" | "hpp" | "hh" => "C++",
+        "rs" => "Rust",
+        "py" | "pyw" => "Python",
+        "java" => "Java",
+        "kt" | "kts" => "Kotlin",
+        "js" | "jsx" | "mjs" | "ts" | "tsx" => "TypeScript / JavaScript",
+        "go" => "Go",
+        "html" | "htm" | "css" | "scss" | "sass" | "vue" | "svelte" => "Web / HTML / CSS",
+        "cs" => "C#",
+        "swift" => "Swift",
+        "sql" => "SQL",
+        "sh" | "bash" | "zsh" | "fish" => "Shell",
+        "json" | "jsonc" => "JSON",
+        "toml" => "TOML",
+        "yaml" | "yml" => "YAML",
+        "md" | "mdx" => "Markdown",
+        _ => "Plain Text",
+    }
+}
+
+pub fn comment_markers(name: &str) -> &'static [&'static str] {
+    match name
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "py" | "pyw" | "rb" | "sh" | "bash" | "zsh" | "fish" | "r" => &["#"],
+        "sql" | "lua" | "hs" | "lhs" => &["--"],
+        "html" | "htm" | "md" | "mdx" => &["<!--"],
+        "css" | "scss" | "sass" => &["/*"],
+        "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "rs" | "java" | "kt" | "kts" | "swift"
+        | "go" | "cs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "dart" | "php" | "scala" | "vue"
+        | "svelte" => &["//", "/*"],
+        _ => &[],
+    }
+}
+
+pub fn comment_bounds(line: &str, file: &str) -> Option<(usize, usize, usize)> {
+    let (marker_start, marker) = comment_markers(file)
+        .iter()
+        .filter_map(|marker| line.find(marker).map(|index| (index, *marker)))
+        .min_by_key(|(index, _)| *index)?;
+    if marker == "#" && marker_start == 0 && line.starts_with("#!") {
+        return None;
+    }
+    let marker_end = marker_start + marker.len();
+    let after = &line[marker_end..];
+    let leading = after.len() - after.trim_start().len();
+    let content_start = marker_end + leading;
+    let closing = match marker {
+        "/*" => "*/",
+        "<!--" => "-->",
+        _ => "",
+    };
+    let raw_end = if closing.is_empty() {
+        line.len()
+    } else {
+        after
+            .find(closing)
+            .map(|offset| marker_end + offset)
+            .unwrap_or(line.len())
+    };
+    let content_end = content_start + line[content_start..raw_end].trim_end().len();
+    Some((marker_start, content_start, content_end))
+}
+
+pub fn completion_words(language: &str) -> &'static [&'static str] {
+    match language {
+        "C" => &[
+            "auto", "break", "case", "char", "const", "continue", "define", "double", "else",
+            "enum", "extern", "float", "for", "if", "include", "inline", "int", "long", "NULL",
+            "return", "short", "signed", "sizeof", "size_t", "static", "struct", "switch",
+            "typedef", "union", "unsigned", "void", "volatile", "while",
+        ],
+        "C++" => &[
+            "alignas",
+            "auto",
+            "bool",
+            "break",
+            "case",
+            "catch",
+            "char",
+            "class",
+            "concept",
+            "const",
+            "constexpr",
+            "delete",
+            "else",
+            "enum",
+            "explicit",
+            "export",
+            "false",
+            "float",
+            "for",
+            "friend",
+            "if",
+            "include",
+            "inline",
+            "int",
+            "namespace",
+            "new",
+            "nullptr",
+            "operator",
+            "private",
+            "protected",
+            "public",
+            "requires",
+            "return",
+            "static",
+            "std",
+            "string",
+            "struct",
+            "template",
+            "this",
+            "throw",
+            "true",
+            "try",
+            "typename",
+            "using",
+            "vector",
+            "virtual",
+            "void",
+            "while",
+        ],
+        "Rust" => &[
+            "async", "await", "const", "crate", "enum", "fn", "impl", "let", "match", "mod", "mut",
+            "pub", "Result", "self", "struct", "trait", "use", "where",
+        ],
+        "Python" => &[
+            "and", "async", "await", "class", "def", "elif", "else", "except", "False", "for",
+            "from", "if", "import", "in", "lambda", "None", "not", "or", "return", "self", "True",
+            "try", "with", "yield",
+        ],
+        "TypeScript / JavaScript" | "Web / HTML / CSS" => &[
+            "async",
+            "await",
+            "class",
+            "const",
+            "export",
+            "extends",
+            "function",
+            "import",
+            "interface",
+            "let",
+            "new",
+            "return",
+            "type",
+            "var",
+        ],
+        "Go" => &[
+            "chan",
+            "const",
+            "defer",
+            "func",
+            "go",
+            "import",
+            "interface",
+            "map",
+            "package",
+            "range",
+            "return",
+            "struct",
+            "type",
+            "var",
+        ],
+        "Java" | "Kotlin" => &[
+            "class",
+            "extends",
+            "fun",
+            "import",
+            "interface",
+            "new",
+            "package",
+            "private",
+            "protected",
+            "public",
+            "return",
+            "static",
+            "val",
+            "var",
+        ],
+        _ => &[
+            "class", "const", "function", "import", "return", "struct", "type", "value",
+        ],
+    }
+}
+
+pub fn completion_prefix(line: &str, character_column: usize) -> String {
+    line.chars()
+        .take(character_column)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .take_while(|value| value.is_ascii_alphanumeric() || *value == '_')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+pub fn completions(file: &str, line: &str, column: usize) -> Vec<String> {
+    let prefix = completion_prefix(line, column);
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+    completion_words(language_for_file(file))
+        .iter()
+        .filter(|word| word.starts_with(&prefix) && **word != prefix)
+        .take(6)
+        .map(|word| (*word).to_string())
+        .collect()
+}
+
+pub fn syntax_tokens(value: &str, file: &str) -> Vec<SyntaxToken> {
+    if let Some((comment_start, _, _)) = comment_bounds(value, file) {
+        let mut tokens = syntax_tokens_without_comment(&value[..comment_start], file);
+        tokens.push(SyntaxToken {
+            text: value[comment_start..].into(),
+            kind: TokenKind::Comment,
+        });
+        return tokens;
+    }
+    syntax_tokens_without_comment(value, file)
+}
+
+fn syntax_tokens_without_comment(value: &str, file: &str) -> Vec<SyntaxToken> {
+    let keywords = completion_words(language_for_file(file));
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let start = index;
+        let kind = if chars[index] == '"' || chars[index] == '\'' {
+            let quote = chars[index];
+            index += 1;
+            while index < chars.len() {
+                let done = chars[index] == quote && chars[index.saturating_sub(1)] != '\\';
+                index += 1;
+                if done {
+                    break;
+                }
+            }
+            TokenKind::Literal
+        } else if chars[index].is_ascii_alphabetic() || chars[index] == '_' {
+            index += 1;
+            while index < chars.len()
+                && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
+            {
+                index += 1;
+            }
+            let word = chars[start..index].iter().collect::<String>();
+            result.push(SyntaxToken {
+                kind: if keywords.contains(&word.as_str()) {
+                    TokenKind::Keyword
+                } else {
+                    TokenKind::Plain
+                },
+                text: word,
+            });
+            continue;
+        } else if chars[index].is_ascii_digit() {
+            index += 1;
+            while index < chars.len()
+                && (chars[index].is_ascii_alphanumeric() || chars[index] == '.')
+            {
+                index += 1;
+            }
+            TokenKind::Literal
+        } else {
+            index += 1;
+            while index < chars.len()
+                && !chars[index].is_ascii_alphanumeric()
+                && chars[index] != '_'
+                && chars[index] != '"'
+                && chars[index] != '\''
+            {
+                index += 1;
+            }
+            TokenKind::Plain
+        };
+        result.push(SyntaxToken {
+            text: chars[start..index].iter().collect(),
+            kind,
+        });
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn c_preprocessor_is_not_a_comment() {
+        assert_eq!(comment_bounds("#include <stdio.h>", "main.c"), None);
+        assert_eq!(language_for_file("main.cpp"), "C++");
+    }
+
+    #[test]
+    fn completion_follows_the_file_language() {
+        assert!(completions("main.cpp", "cons", 4).contains(&"const".into()));
+        assert!(!completions("main.c", "cla", 3).contains(&"class".into()));
+    }
+
+    #[test]
+    fn comments_are_separate_syntax_tokens() {
+        let tokens = syntax_tokens("let value = 3; // note", "main.rs");
+        assert_eq!(
+            tokens.last().map(|token| token.kind),
+            Some(TokenKind::Comment)
+        );
+    }
+}
