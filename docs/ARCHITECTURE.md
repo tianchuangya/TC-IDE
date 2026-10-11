@@ -27,11 +27,13 @@ TC-IDE 不把 Linux 可执行文件改名后当作 Windows 或 macOS 包。入�
 | --- | --- | --- | --- |
 | 原生窗口 | X11（已实现） | Win32 基础窗口（已建立） | 独立入口（待实现） |
 | 文本/GPU 渲染 | Cairo/Pango | DirectWrite/Direct2D（待实现） | CoreText/Metal（待实现） |
-| 系统剪贴板 | X11 selection | Windows Clipboard（待实现） | NSPasteboard（待实现） |
-| 文件选择 | zenity（将替换为适配器） | IFileDialog（待实现） | NSOpenPanel（待实现） |
-| 集成终端 | shell/PTY | ConPTY + PowerShell（待实现） | PTY + 用户 shell（待实现） |
-| 打开输出目录 | xdg-open/gio | Explorer/ShellExecute（待实现） | NSWorkspace/open（待实现） |
+| 系统剪贴板 | X11 selection | Windows Clipboard UTF-16（平台层已接入，待编辑器共享核心） | NSPasteboard（待实现） |
+| 文件选择 | zenity（将替换为适配器） | GetOpenFileNameW（已接入） | NSOpenPanel（待实现） |
+| 集成终端 | shell/PTY | Windows Terminal/PowerShell 启动（已接入），ConPTY 流（待实现） | PTY + 用户 shell（待实现） |
+| 打开输出目录 | xdg-open/gio | Explorer/ShellExecuteW（已接入） | NSWorkspace/open（待实现） |
 | 安装包 | deb/AppImage（待接入真实打包） | MSIX/NSIS（待实现） | dmg/pkg（待实现） |
+
+Windows 后端还启用了 Per-monitor DPI V2，并处理 `WM_DPICHANGED` 推荐窗口尺寸。其原生菜单和快捷键会实际执行文件选择、UTF-16 剪贴板读写、Explorer 打开目录和终端启动，用于在编辑器共享核心迁移前验证平台适配器。
 
 ## 关系图的层级语义
 

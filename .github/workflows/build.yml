@@ -29,8 +29,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - name: Check native Win32 backend
-        run: cargo check --all-targets
+      - name: Build and link native Win32 backend
+        run: cargo build --release
 
   macos:
     runs-on: macos-15
@@ -38,5 +38,5 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - name: Check isolated macOS backend
-        run: cargo check --all-targets
+      - name: Build isolated macOS backend
+        run: cargo build --release
