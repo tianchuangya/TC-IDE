@@ -377,6 +377,47 @@ pub fn choose_file(window: Hwnd) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf16_lossy(&file[..length])))
 }
 
+pub fn choose_background(window: Hwnd) -> Option<PathBuf> {
+    let mut file = [0_u16; 32_768];
+    let title = wide("Choose a TC-IDE background image");
+    let filter = "Images\0*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff\0All files\0*.*\0\0"
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    let mut dialog = OpenFileName {
+        struct_size: std::mem::size_of::<OpenFileName>() as Dword,
+        owner: window,
+        instance: ptr::null_mut(),
+        filter: filter.as_ptr(),
+        custom_filter: ptr::null_mut(),
+        max_custom_filter: 0,
+        filter_index: 1,
+        file: file.as_mut_ptr(),
+        max_file: file.len() as Dword,
+        file_title: ptr::null_mut(),
+        max_file_title: 0,
+        initial_directory: ptr::null(),
+        title: title.as_ptr(),
+        flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST,
+        file_offset: 0,
+        file_extension: 0,
+        default_extension: ptr::null(),
+        custom_data: 0,
+        hook: ptr::null_mut(),
+        template_name: ptr::null(),
+        reserved: ptr::null_mut(),
+        reserved_dword: 0,
+        flags_ex: 0,
+    };
+    if unsafe { GetOpenFileNameW(&mut dialog) } == 0 {
+        return None;
+    }
+    let length = file
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(file.len());
+    Some(PathBuf::from(String::from_utf16_lossy(&file[..length])))
+}
+
 pub fn choose_folder(window: Hwnd) -> Option<PathBuf> {
     let title = wide("Open a project folder in TC-IDE");
     let mut display_name = [0u16; 260];

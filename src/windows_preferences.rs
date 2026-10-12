@@ -10,6 +10,28 @@ pub struct WindowsPreferences {
     pub project_environment: usize,
     pub language_installed: Vec<bool>,
     pub language_versions: Vec<usize>,
+    pub background_path: Option<PathBuf>,
+    pub background_opacity: f32,
+    pub background_offset_x: f32,
+    pub background_offset_y: f32,
+    pub background_zoom: f32,
+}
+
+impl WindowsPreferences {
+    fn normalize_background(&mut self) {
+        self.background_opacity = if self.background_opacity == 0.0 {
+            0.24
+        } else {
+            self.background_opacity.clamp(0.05, 1.0)
+        };
+        self.background_offset_x = self.background_offset_x.clamp(-1.0, 1.0);
+        self.background_offset_y = self.background_offset_y.clamp(-1.0, 1.0);
+        self.background_zoom = if self.background_zoom == 0.0 {
+            1.0
+        } else {
+            self.background_zoom.clamp(1.0, 3.0)
+        };
+    }
 }
 
 fn path() -> PathBuf {
@@ -44,9 +66,17 @@ pub fn load() -> WindowsPreferences {
                     .map(|item| item.parse().unwrap_or(0))
                     .collect()
             }
+            "background_path" if !value.is_empty() => {
+                preferences.background_path = Some(PathBuf::from(value))
+            }
+            "background_opacity" => preferences.background_opacity = value.parse().unwrap_or(0.24),
+            "background_offset_x" => preferences.background_offset_x = value.parse().unwrap_or(0.0),
+            "background_offset_y" => preferences.background_offset_y = value.parse().unwrap_or(0.0),
+            "background_zoom" => preferences.background_zoom = value.parse().unwrap_or(1.0),
             _ => {}
         }
     }
+    preferences.normalize_background();
     preferences
 }
 
@@ -58,7 +88,7 @@ pub fn save(preferences: &WindowsPreferences) -> std::io::Result<()> {
     fs::write(
         path,
         format!(
-            "theme={}\nlanguage={}\ncode_zoom={}\nproject_language={}\nproject_environment={}\nlanguage_installed={}\nlanguage_versions={}\n",
+            "theme={}\nlanguage={}\ncode_zoom={}\nproject_language={}\nproject_environment={}\nlanguage_installed={}\nlanguage_versions={}\nbackground_path={}\nbackground_opacity={}\nbackground_offset_x={}\nbackground_offset_y={}\nbackground_zoom={}\n",
             if preferences.light_theme {
                 "light"
             } else {
@@ -84,6 +114,15 @@ pub fn save(preferences: &WindowsPreferences) -> std::io::Result<()> {
                 .map(usize::to_string)
                 .collect::<Vec<_>>()
                 .join(","),
+            preferences
+                .background_path
+                .as_ref()
+                .map(|path| path.to_string_lossy())
+                .unwrap_or_default(),
+            preferences.background_opacity,
+            preferences.background_offset_x,
+            preferences.background_offset_y,
+            preferences.background_zoom,
         ),
     )
 }

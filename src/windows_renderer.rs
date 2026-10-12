@@ -1,16 +1,16 @@
 use std::ffi::c_void;
 
-use windows::core::{w, Interface, Result};
-use windows::Win32::Foundation::HWND;
+use windows::core::{w, Interface, Result, PCWSTR};
+use windows::Win32::Foundation::{GENERIC_READ, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_UNKNOWN, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1RenderTarget,
-    ID2D1SolidColorBrush, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
-    D2D1_ROUNDED_RECT,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1RenderTarget,
+    ID2D1SolidColorBrush, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
+    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
@@ -18,6 +18,13 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_MEASURING_MODE_NATURAL,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
+use windows::Win32::Graphics::Imaging::{
+    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory,
+    WICBitmapDitherTypeNone, WICBitmapPaletteTypeMedianCut, WICDecodeMetadataCacheOnLoad,
+};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+};
 
 use crate::editor_core::{self, TokenKind};
 
@@ -48,6 +55,11 @@ pub struct WindowsScene<'a> {
     pub selected_language: usize,
     pub language_installed: &'a [bool],
     pub language_versions: &'a [usize],
+    pub background_path: Option<&'a str>,
+    pub background_opacity: f32,
+    pub background_offset_x: f32,
+    pub background_offset_y: f32,
+    pub background_zoom: f32,
     pub status: &'a str,
     pub terminal_lines: &'a [String],
     pub terminal_input: &'a str,
@@ -65,6 +77,9 @@ pub struct DirectEditorRenderer {
     ui_format: IDWriteTextFormat,
     small_format: IDWriteTextFormat,
     code_cell: f32,
+    wic_factory: IWICImagingFactory,
+    background_bitmap: Option<ID2D1Bitmap>,
+    background_path: Option<String>,
     dpi: f32,
 }
 
@@ -90,10 +105,13 @@ impl DirectEditorRenderer {
     }
 
     pub unsafe fn new(dpi: u32, code_zoom: i32) -> Result<Self> {
+        let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
         let d2d_factory: ID2D1Factory =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }?;
         let dwrite_factory: IDWriteFactory =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }?;
+        let wic_factory: IWICImagingFactory =
+            unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }?;
         let scale = dpi.max(96) as f32 / 96.0;
         let code_format = unsafe {
             dwrite_factory.CreateTextFormat(
@@ -136,8 +154,48 @@ impl DirectEditorRenderer {
             ui_format,
             small_format,
             code_cell: 8.9 + code_zoom.clamp(-2, 8) as f32 * 0.6,
+            wic_factory,
+            background_bitmap: None,
+            background_path: None,
             dpi: dpi.max(96) as f32,
         })
+    }
+
+    unsafe fn sync_background(&mut self, target: &ID2D1RenderTarget, requested: Option<&str>) {
+        if self.background_path.as_deref() == requested {
+            return;
+        }
+        self.background_bitmap = None;
+        self.background_path = requested.map(str::to_string);
+        let Some(path) = requested else { return };
+        let wide = path
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let loaded = (|| -> Result<ID2D1Bitmap> {
+            let decoder = unsafe {
+                self.wic_factory.CreateDecoderFromFilename(
+                    PCWSTR(wide.as_ptr()),
+                    None,
+                    GENERIC_READ,
+                    WICDecodeMetadataCacheOnLoad,
+                )
+            }?;
+            let frame = unsafe { decoder.GetFrame(0) }?;
+            let converter = unsafe { self.wic_factory.CreateFormatConverter() }?;
+            unsafe {
+                converter.Initialize(
+                    &frame,
+                    &GUID_WICPixelFormat32bppPBGRA,
+                    WICBitmapDitherTypeNone,
+                    None,
+                    0.0,
+                    WICBitmapPaletteTypeMedianCut,
+                )
+            }?;
+            unsafe { target.CreateBitmapFromWicBitmap(&converter, None) }
+        })();
+        self.background_bitmap = loaded.ok();
     }
 
     pub unsafe fn resize(&mut self, width: u32, height: u32, dpi: u32) {
@@ -179,6 +237,8 @@ impl DirectEditorRenderer {
             self.d2d_factory
                 .CreateHwndRenderTarget(&properties, &window_properties)
         }?;
+        self.background_bitmap = None;
+        self.background_path = None;
         self.target = Some(target.clone());
         Ok(target)
     }
@@ -265,6 +325,7 @@ impl DirectEditorRenderer {
     ) -> Result<()> {
         let target = unsafe { self.ensure_target(window, width, height) }?;
         let target_base: ID2D1RenderTarget = target.cast()?;
+        unsafe { self.sync_background(&target_base, scene.background_path) };
         let colors = if scene.light_theme {
             [
                 0xf5f5f7, 0xffffff, 0xf2f2f7, 0xd1d1d6, 0x3a3a3c, 0x6e6e73, 0x1d1d1f,
@@ -314,6 +375,41 @@ impl DirectEditorRenderer {
                 body_bottom,
             )
         };
+        if let Some(bitmap) = &self.background_bitmap {
+            let image = unsafe { bitmap.GetSize() };
+            let region = D2D_RECT_F {
+                left: tree_w,
+                top: header_h + 38.0 * scale,
+                right: editor_right,
+                bottom: body_bottom,
+            };
+            let region_w = (region.right - region.left).max(1.0);
+            let region_h = (region.bottom - region.top).max(1.0);
+            let cover = (region_w / image.width.max(1.0)).max(region_h / image.height.max(1.0));
+            let image_scale = cover * scene.background_zoom.clamp(1.0, 3.0);
+            let source_w = (region_w / image_scale).min(image.width);
+            let source_h = (region_h / image_scale).min(image.height);
+            let source_left =
+                (image.width - source_w) * (scene.background_offset_x.clamp(-1.0, 1.0) + 1.0) * 0.5;
+            let source_top = (image.height - source_h)
+                * (scene.background_offset_y.clamp(-1.0, 1.0) + 1.0)
+                * 0.5;
+            let source = D2D_RECT_F {
+                left: source_left,
+                top: source_top,
+                right: source_left + source_w,
+                bottom: source_top + source_h,
+            };
+            unsafe {
+                target_base.DrawBitmap(
+                    bitmap,
+                    Some(&region),
+                    scene.background_opacity.clamp(0.0, 1.0),
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                    Some(&source),
+                )
+            };
+        }
         unsafe {
             Self::fill(
                 &target_base,
@@ -843,8 +939,18 @@ impl DirectEditorRenderer {
                 ),
                 format!("←→  Code font size: {}", 15 + scene.code_zoom),
                 "Font: Cascadia Mono / JetBrains Mono".into(),
-                "Background image: not selected".into(),
-                "Opacity 100%   Crop 0,0   Zoom 1.0x".into(),
+                format!(
+                    "B   Background: {}",
+                    scene.background_path.unwrap_or("not selected")
+                ),
+                format!(
+                    "O/P opacity {:.0}%   WASD crop {:.0},{:.0}   Z/X zoom {:.1}x",
+                    scene.background_opacity * 100.0,
+                    scene.background_offset_x * 100.0,
+                    scene.background_offset_y * 100.0,
+                    scene.background_zoom
+                ),
+                "C   Clear background".into(),
                 "Esc  Close settings".into(),
             ];
             for (index, value) in settings.iter().enumerate() {

@@ -125,6 +125,11 @@ struct WindowsAppState {
     selected_language: usize,
     language_installed: Vec<bool>,
     language_versions: Vec<usize>,
+    background_path: Option<PathBuf>,
+    background_opacity: f32,
+    background_offset_x: f32,
+    background_offset_y: f32,
+    background_zoom: f32,
     terminal_open: bool,
     terminal_motion: f32,
     terminal_velocity: f32,
@@ -221,6 +226,11 @@ impl WindowsAppState {
                         .min(2)
                 })
                 .collect(),
+            background_path: preferences.background_path,
+            background_opacity: preferences.background_opacity,
+            background_offset_x: preferences.background_offset_x,
+            background_offset_y: preferences.background_offset_y,
+            background_zoom: preferences.background_zoom,
             terminal_open: false,
             terminal_motion: 0.0,
             terminal_velocity: 0.0,
@@ -611,6 +621,11 @@ impl WindowsAppState {
             project_environment: self.project_environment,
             language_installed: self.language_installed.clone(),
             language_versions: self.language_versions.clone(),
+            background_path: self.background_path.clone(),
+            background_opacity: self.background_opacity,
+            background_offset_x: self.background_offset_x,
+            background_offset_y: self.background_offset_y,
+            background_zoom: self.background_zoom,
         });
     }
 
@@ -1036,6 +1051,10 @@ fn render_window(window: Hwnd) {
                 .unwrap_or_default();
             let completions = app.completions();
             let create_location = app.create_location.to_string_lossy().into_owned();
+            let background_path = app
+                .background_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned());
             let query = app.workspace_search.to_ascii_lowercase();
             let visible_entries = app
                 .project_entries
@@ -1082,6 +1101,11 @@ fn render_window(window: Hwnd) {
                 selected_language: app.selected_language,
                 language_installed: &app.language_installed,
                 language_versions: &app.language_versions,
+                background_path: background_path.as_deref(),
+                background_opacity: app.background_opacity,
+                background_offset_x: app.background_offset_x,
+                background_offset_y: app.background_offset_y,
+                background_zoom: app.background_zoom,
                 status: &app.status,
                 terminal_lines: &terminal_lines,
                 terminal_input: &app.terminal_input,
@@ -1262,6 +1286,25 @@ unsafe extern "system" fn window_proc(
                         0x1b => app.settings_open = false,
                         0x4c => app.ui_chinese = !app.ui_chinese,
                         0x54 => app.light_theme = !app.light_theme,
+                        0x42 => {
+                            if let Some(path) = platform::choose_background(window) {
+                                app.background_path = Some(path);
+                                app.status = "Background image loaded with Windows WIC".into();
+                            }
+                        }
+                        0x43 => app.background_path = None,
+                        0x4f => app.background_opacity = (app.background_opacity - 0.05).max(0.05),
+                        0x50 => app.background_opacity = (app.background_opacity + 0.05).min(1.0),
+                        0x41 => {
+                            app.background_offset_x = (app.background_offset_x - 0.05).max(-1.0)
+                        }
+                        0x44 => app.background_offset_x = (app.background_offset_x + 0.05).min(1.0),
+                        0x57 => {
+                            app.background_offset_y = (app.background_offset_y - 0.05).max(-1.0)
+                        }
+                        0x53 => app.background_offset_y = (app.background_offset_y + 0.05).min(1.0),
+                        0x5a => app.background_zoom = (app.background_zoom - 0.1).max(1.0),
+                        0x58 => app.background_zoom = (app.background_zoom + 0.1).min(3.0),
                         VK_LEFT => app.code_zoom = (app.code_zoom - 1).max(-2),
                         VK_RIGHT => app.code_zoom = (app.code_zoom + 1).min(8),
                         _ => return,
