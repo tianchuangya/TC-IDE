@@ -65,6 +65,8 @@ pub struct WindowsScene<'a> {
     pub background_zoom: f32,
     pub status: &'a str,
     pub terminal_lines: &'a [String],
+    pub terminal_names: &'a [String],
+    pub active_terminal: usize,
     pub terminal_input: &'a str,
     pub terminal_open: bool,
     pub terminal_progress: f32,
@@ -1058,6 +1060,66 @@ impl DirectEditorRenderer {
         };
         if terminal_progress > 0.08 {
             let output_top = height - terminal_h + 38.0 * scale;
+            let terminal_list_w = 168.0 * scale;
+            let terminal_right = width - terminal_list_w;
+            unsafe {
+                Self::fill(
+                    &target_base,
+                    &line,
+                    terminal_right,
+                    height - terminal_h + 34.0 * scale,
+                    terminal_right + 1.0 * scale,
+                    height,
+                );
+                Self::text(
+                    &target_base,
+                    &self.ui_format,
+                    &accent,
+                    "+  New terminal",
+                    D2D_RECT_F {
+                        left: terminal_right + 15.0 * scale,
+                        top: output_top,
+                        right: width - 8.0 * scale,
+                        bottom: output_top + 28.0 * scale,
+                    },
+                );
+            }
+            for (index, name) in scene.terminal_names.iter().take(6).enumerate() {
+                let top = output_top + (34.0 + index as f32 * 30.0) * scale;
+                if index == scene.active_terminal {
+                    unsafe {
+                        Self::rounded(
+                            &target_base,
+                            &selection,
+                            D2D_RECT_F {
+                                left: terminal_right + 8.0 * scale,
+                                top,
+                                right: width - 8.0 * scale,
+                                bottom: top + 27.0 * scale,
+                            },
+                            6.0 * scale,
+                        )
+                    };
+                }
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        if index == scene.active_terminal {
+                            &bright
+                        } else {
+                            &muted
+                        },
+                        name,
+                        D2D_RECT_F {
+                            left: terminal_right + 15.0 * scale,
+                            top: top + 5.0 * scale,
+                            right: width - 8.0 * scale,
+                            bottom: top + 27.0 * scale,
+                        },
+                    )
+                };
+            }
             for (index, value) in scene.terminal_lines.iter().rev().take(6).rev().enumerate() {
                 unsafe {
                     Self::text(
@@ -1068,7 +1130,7 @@ impl DirectEditorRenderer {
                         D2D_RECT_F {
                             left: 22.0 * scale,
                             top: output_top + index as f32 * 24.0 * scale,
-                            right: width - 20.0 * scale,
+                            right: terminal_right - 12.0 * scale,
                             bottom: output_top + (index as f32 + 1.0) * 24.0 * scale,
                         },
                     )
@@ -1083,7 +1145,7 @@ impl DirectEditorRenderer {
                     D2D_RECT_F {
                         left: 22.0 * scale,
                         top: height - 30.0 * scale,
-                        right: width - 20.0 * scale,
+                        right: terminal_right - 12.0 * scale,
                         bottom: height,
                     },
                 )

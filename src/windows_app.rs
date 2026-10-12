@@ -91,6 +91,12 @@ enum CreateKind {
     Folder,
 }
 
+struct TerminalTab {
+    name: String,
+    session: ConPtySession,
+    input: String,
+}
+
 thread_local! {
     static APP: RefCell<WindowsAppState> = RefCell::new(WindowsAppState::new());
     static RENDERER: RefCell<Option<DirectEditorRenderer>> = const { RefCell::new(None) };
@@ -140,8 +146,8 @@ struct WindowsAppState {
     terminal_open: bool,
     terminal_motion: f32,
     terminal_velocity: f32,
-    terminal: Option<ConPtySession>,
-    terminal_input: String,
+    terminals: Vec<TerminalTab>,
+    active_terminal: usize,
     status: String,
     started: Instant,
     last_frame: Instant,
@@ -249,8 +255,8 @@ impl WindowsAppState {
             terminal_open: false,
             terminal_motion: 0.0,
             terminal_velocity: 0.0,
-            terminal: None,
-            terminal_input: String::new(),
+            terminals: Vec::new(),
+            active_terminal: 0,
             status: "DirectWrite / Direct2D editor ready".into(),
             started: Instant::now(),
             last_frame: Instant::now(),
@@ -725,7 +731,8 @@ impl WindowsAppState {
         self.selection_anchor = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
-        self.terminal = None;
+        self.terminals.clear();
+        self.active_terminal = 0;
         self.status = format!("Opened project {}", self.project_root.display());
         self.started = Instant::now();
     }
@@ -839,13 +846,29 @@ impl WindowsAppState {
     }
 
     fn ensure_terminal(&mut self) {
-        if self.terminal.is_some() {
+        if !self.terminals.is_empty() {
             return;
         }
+        for name in ["Build", "Run", "Output"] {
+            self.add_named_terminal(name.to_string());
+        }
+        self.active_terminal = 0;
+    }
+
+    fn add_terminal(&mut self) {
+        self.add_named_terminal(format!("Terminal {}", self.terminals.len() + 1));
+    }
+
+    fn add_named_terminal(&mut self, name: String) {
         let cwd = self.project_root.clone();
         match unsafe { ConPtySession::spawn(&cwd, 120, 30) } {
             Ok(session) => {
-                self.terminal = Some(session);
+                self.terminals.push(TerminalTab {
+                    name,
+                    session,
+                    input: String::new(),
+                });
+                self.active_terminal = self.terminals.len() - 1;
                 self.status = format!("ConPTY started in {}", cwd.display());
             }
             Err(error) => self.status = format!("ConPTY start failed: {error}"),
@@ -1170,11 +1193,12 @@ fn render_window(window: Hwnd) {
     APP.with(|app_cell| {
         RENDERER.with(|renderer_cell| {
             let app = app_cell.borrow();
+            let active_terminal = app.terminals.get(app.active_terminal);
             let terminal_lines = app
-                .terminal
-                .as_ref()
-                .and_then(|session| {
-                    session.view.lock().ok().map(|view| {
+                .terminals
+                .get(app.active_terminal)
+                .and_then(|tab| {
+                    tab.session.view.lock().ok().map(|view| {
                         let mut lines = view.lines.clone();
                         if !view.current.is_empty() {
                             lines.push(view.current.clone());
@@ -1183,6 +1207,11 @@ fn render_window(window: Hwnd) {
                     })
                 })
                 .unwrap_or_default();
+            let terminal_names = app
+                .terminals
+                .iter()
+                .map(|tab| tab.name.clone())
+                .collect::<Vec<_>>();
             let completions = app.completions();
             let symbols = editor_core::symbol_occurrences(&app.lines, &app.file_name);
             let create_location = app.create_location.to_string_lossy().into_owned();
@@ -1250,7 +1279,9 @@ fn render_window(window: Hwnd) {
                 background_zoom: app.background_zoom,
                 status: &app.status,
                 terminal_lines: &terminal_lines,
-                terminal_input: &app.terminal_input,
+                terminal_names: &terminal_names,
+                active_terminal: app.active_terminal,
+                terminal_input: active_terminal.map(|tab| tab.input.as_str()).unwrap_or(""),
                 terminal_open: app.terminal_open,
                 terminal_progress: app.terminal_motion,
                 animation_seconds: app.started.elapsed().as_secs_f32(),
@@ -1281,24 +1312,22 @@ fn handle_character(window: Hwnd, value: char) {
                 app.project_scroll = 0;
             }
         } else if app.terminal_open {
+            let active = app.active_terminal;
+            let Some(tab) = app.terminals.get_mut(active) else {
+                return;
+            };
             match value {
                 '\r' | '\n' => {
-                    if let Some(session) = &app.terminal {
-                        let _ = session.write("\r");
-                    }
-                    app.terminal_input.clear();
+                    let _ = tab.session.write("\r");
+                    tab.input.clear();
                 }
                 '\u{8}' => {
-                    app.terminal_input.pop();
-                    if let Some(session) = &app.terminal {
-                        let _ = session.write("\u{7f}");
-                    }
+                    tab.input.pop();
+                    let _ = tab.session.write("\u{7f}");
                 }
                 ch if !ch.is_control() => {
-                    app.terminal_input.push(ch);
-                    if let Some(session) = &app.terminal {
-                        let _ = session.write(&ch.to_string());
-                    }
+                    tab.input.push(ch);
+                    let _ = tab.session.write(&ch.to_string());
                 }
                 _ => {}
             }
@@ -1518,6 +1547,22 @@ unsafe extern "system" fn window_proc(
                             app.selection_anchor = None;
                         }
                     }
+                } else {
+                    let active = app.active_terminal;
+                    let sequence = match w_param as u32 {
+                        VK_UP => "\u{1b}[A",
+                        VK_DOWN => "\u{1b}[B",
+                        VK_RIGHT => "\u{1b}[C",
+                        VK_LEFT => "\u{1b}[D",
+                        VK_HOME => "\u{1b}[H",
+                        VK_END => "\u{1b}[F",
+                        VK_DELETE => "\u{1b}[3~",
+                        VK_TAB => "\t",
+                        _ => return,
+                    };
+                    if let Some(tab) = app.terminals.get(active) {
+                        let _ = tab.session.write(sequence);
+                    }
                 }
             });
             invalidate(window);
@@ -1535,6 +1580,26 @@ unsafe extern "system" fn window_proc(
             });
             if y >= terminal_top && y <= terminal_top + (34.0 * scale) as i32 {
                 APP.with(|cell| cell.borrow_mut().toggle_terminal());
+                invalidate(window);
+            } else if x as f32 >= area.right as f32 - 168.0 * scale
+                && y as f32 >= terminal_top as f32 + 38.0 * scale
+            {
+                APP.with(|cell| {
+                    let mut app = cell.borrow_mut();
+                    if !app.terminal_open {
+                        return;
+                    }
+                    let local_y = y as f32 - terminal_top as f32 - 38.0 * scale;
+                    if local_y <= 30.0 * scale {
+                        app.add_terminal();
+                    } else {
+                        let index = ((local_y / scale - 34.0) / 30.0).floor() as usize;
+                        if index < app.terminals.len() {
+                            app.active_terminal = index;
+                            app.status = format!("Active terminal: {}", app.terminals[index].name);
+                        }
+                    }
+                });
                 invalidate(window);
             } else if x as f32 <= (area.right as f32 * 0.19).max(220.0 * scale) {
                 if y as f32 >= 56.0 * scale && y as f32 <= 88.0 * scale {
@@ -1658,8 +1723,10 @@ unsafe extern "system" fn window_proc(
             });
             APP.with(|cell| {
                 let app = cell.borrow();
-                if let Some(terminal) = &app.terminal {
-                    terminal.resize((width / 9).min(i16::MAX as u32) as i16, 30);
+                for terminal in &app.terminals {
+                    terminal
+                        .session
+                        .resize((width / 9).min(i16::MAX as u32) as i16, 30);
                 }
             });
             invalidate(window);
@@ -1681,7 +1748,7 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DESTROY => {
-            APP.with(|cell| cell.borrow_mut().terminal = None);
+            APP.with(|cell| cell.borrow_mut().terminals.clear());
             RENDERER.with(|cell| *cell.borrow_mut() = None);
             unsafe { PostQuitMessage(0) };
             0
