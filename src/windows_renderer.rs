@@ -633,8 +633,7 @@ impl DirectEditorRenderer {
             let local = ((scene.animation_seconds - delay) / 0.28).clamp(0.0, 1.0);
             let eased = 1.0 - (1.0 - local).powi(3);
             let y = header_h + (58.0 + index as f32 * 35.0) * scale;
-            let x = (18.0 + index.saturating_sub(1) as f32 * 14.0) * scale
-                - (1.0 - eased) * 18.0 * scale;
+            let x = 18.0 * scale - (1.0 - eased) * 18.0 * scale;
             unsafe {
                 Self::text(
                     &target_base,

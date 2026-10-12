@@ -1,6 +1,7 @@
 #![allow(clippy::upper_case_acronyms)]
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::ffi::c_void;
 use std::fs;
 use std::path::PathBuf;
@@ -52,6 +53,7 @@ const WM_KEYDOWN: Uint = 0x0100;
 const WM_LBUTTONDOWN: Uint = 0x0201;
 const WM_LBUTTONUP: Uint = 0x0202;
 const WM_MOUSEMOVE: Uint = 0x0200;
+const WM_MOUSEWHEEL: Uint = 0x020a;
 const WM_PAINT: Uint = 0x000f;
 const WM_SIZE: Uint = 0x0005;
 const WM_TIMER: Uint = 0x0113;
@@ -100,6 +102,9 @@ struct WindowsAppState {
     project_root: PathBuf,
     project_entries: Vec<String>,
     project_entry_paths: Vec<PathBuf>,
+    project_entry_is_dir: Vec<bool>,
+    collapsed_directories: HashSet<PathBuf>,
+    project_scroll: usize,
     workspace_search: String,
     workspace_search_focused: bool,
     create_kind: Option<CreateKind>,
@@ -165,7 +170,9 @@ impl WindowsAppState {
     fn new() -> Self {
         let preferences = preferences::load();
         let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let (project_entries, project_entry_paths) = Self::scan_project(&project_root);
+        let collapsed_directories = HashSet::new();
+        let (project_entries, project_entry_paths, project_entry_is_dir) =
+            Self::scan_project(&project_root, &collapsed_directories);
         let create_location = project_root.clone();
         Self {
             file_name: "main.rs".into(),
@@ -173,6 +180,9 @@ impl WindowsAppState {
             project_root,
             project_entries,
             project_entry_paths,
+            project_entry_is_dir,
+            collapsed_directories,
+            project_scroll: 0,
             workspace_search: String::new(),
             workspace_search_focused: false,
             create_kind: None,
@@ -542,9 +552,17 @@ impl WindowsAppState {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "untitled".into());
                 self.file_path = Some(path.clone());
-                if let Some(parent) = path.parent() {
+                if !path.starts_with(&self.project_root) {
+                    let Some(parent) = path.parent() else {
+                        return;
+                    };
                     self.project_root = parent.to_path_buf();
-                    (self.project_entries, self.project_entry_paths) = Self::scan_project(parent);
+                    self.collapsed_directories.clear();
+                    (
+                        self.project_entries,
+                        self.project_entry_paths,
+                        self.project_entry_is_dir,
+                    ) = Self::scan_project(parent, &self.collapsed_directories);
                 }
                 self.caret_line = 0;
                 self.caret_column = 0;
@@ -563,36 +581,81 @@ impl WindowsAppState {
         }
     }
 
-    fn scan_project(root: &std::path::Path) -> (Vec<String>, Vec<PathBuf>) {
-        let mut entries = fs::read_dir(root)
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .map(|entry| {
-                let is_directory = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+    fn scan_project(
+        root: &std::path::Path,
+        collapsed: &HashSet<PathBuf>,
+    ) -> (Vec<String>, Vec<PathBuf>, Vec<bool>) {
+        fn visit(
+            root: &std::path::Path,
+            depth: usize,
+            collapsed: &HashSet<PathBuf>,
+            output: &mut Vec<(String, PathBuf, bool)>,
+        ) {
+            if depth >= 8 || output.len() >= 500 {
+                return;
+            }
+            let mut children = fs::read_dir(root)
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>();
+            children.sort_by_key(|entry| {
+                let is_file = entry.file_type().map(|kind| kind.is_file()).unwrap_or(true);
                 (
-                    !is_directory,
+                    is_file,
+                    entry.file_name().to_string_lossy().to_ascii_lowercase(),
+                )
+            });
+            for entry in children {
+                if output.len() >= 500 {
+                    break;
+                }
+                let path = entry.path();
+                let is_directory = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+                let arrow = if is_directory {
+                    if collapsed.contains(&path) {
+                        "▸ "
+                    } else {
+                        "▾ "
+                    }
+                } else {
+                    "  "
+                };
+                output.push((
                     format!(
-                        "{}{}",
-                        if is_directory { "▸ " } else { "  " },
+                        "{}{}{}",
+                        "  ".repeat(depth),
+                        arrow,
                         entry.file_name().to_string_lossy()
                     ),
-                    entry.path(),
-                )
-            })
-            .collect::<Vec<_>>();
-        entries.sort();
-        let entries = entries.into_iter().take(14).collect::<Vec<_>>();
+                    path.clone(),
+                    is_directory,
+                ));
+                if is_directory && !collapsed.contains(&path) {
+                    visit(&path, depth + 1, collapsed, output);
+                }
+            }
+        }
+
+        let mut entries = Vec::new();
+        visit(root, 0, collapsed, &mut entries);
         (
-            entries.iter().map(|(_, name, _)| name.clone()).collect(),
-            entries.into_iter().map(|(_, _, path)| path).collect(),
+            entries.iter().map(|(name, _, _)| name.clone()).collect(),
+            entries.iter().map(|(_, path, _)| path.clone()).collect(),
+            entries.into_iter().map(|(_, _, is_dir)| is_dir).collect(),
         )
     }
 
     fn open_project(&mut self, root: PathBuf) {
         self.project_root = root;
-        (self.project_entries, self.project_entry_paths) = Self::scan_project(&self.project_root);
+        self.project_scroll = 0;
+        self.collapsed_directories.clear();
+        (
+            self.project_entries,
+            self.project_entry_paths,
+            self.project_entry_is_dir,
+        ) = Self::scan_project(&self.project_root, &self.collapsed_directories);
         self.file_path = None;
         self.file_name = "Select a file".into();
         self.lines = vec!["// Choose a source file from the project tree".into()];
@@ -632,7 +695,14 @@ impl WindowsAppState {
     }
 
     fn refresh_project(&mut self) {
-        (self.project_entries, self.project_entry_paths) = Self::scan_project(&self.project_root);
+        (
+            self.project_entries,
+            self.project_entry_paths,
+            self.project_entry_is_dir,
+        ) = Self::scan_project(&self.project_root, &self.collapsed_directories);
+        self.project_scroll = self
+            .project_scroll
+            .min(self.project_entries.len().saturating_sub(1));
     }
 
     fn create_requested_item(&mut self) {
@@ -1059,10 +1129,14 @@ fn render_window(window: Hwnd) {
                 .as_ref()
                 .map(|path| path.to_string_lossy().into_owned());
             let query = app.workspace_search.to_ascii_lowercase();
+            let visible_row_count =
+                ((height as f32 / (dpi as f32 / 96.0) - 132.0) / 35.0).max(1.0) as usize;
             let visible_entries = app
                 .project_entries
                 .iter()
                 .filter(|entry| query.is_empty() || entry.to_ascii_lowercase().contains(&query))
+                .skip(app.project_scroll)
+                .take(visible_row_count)
                 .cloned()
                 .collect::<Vec<_>>();
             let scene = WindowsScene {
@@ -1141,6 +1215,7 @@ fn handle_character(window: Hwnd, value: char) {
         } else if app.workspace_search_focused {
             if !value.is_control() {
                 app.workspace_search.push(value);
+                app.project_scroll = 0;
             }
         } else if app.terminal_open {
             match value {
@@ -1348,6 +1423,7 @@ unsafe extern "system" fn window_proc(
                         0x1b | 0x0d => app.workspace_search_focused = false,
                         VK_BACK => {
                             app.workspace_search.pop();
+                            app.project_scroll = 0;
                         }
                         _ => return,
                     }
@@ -1407,7 +1483,7 @@ unsafe extern "system" fn window_proc(
                     invalidate(window);
                     return 0;
                 }
-                let first_row = (48.0 + 45.0) * scale;
+                let first_row = (48.0 + 58.0) * scale;
                 if y as f32 >= first_row {
                     let row = ((y as f32 - first_row) / (35.0 * scale)).floor() as usize;
                     if row >= 2 {
@@ -1418,14 +1494,18 @@ unsafe extern "system" fn window_proc(
                                 .project_entries
                                 .iter()
                                 .zip(&app.project_entry_paths)
-                                .filter(|(entry, _)| {
+                                .zip(&app.project_entry_is_dir)
+                                .filter(|((entry, _), _)| {
                                     query.is_empty() || entry.to_ascii_lowercase().contains(&query)
                                 })
-                                .nth(row - 2)
-                                .map(|(_, path)| path.clone());
-                            if let Some(path) = path {
-                                if path.is_dir() {
-                                    app.open_project(path);
+                                .nth(app.project_scroll + row - 2)
+                                .map(|((_, path), is_dir)| (path.clone(), *is_dir));
+                            if let Some((path, is_directory)) = path {
+                                if is_directory {
+                                    if !app.collapsed_directories.remove(&path) {
+                                        app.collapsed_directories.insert(path);
+                                    }
+                                    app.refresh_project();
                                 } else {
                                     app.open_file(path);
                                 }
@@ -1443,6 +1523,27 @@ unsafe extern "system" fn window_proc(
                 unsafe { SetCapture(window) };
                 invalidate(window);
             }
+            0
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((w_param >> 16) as u16 as i16) as i32;
+            APP.with(|cell| {
+                let mut app = cell.borrow_mut();
+                if delta > 0 {
+                    app.project_scroll = app.project_scroll.saturating_sub(3);
+                } else if delta < 0 {
+                    let query = app.workspace_search.to_ascii_lowercase();
+                    let count = app
+                        .project_entries
+                        .iter()
+                        .filter(|entry| {
+                            query.is_empty() || entry.to_ascii_lowercase().contains(&query)
+                        })
+                        .count();
+                    app.project_scroll = (app.project_scroll + 3).min(count.saturating_sub(1));
+                }
+            });
+            invalidate(window);
             0
         }
         WM_MOUSEMOVE => {
