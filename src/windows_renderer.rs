@@ -26,7 +26,7 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 
-use crate::editor_core::{self, TokenKind};
+use crate::editor_core::{self, SymbolOccurrence, SymbolRole, TokenKind};
 
 pub struct WindowsScene<'a> {
     pub file_name: &'a str,
@@ -55,6 +55,8 @@ pub struct WindowsScene<'a> {
     pub selected_language: usize,
     pub language_installed: &'a [bool],
     pub language_versions: &'a [usize],
+    pub symbols: &'a [SymbolOccurrence],
+    pub hovered_symbol: Option<&'a SymbolOccurrence>,
     pub background_path: Option<&'a str>,
     pub background_opacity: f32,
     pub background_offset_x: f32,
@@ -296,6 +298,27 @@ impl DirectEditorRenderer {
         };
     }
 
+    unsafe fn outline(
+        target: &ID2D1RenderTarget,
+        brush: &ID2D1SolidColorBrush,
+        rect: D2D_RECT_F,
+        radius: f32,
+        width: f32,
+    ) {
+        unsafe {
+            target.DrawRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect,
+                    radiusX: radius,
+                    radiusY: radius,
+                },
+                brush,
+                width,
+                None,
+            )
+        };
+    }
+
     unsafe fn text(
         target: &ID2D1RenderTarget,
         format: &IDWriteTextFormat,
@@ -359,6 +382,9 @@ impl DirectEditorRenderer {
         let tree_w = (width * 0.19).max(220.0 * scale);
         let graph_w = (width * 0.27).max(300.0 * scale);
         let editor_right = width - graph_w;
+        let code_top = header_h + 58.0 * scale;
+        let line_step = 25.0 * scale;
+        let max_lines = ((body_bottom - code_top) / line_step).max(0.0) as usize;
 
         unsafe { target_base.BeginDraw() };
         unsafe { target_base.Clear(Some(&D2D1_COLOR_F::default())) };
@@ -430,6 +456,101 @@ impl DirectEditorRenderer {
                 body_bottom,
             )
         };
+
+        if let Some(focused) = scene.hovered_symbol {
+            let focused_line = scene
+                .lines
+                .get(focused.line)
+                .map(String::as_str)
+                .unwrap_or("");
+            let focused_left = tree_w
+                + (49.0 + Self::visual_cells(focused_line, focused.start) as f32 * self.code_cell)
+                    * scale;
+            let focused_right = tree_w
+                + (55.0 + Self::visual_cells(focused_line, focused.end) as f32 * self.code_cell)
+                    * scale;
+            let focused_top = code_top + focused.line as f32 * line_step - 3.0 * scale;
+            unsafe {
+                Self::outline(
+                    &target_base,
+                    &accent,
+                    D2D_RECT_F {
+                        left: focused_left,
+                        top: focused_top,
+                        right: focused_right,
+                        bottom: focused_top + 25.0 * scale,
+                    },
+                    5.0 * scale,
+                    1.5 * scale,
+                )
+            };
+            let route_x = editor_right - 13.0 * scale;
+            let source_y = focused_top + 12.0 * scale;
+            unsafe {
+                Self::fill(
+                    &target_base,
+                    &accent,
+                    focused_right,
+                    source_y,
+                    route_x,
+                    source_y + 1.5 * scale,
+                )
+            };
+            for related in scene
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.name == focused.name && *symbol != focused)
+                .take(8)
+            {
+                if related.line >= max_lines {
+                    continue;
+                }
+                let line_value = scene
+                    .lines
+                    .get(related.line)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                let related_left = tree_w
+                    + (49.0
+                        + Self::visual_cells(line_value, related.start) as f32 * self.code_cell)
+                        * scale;
+                let related_right = tree_w
+                    + (55.0 + Self::visual_cells(line_value, related.end) as f32 * self.code_cell)
+                        * scale;
+                let related_top = code_top + related.line as f32 * line_step - 3.0 * scale;
+                let related_y = related_top + 12.0 * scale;
+                unsafe {
+                    Self::outline(
+                        &target_base,
+                        &muted,
+                        D2D_RECT_F {
+                            left: related_left,
+                            top: related_top,
+                            right: related_right,
+                            bottom: related_top + 25.0 * scale,
+                        },
+                        5.0 * scale,
+                        1.0 * scale,
+                    );
+                    Self::fill(
+                        &target_base,
+                        &accent,
+                        route_x,
+                        source_y.min(related_y),
+                        route_x + 1.5 * scale,
+                        source_y.max(related_y) + 1.5 * scale,
+                    );
+                    Self::fill(
+                        &target_base,
+                        &accent,
+                        related_right,
+                        related_y,
+                        route_x,
+                        related_y + 1.5 * scale,
+                    );
+                }
+            }
+        }
 
         unsafe {
             Self::text(
@@ -559,9 +680,6 @@ impl DirectEditorRenderer {
             )
         };
 
-        let code_top = header_h + 58.0 * scale;
-        let line_step = 25.0 * scale;
-        let max_lines = ((body_bottom - code_top) / line_step).max(0.0) as usize;
         for (index, value) in scene.lines.iter().take(max_lines).enumerate() {
             let y = code_top + index as f32 * line_step;
             if index == scene.caret_line {
@@ -747,6 +865,33 @@ impl DirectEditorRenderer {
             }
         }
 
+        if let Some(focused) = scene.hovered_symbol {
+            let value = scene
+                .lines
+                .get(focused.line)
+                .map(String::as_str)
+                .unwrap_or("");
+            let left = tree_w
+                + (49.0 + Self::visual_cells(value, focused.start) as f32 * self.code_cell) * scale;
+            let right = tree_w
+                + (55.0 + Self::visual_cells(value, focused.end) as f32 * self.code_cell) * scale;
+            let top = code_top + focused.line as f32 * line_step - 3.0 * scale;
+            unsafe {
+                Self::outline(
+                    &target_base,
+                    &accent,
+                    D2D_RECT_F {
+                        left,
+                        top,
+                        right,
+                        bottom: top + 25.0 * scale,
+                    },
+                    5.0 * scale,
+                    1.5 * scale,
+                )
+            };
+        }
+
         unsafe {
             Self::text(
                 &target_base,
@@ -765,16 +910,51 @@ impl DirectEditorRenderer {
                 },
             )
         };
-        let nodes = [
-            "project  TC-IDE",
-            "file  main.rs",
-            "fn  render()",
-            "fn  terminal()",
+        let mut nodes = vec![
+            format!("project  {}", scene.project_name),
+            format!("file  {}", scene.file_name),
         ];
+        if let Some(focused) = scene.hovered_symbol {
+            nodes.extend(
+                scene
+                    .symbols
+                    .iter()
+                    .filter(|symbol| symbol.name == focused.name)
+                    .take(7)
+                    .map(|symbol| {
+                        format!(
+                            "{}  {}()  :{}",
+                            if symbol.role == SymbolRole::Declaration {
+                                "declare"
+                            } else {
+                                "call"
+                            },
+                            symbol.name,
+                            symbol.line + 1
+                        )
+                    }),
+            );
+        } else {
+            let mut names = Vec::new();
+            for symbol in scene
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.role == SymbolRole::Declaration)
+            {
+                if names.contains(&symbol.name) {
+                    continue;
+                }
+                names.push(symbol.name.clone());
+                nodes.push(format!("symbol  {}()  :{}", symbol.name, symbol.line + 1));
+                if nodes.len() >= 9 {
+                    break;
+                }
+            }
+        }
         let path_progress = (scene.animation_seconds / 0.65).clamp(0.0, 1.0);
         let path_x = editor_right + 30.0 * scale;
         let first_y = header_h + 86.0 * scale;
-        let last_y = first_y + 3.0 * 58.0 * scale;
+        let last_y = first_y + nodes.len().saturating_sub(1) as f32 * 58.0 * scale;
         unsafe {
             Self::fill(
                 &target_base,
@@ -787,7 +967,8 @@ impl DirectEditorRenderer {
         };
         for (index, node) in nodes.iter().enumerate() {
             let y = first_y + index as f32 * 58.0 * scale;
-            let active = path_progress >= index as f32 / (nodes.len() - 1) as f32;
+            let active = nodes.len() <= 1
+                || path_progress >= index as f32 / nodes.len().saturating_sub(1) as f32;
             unsafe {
                 Self::rounded(
                     &target_base,

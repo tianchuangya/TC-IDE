@@ -125,6 +125,7 @@ struct WindowsAppState {
     selected_language: usize,
     language_installed: Vec<bool>,
     language_versions: Vec<usize>,
+    hovered_symbol: Option<editor_core::SymbolOccurrence>,
     background_path: Option<PathBuf>,
     background_opacity: f32,
     background_offset_x: f32,
@@ -226,6 +227,7 @@ impl WindowsAppState {
                         .min(2)
                 })
                 .collect(),
+            hovered_symbol: None,
             background_path: preferences.background_path,
             background_opacity: preferences.background_opacity,
             background_offset_x: preferences.background_offset_x,
@@ -1050,6 +1052,7 @@ fn render_window(window: Hwnd) {
                 })
                 .unwrap_or_default();
             let completions = app.completions();
+            let symbols = editor_core::symbol_occurrences(&app.lines, &app.file_name);
             let create_location = app.create_location.to_string_lossy().into_owned();
             let background_path = app
                 .background_path
@@ -1101,6 +1104,8 @@ fn render_window(window: Hwnd) {
                 selected_language: app.selected_language,
                 language_installed: &app.language_installed,
                 language_versions: &app.language_versions,
+                symbols: &symbols,
+                hovered_symbol: app.hovered_symbol.as_ref(),
                 background_path: background_path.as_deref(),
                 background_opacity: app.background_opacity,
                 background_offset_x: app.background_offset_x,
@@ -1442,11 +1447,33 @@ unsafe extern "system" fn window_proc(
         }
         WM_MOUSEMOVE => {
             let dragging = APP.with(|cell| cell.borrow().dragging_selection);
+            let x = (l_param as u16 as i16) as i32;
+            let y = ((l_param >> 16) as u16 as i16) as i32;
             if dragging && w_param & 1 != 0 {
-                let x = (l_param as u16 as i16) as i32;
-                let y = ((l_param >> 16) as u16 as i16) as i32;
                 if let Some(position) = editor_position_at(window, x, y) {
                     APP.with(|cell| cell.borrow_mut().set_caret(position, true));
+                    invalidate(window);
+                }
+            } else {
+                let position = editor_position_at(window, x, y);
+                let changed = APP.with(|cell| {
+                    let mut app = cell.borrow_mut();
+                    let hovered = position.and_then(|position| {
+                        editor_core::symbol_at(
+                            &app.lines,
+                            &app.file_name,
+                            position.line,
+                            position.column,
+                        )
+                    });
+                    if hovered == app.hovered_symbol {
+                        false
+                    } else {
+                        app.hovered_symbol = hovered;
+                        true
+                    }
+                });
+                if changed {
                     invalidate(window);
                 }
             }

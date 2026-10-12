@@ -12,6 +12,116 @@ pub struct SyntaxToken {
     pub kind: TokenKind,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SymbolRole {
+    Declaration,
+    Reference,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SymbolOccurrence {
+    pub name: String,
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+    pub role: SymbolRole,
+}
+
+fn identifier_ranges(line: &str) -> Vec<(usize, usize, String)> {
+    let chars = line.chars().collect::<Vec<_>>();
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if !chars[index].is_ascii_alphabetic() && chars[index] != '_' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < chars.len() && (chars[index].is_ascii_alphanumeric() || chars[index] == '_') {
+            index += 1;
+        }
+        result.push((start, index, chars[start..index].iter().collect()));
+    }
+    result
+}
+
+fn declaration_name(line: &str, file: &str) -> Option<String> {
+    let code = comment_bounds(line, file)
+        .map(|(start, _, _)| &line[..start])
+        .unwrap_or(line);
+    let identifiers = identifier_ranges(code);
+    for pair in identifiers.windows(2) {
+        if matches!(
+            pair[0].2.as_str(),
+            "fn" | "def" | "func" | "function" | "class" | "struct" | "enum" | "trait"
+        ) {
+            return Some(pair[1].2.clone());
+        }
+    }
+    let open = code.find('(')?;
+    let before = &code[..open];
+    let candidate = identifier_ranges(before).pop()?;
+    if matches!(
+        candidate.2.as_str(),
+        "if" | "for" | "while" | "switch" | "catch"
+    ) {
+        return None;
+    }
+    let prefix = before[..before
+        .char_indices()
+        .nth(candidate.0)
+        .map(|(index, _)| index)
+        .unwrap_or(before.len())]
+        .trim();
+    if prefix.is_empty() || prefix.ends_with('.') || prefix.ends_with("->") {
+        None
+    } else {
+        Some(candidate.2)
+    }
+}
+
+pub fn symbol_occurrences(lines: &[String], file: &str) -> Vec<SymbolOccurrence> {
+    let declarations = lines
+        .iter()
+        .filter_map(|line| declaration_name(line, file))
+        .collect::<Vec<_>>();
+    let mut result = Vec::new();
+    for (line_index, line) in lines.iter().enumerate() {
+        let code = comment_bounds(line, file)
+            .map(|(start, _, _)| &line[..start])
+            .unwrap_or(line);
+        let declared = declaration_name(line, file);
+        for (start, end, name) in identifier_ranges(code) {
+            if declarations.contains(&name) {
+                result.push(SymbolOccurrence {
+                    role: if declared.as_deref() == Some(name.as_str()) {
+                        SymbolRole::Declaration
+                    } else {
+                        SymbolRole::Reference
+                    },
+                    name,
+                    line: line_index,
+                    start,
+                    end,
+                });
+            }
+        }
+    }
+    result
+}
+
+pub fn symbol_at(
+    lines: &[String],
+    file: &str,
+    line: usize,
+    column: usize,
+) -> Option<SymbolOccurrence> {
+    symbol_occurrences(lines, file)
+        .into_iter()
+        .find(|symbol| symbol.line == line && column >= symbol.start && column <= symbol.end)
+}
+
 pub fn language_for_file(name: &str) -> &'static str {
     match name
         .rsplit('.')
@@ -334,5 +444,19 @@ mod tests {
             tokens.last().map(|token| token.kind),
             Some(TokenKind::Comment)
         );
+    }
+
+    #[test]
+    fn semantic_symbols_connect_declarations_and_references() {
+        let lines = vec![
+            "fn render() {".to_string(),
+            "    render();".to_string(),
+            "}".to_string(),
+        ];
+        let symbols = symbol_occurrences(&lines, "main.rs");
+        assert_eq!(symbols.len(), 2);
+        assert_eq!(symbols[0].role, SymbolRole::Declaration);
+        assert_eq!(symbols[1].role, SymbolRole::Reference);
+        assert_eq!(symbol_at(&lines, "main.rs", 1, 7).unwrap().name, "render");
     }
 }
