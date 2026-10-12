@@ -105,6 +105,7 @@ struct WindowsAppState {
     project_entry_is_dir: Vec<bool>,
     collapsed_directories: HashSet<PathBuf>,
     project_scroll: usize,
+    project_symbols: Vec<editor_core::ProjectSymbolOccurrence>,
     workspace_search: String,
     workspace_search_focused: bool,
     create_kind: Option<CreateKind>,
@@ -173,6 +174,7 @@ impl WindowsAppState {
         let collapsed_directories = HashSet::new();
         let (project_entries, project_entry_paths, project_entry_is_dir) =
             Self::scan_project(&project_root, &collapsed_directories);
+        let project_symbols = Self::index_project(&project_root);
         let create_location = project_root.clone();
         Self {
             file_name: "main.rs".into(),
@@ -183,6 +185,7 @@ impl WindowsAppState {
             project_entry_is_dir,
             collapsed_directories,
             project_scroll: 0,
+            project_symbols,
             workspace_search: String::new(),
             workspace_search_focused: false,
             create_kind: None,
@@ -535,7 +538,10 @@ impl WindowsAppState {
             return;
         };
         match fs::write(path, self.lines.join("\r\n")) {
-            Ok(()) => self.status = format!("Saved {}", path.display()),
+            Ok(()) => {
+                self.status = format!("Saved {}", path.display());
+                self.project_symbols = Self::index_project(&self.project_root);
+            }
             Err(error) => self.status = format!("Save failed: {error}"),
         }
     }
@@ -571,6 +577,7 @@ impl WindowsAppState {
                 self.redo_stack.clear();
                 self.ime_composition.clear();
                 self.started = Instant::now();
+                self.project_symbols = Self::index_project(&self.project_root);
                 self.status = format!(
                     "Opened {}  ·  {}",
                     path.display(),
@@ -647,6 +654,59 @@ impl WindowsAppState {
         )
     }
 
+    fn index_project(root: &std::path::Path) -> Vec<editor_core::ProjectSymbolOccurrence> {
+        fn collect(
+            root: &std::path::Path,
+            path: &std::path::Path,
+            sources: &mut Vec<(String, Vec<String>)>,
+        ) {
+            if sources.len() >= 300 {
+                return;
+            }
+            let Ok(entries) = fs::read_dir(path) else {
+                return;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                if sources.len() >= 300 {
+                    break;
+                }
+                let path = entry.path();
+                if path.is_dir() {
+                    let ignored = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| matches!(name, ".git" | "target" | "node_modules" | ".venv"))
+                        .unwrap_or(false);
+                    if !ignored {
+                        collect(root, &path, sources);
+                    }
+                    continue;
+                }
+                let display = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if editor_core::language_for_file(&display) == "Plain Text" {
+                    continue;
+                }
+                let Ok(metadata) = path.metadata() else {
+                    continue;
+                };
+                if metadata.len() > 1_000_000 {
+                    continue;
+                }
+                if let Ok(content) = fs::read_to_string(&path) {
+                    sources.push((display, content.lines().map(str::to_string).collect()));
+                }
+            }
+        }
+
+        let mut sources = Vec::new();
+        collect(root, root, &mut sources);
+        editor_core::project_symbol_occurrences(&sources)
+    }
+
     fn open_project(&mut self, root: PathBuf) {
         self.project_root = root;
         self.project_scroll = 0;
@@ -656,6 +716,7 @@ impl WindowsAppState {
             self.project_entry_paths,
             self.project_entry_is_dir,
         ) = Self::scan_project(&self.project_root, &self.collapsed_directories);
+        self.project_symbols = Self::index_project(&self.project_root);
         self.file_path = None;
         self.file_name = "Select a file".into();
         self.lines = vec!["// Choose a source file from the project tree".into()];
@@ -700,6 +761,7 @@ impl WindowsAppState {
             self.project_entry_paths,
             self.project_entry_is_dir,
         ) = Self::scan_project(&self.project_root, &self.collapsed_directories);
+        self.project_symbols = Self::index_project(&self.project_root);
         self.project_scroll = self
             .project_scroll
             .min(self.project_entries.len().saturating_sub(1));
@@ -1179,6 +1241,7 @@ fn render_window(window: Hwnd) {
                 language_installed: &app.language_installed,
                 language_versions: &app.language_versions,
                 symbols: &symbols,
+                project_symbols: &app.project_symbols,
                 hovered_symbol: app.hovered_symbol.as_ref(),
                 background_path: background_path.as_deref(),
                 background_opacity: app.background_opacity,

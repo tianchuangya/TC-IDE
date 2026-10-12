@@ -26,7 +26,7 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 
-use crate::editor_core::{self, SymbolOccurrence, SymbolRole, TokenKind};
+use crate::editor_core::{self, ProjectSymbolOccurrence, SymbolOccurrence, SymbolRole, TokenKind};
 
 pub struct WindowsScene<'a> {
     pub file_name: &'a str,
@@ -56,6 +56,7 @@ pub struct WindowsScene<'a> {
     pub language_installed: &'a [bool],
     pub language_versions: &'a [usize],
     pub symbols: &'a [SymbolOccurrence],
+    pub project_symbols: &'a [ProjectSymbolOccurrence],
     pub hovered_symbol: Option<&'a SymbolOccurrence>,
     pub background_path: Option<&'a str>,
     pub background_opacity: f32,
@@ -914,25 +915,47 @@ impl DirectEditorRenderer {
             format!("file  {}", scene.file_name),
         ];
         if let Some(focused) = scene.hovered_symbol {
-            nodes.extend(
-                scene
-                    .symbols
-                    .iter()
-                    .filter(|symbol| symbol.name == focused.name)
-                    .take(7)
-                    .map(|symbol| {
-                        format!(
-                            "{}  {}()  :{}",
-                            if symbol.role == SymbolRole::Declaration {
-                                "declare"
-                            } else {
-                                "call"
-                            },
-                            symbol.name,
-                            symbol.line + 1
-                        )
-                    }),
-            );
+            let project_matches = scene
+                .project_symbols
+                .iter()
+                .filter(|entry| entry.symbol.name == focused.name)
+                .take(7)
+                .map(|entry| {
+                    format!(
+                        "{}  {}:{}",
+                        if entry.symbol.role == SymbolRole::Declaration {
+                            "declare"
+                        } else {
+                            "call"
+                        },
+                        entry.file,
+                        entry.symbol.line + 1
+                    )
+                })
+                .collect::<Vec<_>>();
+            if project_matches.is_empty() {
+                nodes.extend(
+                    scene
+                        .symbols
+                        .iter()
+                        .filter(|symbol| symbol.name == focused.name)
+                        .take(7)
+                        .map(|symbol| {
+                            format!(
+                                "{}  {}()  :{}",
+                                if symbol.role == SymbolRole::Declaration {
+                                    "declare"
+                                } else {
+                                    "call"
+                                },
+                                symbol.name,
+                                symbol.line + 1
+                            )
+                        }),
+                );
+            } else {
+                nodes.extend(project_matches);
+            }
         } else {
             let mut names = Vec::new();
             for symbol in scene

@@ -27,6 +27,12 @@ pub struct SymbolOccurrence {
     pub role: SymbolRole,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectSymbolOccurrence {
+    pub file: String,
+    pub symbol: SymbolOccurrence,
+}
+
 fn identifier_ranges(line: &str) -> Vec<(usize, usize, String)> {
     let chars = line.chars().collect::<Vec<_>>();
     let mut result = Vec::new();
@@ -105,6 +111,43 @@ pub fn symbol_occurrences(lines: &[String], file: &str) -> Vec<SymbolOccurrence>
                     start,
                     end,
                 });
+            }
+        }
+    }
+    result
+}
+
+pub fn project_symbol_occurrences(
+    sources: &[(String, Vec<String>)],
+) -> Vec<ProjectSymbolOccurrence> {
+    let declarations = sources
+        .iter()
+        .flat_map(|(file, lines)| lines.iter().filter_map(|line| declaration_name(line, file)))
+        .collect::<Vec<_>>();
+    let mut result = Vec::new();
+    for (file, lines) in sources {
+        for (line_index, line) in lines.iter().enumerate() {
+            let code = comment_bounds(line, file)
+                .map(|(start, _, _)| &line[..start])
+                .unwrap_or(line);
+            let declared = declaration_name(line, file);
+            for (start, end, name) in identifier_ranges(code) {
+                if declarations.contains(&name) {
+                    result.push(ProjectSymbolOccurrence {
+                        file: file.clone(),
+                        symbol: SymbolOccurrence {
+                            role: if declared.as_deref() == Some(name.as_str()) {
+                                SymbolRole::Declaration
+                            } else {
+                                SymbolRole::Reference
+                            },
+                            name,
+                            line: line_index,
+                            start,
+                            end,
+                        },
+                    });
+                }
             }
         }
     }
@@ -458,5 +501,18 @@ mod tests {
         assert_eq!(symbols[0].role, SymbolRole::Declaration);
         assert_eq!(symbols[1].role, SymbolRole::Reference);
         assert_eq!(symbol_at(&lines, "main.rs", 1, 7).unwrap().name, "render");
+    }
+
+    #[test]
+    fn project_symbols_connect_calls_across_files() {
+        let sources = vec![
+            ("src/api.rs".into(), vec!["pub fn launch() {}".into()]),
+            ("src/main.rs".into(), vec!["launch();".into()]),
+        ];
+        let symbols = project_symbol_occurrences(&sources);
+        assert_eq!(symbols.len(), 2);
+        assert_eq!(symbols[0].symbol.role, SymbolRole::Declaration);
+        assert_eq!(symbols[1].file, "src/main.rs");
+        assert_eq!(symbols[1].symbol.role, SymbolRole::Reference);
     }
 }
