@@ -8,7 +8,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1RenderTarget,
     ID2D1SolidColorBrush, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
+    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
 };
@@ -61,6 +61,10 @@ pub struct WindowsScene<'a> {
     pub expanded_comments: &'a [usize],
     pub editing_comment: Option<usize>,
     pub pointer_x: i32,
+    pub package_open: bool,
+    pub package_targets: [bool; 3],
+    pub package_running: bool,
+    pub package_progress: f32,
     pub background_path: Option<&'a str>,
     pub background_opacity: f32,
     pub background_offset_x: f32,
@@ -568,6 +572,24 @@ impl DirectEditorRenderer {
                     left: 18.0 * scale,
                     top: 13.0 * scale,
                     right: 110.0 * scale,
+                    bottom: header_h,
+                },
+            )
+        };
+        unsafe {
+            Self::text(
+                &target_base,
+                &self.small_format,
+                &accent,
+                if scene.package_running {
+                    "Packaging..."
+                } else {
+                    "Package  v"
+                },
+                D2D_RECT_F {
+                    left: width - 142.0 * scale,
+                    top: 15.0 * scale,
+                    right: width - 16.0 * scale,
                     bottom: header_h,
                 },
             )
@@ -1260,6 +1282,122 @@ impl DirectEditorRenderer {
                         top: height - status_h + 7.0 * scale,
                         right: width,
                         bottom: height,
+                    },
+                )
+            };
+        }
+        if scene.package_progress > 0.0 {
+            let center_x = (tree_w + editor_right) * 0.5;
+            let center_y = (header_h + body_bottom) * 0.5;
+            let complete = !scene.package_running && scene.package_progress >= 1.0;
+            for ring in 0..7 {
+                let pulse = (scene.animation_seconds * 2.4 + ring as f32 * 0.37).sin() * 4.0;
+                let radius = (22.0 + ring as f32 * 9.0 + pulse) * scale;
+                let mut ellipse = D2D1_ELLIPSE::default();
+                ellipse.point.X = center_x;
+                ellipse.point.Y = center_y;
+                ellipse.radiusX = radius * (1.0 + ring as f32 * 0.018);
+                ellipse.radiusY = radius;
+                unsafe {
+                    target_base.DrawEllipse(
+                        &ellipse,
+                        if complete { &bright } else { &muted },
+                        (1.0 + ring as f32 * 0.12) * scale,
+                        None,
+                    )
+                };
+            }
+            for index in 0..18 {
+                let source_x = tree_w + 35.0 * scale + (index % 6) as f32 * 74.0 * scale;
+                let source_y = code_top + (index / 6) as f32 * 68.0 * scale;
+                let travel = if complete {
+                    (scene.animation_seconds * 1.8).fract()
+                } else {
+                    scene.package_progress.clamp(0.0, 1.0).powf(1.8)
+                };
+                let x = if complete {
+                    center_x + (source_x - center_x) * travel
+                } else {
+                    source_x + (center_x - source_x) * travel
+                };
+                let y = if complete {
+                    center_y + (source_y - center_y) * travel
+                } else {
+                    source_y + (center_y - source_y) * travel
+                };
+                let stretch = 5.0 + 24.0 * travel;
+                unsafe {
+                    Self::fill(
+                        &target_base,
+                        if complete { &bright } else { &text },
+                        x - stretch * scale,
+                        y - 1.5 * scale,
+                        x + 5.0 * scale,
+                        y + 1.5 * scale,
+                    )
+                };
+            }
+        }
+        if scene.package_open {
+            let left = width - 326.0 * scale;
+            let top = header_h + 8.0 * scale;
+            unsafe {
+                Self::rounded(
+                    &target_base,
+                    &panel,
+                    D2D_RECT_F {
+                        left,
+                        top,
+                        right: width - 14.0 * scale,
+                        bottom: top + 214.0 * scale,
+                    },
+                    14.0 * scale,
+                )
+            };
+            let labels = [
+                "1  Portable native artifact",
+                "2  Portable ZIP",
+                "3  MSIX (Windows SDK)",
+            ];
+            for (index, label) in labels.iter().enumerate() {
+                let y = top + (48.0 + index as f32 * 42.0) * scale;
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.ui_format,
+                        if scene.package_targets[index] {
+                            &accent
+                        } else {
+                            &text
+                        },
+                        &format!(
+                            "{}  {label}",
+                            if scene.package_targets[index] {
+                                "[x]"
+                            } else {
+                                "[ ]"
+                            }
+                        ),
+                        D2D_RECT_F {
+                            left: left + 18.0 * scale,
+                            top: y,
+                            right: width - 24.0 * scale,
+                            bottom: y + 30.0 * scale,
+                        },
+                    )
+                };
+            }
+            unsafe {
+                Self::text(
+                    &target_base,
+                    &self.small_format,
+                    &bright,
+                    "Enter  Start packaging     Esc  Close",
+                    D2D_RECT_F {
+                        left: left + 18.0 * scale,
+                        top: top + 178.0 * scale,
+                        right: width - 24.0 * scale,
+                        bottom: top + 206.0 * scale,
                     },
                 )
             };

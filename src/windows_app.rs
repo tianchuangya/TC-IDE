@@ -146,6 +146,13 @@ struct WindowsAppState {
     background_offset_x: f32,
     background_offset_y: f32,
     background_zoom: f32,
+    package_open: bool,
+    package_targets: [bool; 3],
+    package_running: bool,
+    package_progress: f32,
+    package_started: Option<Instant>,
+    package_marker: String,
+    package_reveal_pending: bool,
     terminal_open: bool,
     terminal_motion: f32,
     terminal_velocity: f32,
@@ -184,6 +191,7 @@ impl WindowsAppState {
         let (project_entries, project_entry_paths, project_entry_is_dir) =
             Self::scan_project(&project_root, &collapsed_directories);
         let project_symbols = Self::index_project(&project_root);
+        let package_targets = Self::load_package_targets(&project_root);
         let create_location = project_root.clone();
         Self {
             file_name: "main.rs".into(),
@@ -258,6 +266,13 @@ impl WindowsAppState {
             background_offset_x: preferences.background_offset_x,
             background_offset_y: preferences.background_offset_y,
             background_zoom: preferences.background_zoom,
+            package_open: false,
+            package_targets,
+            package_running: false,
+            package_progress: 0.0,
+            package_started: None,
+            package_marker: String::new(),
+            package_reveal_pending: false,
             terminal_open: false,
             terminal_motion: 0.0,
             terminal_velocity: 0.0,
@@ -772,6 +787,7 @@ impl WindowsAppState {
 
     fn open_project(&mut self, root: PathBuf) {
         self.project_root = root;
+        self.package_targets = Self::load_package_targets(&self.project_root);
         self.project_scroll = 0;
         self.collapsed_directories.clear();
         (
@@ -904,6 +920,92 @@ impl WindowsAppState {
         )
     }
 
+    fn package_settings_path(root: &std::path::Path) -> PathBuf {
+        root.join(".tc-ide-package-targets")
+    }
+
+    fn load_package_targets(root: &std::path::Path) -> [bool; 3] {
+        let mut targets = [false; 3];
+        if let Ok(value) = fs::read_to_string(Self::package_settings_path(root)) {
+            for (index, item) in value.trim().split(',').take(3).enumerate() {
+                targets[index] = item == "1";
+            }
+        }
+        targets
+    }
+
+    fn save_package_targets(&self) {
+        let value = self
+            .package_targets
+            .iter()
+            .map(|selected| if *selected { "1" } else { "0" })
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = fs::write(Self::package_settings_path(&self.project_root), value);
+    }
+
+    fn start_package(&mut self) {
+        if !self.package_targets.iter().any(|selected| *selected) {
+            self.status = "Select at least one package target".into();
+            return;
+        }
+        self.terminal_open = true;
+        self.ensure_terminal();
+        let project = self
+            .project_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "TC-IDE-project".into())
+            .replace(['\'', '"'], "");
+        let file = self
+            .file_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "main".into())
+            .replace('"', "");
+        let stage = format!(".tc-ide-packages\\{project}");
+        let build = if self.project_root.join("Cargo.toml").exists() {
+            format!(
+                "cargo build --release; $a=Get-ChildItem .\\target\\release\\*.exe | Where-Object {{$_.DirectoryName -notmatch 'deps'}} | Select-Object -First 1; if($a){{Copy-Item $a.FullName '{stage}\\{project}.exe' -Force}}"
+            )
+        } else if self.project_root.join("go.mod").exists() {
+            format!("go build -o '{stage}\\{project}.exe' .")
+        } else {
+            match editor_core::language_for_file(&self.file_name) {
+                "C" => format!("gcc \"{file}\" -o '{stage}\\{project}.exe'"),
+                "C++" => format!("g++ \"{file}\" -o '{stage}\\{project}.exe'"),
+                "Python" => format!("python -m PyInstaller --noconfirm --onefile \"{file}\" --distpath '{stage}' --workpath .tc-ide-packages\\work --specpath .tc-ide-packages\\spec"),
+                "Java" => format!("javac \"{file}\"; jar --create --file '{stage}\\{project}.jar' *.class"),
+                _ => self.task_command(true),
+            }
+        };
+        let zip = if self.package_targets[1] {
+            format!("; Compress-Archive -Path '{stage}\\*' -DestinationPath '.tc-ide-packages\\{project}.zip' -Force")
+        } else {
+            String::new()
+        };
+        let msix = if self.package_targets[2] {
+            "; if(Get-Command MakeAppx.exe -ErrorAction SilentlyContinue){Write-Output 'MSIX SDK detected: manifest/signing configuration is required'}else{Write-Warning 'MakeAppx.exe is not installed'}"
+        } else {
+            ""
+        };
+        self.package_marker = format!("__TC_PACKAGE_DONE_{}__", self.started.elapsed().as_nanos());
+        let command = format!(
+            "$ErrorActionPreference='Stop'; New-Item -ItemType Directory -Force '{stage}' | Out-Null; {build}{zip}{msix}; Write-Output '{}'",
+            self.package_marker
+        );
+        if let Some(tab) = self.terminals.first() {
+            let _ = tab.session.write(&format!("{command}\r"));
+            self.active_terminal = 0;
+            self.package_running = true;
+            self.package_progress = 0.0;
+            self.package_started = Some(Instant::now());
+            self.package_open = false;
+            self.status = "Packaging started in the Build terminal".into();
+        }
+    }
+
     fn ensure_terminal(&mut self) {
         if !self.terminals.is_empty() {
             return;
@@ -1028,6 +1130,34 @@ impl WindowsAppState {
         if (target - self.terminal_motion).abs() < 0.001 && self.terminal_velocity.abs() < 0.001 {
             self.terminal_motion = target;
             self.terminal_velocity = 0.0;
+        }
+        if self.package_running {
+            self.package_progress = self
+                .package_started
+                .map(|started| (started.elapsed().as_secs_f32() / 8.0).min(0.9))
+                .unwrap_or(0.0);
+            let done = self.terminals.first().is_some_and(|tab| {
+                tab.session.view.lock().ok().is_some_and(|view| {
+                    view.lines
+                        .iter()
+                        .any(|line| line.contains(&self.package_marker))
+                        || view.current.contains(&self.package_marker)
+                })
+            });
+            if done {
+                self.package_running = false;
+                self.package_progress = 1.0;
+                self.package_reveal_pending = true;
+                self.package_started = Some(Instant::now());
+                self.status = "Packaging finished; opening the artifact folder".into();
+            }
+        } else if self.package_progress >= 1.0
+            && self
+                .package_started
+                .is_some_and(|started| started.elapsed().as_secs_f32() > 1.8)
+        {
+            self.package_progress = 0.0;
+            self.package_started = None;
         }
     }
 }
@@ -1343,6 +1473,11 @@ fn perform_command(window: Hwnd, command: Wparam) {
                 app.extensions_open = !app.extensions_open;
                 app.settings_open = false;
             }
+            platform::COMMAND_PACKAGE => {
+                app.package_open = !app.package_open;
+                app.settings_open = false;
+                app.extensions_open = false;
+            }
             platform::COMMAND_OPEN_FOLDER => {
                 if let Some(path) = platform::choose_folder(window) {
                     app.open_project(path);
@@ -1466,6 +1601,10 @@ fn render_window(window: Hwnd) {
                 expanded_comments: &expanded_comments,
                 editing_comment: app.editing_comment,
                 pointer_x: app.pointer_x,
+                package_open: app.package_open,
+                package_targets: app.package_targets,
+                package_running: app.package_running,
+                package_progress: app.package_progress,
                 background_path: background_path.as_deref(),
                 background_opacity: app.background_opacity,
                 background_offset_x: app.background_offset_x,
@@ -1618,6 +1757,18 @@ unsafe extern "system" fn window_proc(
             }
             APP.with(|cell| {
                 let mut app = cell.borrow_mut();
+                if app.package_open {
+                    match w_param as u32 {
+                        0x1b => app.package_open = false,
+                        0x31 => app.package_targets[0] = !app.package_targets[0],
+                        0x32 => app.package_targets[1] = !app.package_targets[1],
+                        0x33 => app.package_targets[2] = !app.package_targets[2],
+                        0x0d => app.start_package(),
+                        _ => return,
+                    }
+                    app.save_package_targets();
+                    return;
+                }
                 if app.create_kind.is_some() {
                     match w_param as u32 {
                         0x0d => app.create_requested_item(),
@@ -1775,6 +1926,41 @@ unsafe extern "system" fn window_proc(
             let mut area = unsafe { std::mem::zeroed::<Rect>() };
             unsafe { GetClientRect(window, &mut area) };
             let scale = platform::dpi_for_window(window) as f32 / 96.0;
+            if y as f32 <= 48.0 * scale && x as f32 >= area.right as f32 - 155.0 * scale {
+                APP.with(|cell| {
+                    let mut app = cell.borrow_mut();
+                    app.package_open = !app.package_open;
+                    app.settings_open = false;
+                    app.extensions_open = false;
+                });
+                invalidate(window);
+                return 0;
+            }
+            let package_open = APP.with(|cell| cell.borrow().package_open);
+            let package_left = area.right as f32 - 326.0 * scale;
+            let package_top = 56.0 * scale;
+            if package_open
+                && x as f32 >= package_left
+                && x as f32 <= area.right as f32 - 14.0 * scale
+                && y as f32 >= package_top
+                && y as f32 <= package_top + 214.0 * scale
+            {
+                APP.with(|cell| {
+                    let mut app = cell.borrow_mut();
+                    let local_y = y as f32 - package_top;
+                    if (42.0 * scale..174.0 * scale).contains(&local_y) {
+                        let index = ((local_y / scale - 42.0) / 42.0).floor() as usize;
+                        if index < app.package_targets.len() {
+                            app.package_targets[index] = !app.package_targets[index];
+                            app.save_package_targets();
+                        }
+                    } else if local_y >= 174.0 * scale {
+                        app.start_package();
+                    }
+                });
+                invalidate(window);
+                return 0;
+            }
             if let Some((line, toggle)) = comment_bubble_at(window, x, y) {
                 APP.with(|cell| {
                     let mut app = cell.borrow_mut();
@@ -1976,7 +2162,19 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_TIMER => {
-            APP.with(|cell| cell.borrow_mut().update_motion());
+            let reveal = APP.with(|cell| {
+                let mut app = cell.borrow_mut();
+                app.update_motion();
+                if app.package_reveal_pending {
+                    app.package_reveal_pending = false;
+                    Some(app.project_root.join(".tc-ide-packages"))
+                } else {
+                    None
+                }
+            });
+            if let Some(path) = reveal {
+                let _ = platform::open_in_explorer(window, &path);
+            }
             invalidate(window);
             0
         }

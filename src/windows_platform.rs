@@ -34,6 +34,7 @@ pub const COMMAND_NEW_FOLDER: Wparam = 1018;
 pub const COMMAND_WORKSPACE_SEARCH: Wparam = 1019;
 pub const COMMAND_SETTINGS: Wparam = 1020;
 pub const COMMAND_EXTENSIONS: Wparam = 1021;
+pub const COMMAND_PACKAGE: Wparam = 1022;
 
 const CF_UNICODETEXT: Uint = 13;
 const GMEM_MOVEABLE: Uint = 0x0002;
@@ -243,6 +244,7 @@ pub fn install_native_menu(window: Hwnd) {
         let workspace_search = wide("Search project files\tCtrl+P");
         let settings = wide("Settings...");
         let extensions = wide("Extensions...");
+        let package = wide("Package project...");
         AppendMenuW(
             file_menu,
             MF_STRING,
@@ -264,6 +266,7 @@ pub fn install_native_menu(window: Hwnd) {
             new_folder.as_ptr(),
         );
         AppendMenuW(file_menu, MF_STRING, COMMAND_OPEN_FILE, open_file.as_ptr());
+        AppendMenuW(file_menu, MF_STRING, COMMAND_PACKAGE, package.as_ptr());
         AppendMenuW(
             file_menu,
             MF_STRING,
