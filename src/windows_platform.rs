@@ -517,3 +517,20 @@ pub fn read_clipboard(window: Hwnd) -> Result<String, &'static str> {
 pub fn open_in_explorer(window: Hwnd, path: &Path) -> bool {
     shell_execute(window, &path.to_string_lossy(), None)
 }
+
+pub fn open_external_terminal(window: Hwnd, path: &Path) -> bool {
+    let display = path.to_string_lossy();
+    let quoted = format!("-d \"{}\"", display.replace('"', "\\\""));
+    if shell_execute(window, "wt.exe", Some(&quoted)) {
+        return true;
+    }
+    let escaped = display.replace('\'', "''");
+    shell_execute(
+        window,
+        "powershell.exe",
+        Some(&format!(
+            "-NoExit -Command \"Set-Location -LiteralPath '{}'\"",
+            escaped
+        )),
+    )
+}

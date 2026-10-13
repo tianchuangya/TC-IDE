@@ -1739,7 +1739,16 @@ unsafe extern "system" fn window_proc(
                     }
                     let local_y = y as f32 - terminal_top as f32 - 38.0 * scale;
                     if local_y <= 30.0 * scale {
-                        app.add_terminal();
+                        if x as f32 <= area.right as f32 - 82.0 * scale {
+                            app.add_terminal();
+                        } else if platform::open_external_terminal(window, &app.project_root) {
+                            app.status = format!(
+                                "External Windows terminal opened at {}",
+                                app.project_root.display()
+                            );
+                        } else {
+                            app.status = "Could not open Windows Terminal or PowerShell".into();
+                        }
                     } else {
                         let index = ((local_y / scale - 34.0) / 30.0).floor() as usize;
                         if index < app.terminals.len() {
