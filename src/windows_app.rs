@@ -138,6 +138,9 @@ struct WindowsAppState {
     language_installed: Vec<bool>,
     language_versions: Vec<usize>,
     hovered_symbol: Option<editor_core::SymbolOccurrence>,
+    expanded_comments: HashSet<usize>,
+    editing_comment: Option<usize>,
+    pointer_x: i32,
     background_path: Option<PathBuf>,
     background_opacity: f32,
     background_offset_x: f32,
@@ -247,6 +250,9 @@ impl WindowsAppState {
                 })
                 .collect(),
             hovered_symbol: None,
+            expanded_comments: HashSet::new(),
+            editing_comment: None,
+            pointer_x: -1,
             background_path: preferences.background_path,
             background_opacity: preferences.background_opacity,
             background_offset_x: preferences.background_offset_x,
@@ -281,6 +287,25 @@ impl WindowsAppState {
             .nth(column)
             .map(|(index, _)| index)
             .unwrap_or(value.len())
+    }
+
+    fn comment_edit_bounds(&self) -> Option<(usize, usize, usize)> {
+        let line = self.editing_comment?;
+        let value = self.lines.get(line)?;
+        let (_, start, end) = editor_core::comment_bounds(value, &self.file_name)?;
+        Some((
+            line,
+            value[..start].chars().count(),
+            value[..end].chars().count(),
+        ))
+    }
+
+    fn clamp_comment_caret(&mut self) {
+        if let Some((line, start, end)) = self.comment_edit_bounds() {
+            self.caret_line = line;
+            self.caret_column = self.caret_column.clamp(start, end);
+            self.selection_anchor = None;
+        }
     }
 
     fn position(&self) -> TextPosition {
@@ -370,9 +395,25 @@ impl WindowsAppState {
     }
 
     fn insert_text(&mut self, value: &str) {
+        let protected_comment = self.comment_edit_bounds();
+        if let Some((line, start, end)) = protected_comment {
+            self.caret_line = line;
+            self.caret_column = self.caret_column.clamp(start, end);
+            let selection_is_safe = self.selection_range().is_some_and(|(from, to)| {
+                from.line == line && to.line == line && from.column >= start && to.column <= end
+            });
+            if !selection_is_safe {
+                self.selection_anchor = None;
+            }
+        }
         self.record_undo();
         self.delete_selection_raw();
-        for value in value.replace("\r\n", "\n").replace('\r', "\n").chars() {
+        let value = if protected_comment.is_some() {
+            value.replace(['\r', '\n'], " ")
+        } else {
+            value.replace("\r\n", "\n").replace('\r', "\n")
+        };
+        for value in value.chars() {
             if value == '\n' {
                 self.newline_raw();
             } else if !value.is_control() {
@@ -430,6 +471,13 @@ impl WindowsAppState {
     }
 
     fn backspace(&mut self) {
+        if let Some((line, start, _)) = self.comment_edit_bounds() {
+            if self.caret_line != line || self.caret_column <= start {
+                self.clamp_comment_caret();
+                return;
+            }
+            self.selection_anchor = None;
+        }
         if self.selection_range().is_some() {
             self.record_undo();
             self.delete_selection_raw();
@@ -455,6 +503,13 @@ impl WindowsAppState {
     }
 
     fn delete_forward(&mut self) {
+        if let Some((line, _, end)) = self.comment_edit_bounds() {
+            if self.caret_line != line || self.caret_column >= end {
+                self.clamp_comment_caret();
+                return;
+            }
+            self.selection_anchor = None;
+        }
         if self.selection_range().is_some() {
             self.record_undo();
             self.delete_selection_raw();
@@ -582,6 +637,8 @@ impl WindowsAppState {
                 self.undo_stack.clear();
                 self.redo_stack.clear();
                 self.ime_composition.clear();
+                self.expanded_comments.clear();
+                self.editing_comment = None;
                 self.started = Instant::now();
                 self.project_symbols = Self::index_project(&self.project_root);
                 self.status = format!(
@@ -729,6 +786,8 @@ impl WindowsAppState {
         self.caret_line = 0;
         self.caret_column = 0;
         self.selection_anchor = None;
+        self.expanded_comments.clear();
+        self.editing_comment = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.terminals.clear();
@@ -1082,6 +1141,51 @@ fn editor_position_at(window: Hwnd, x: i32, y: i32) -> Option<TextPosition> {
     })
 }
 
+fn comment_bubble_at(window: Hwnd, x: i32, y: i32) -> Option<(usize, bool)> {
+    let mut area = unsafe { std::mem::zeroed::<Rect>() };
+    unsafe { GetClientRect(window, &mut area) };
+    let width = area.right.max(1) as f32;
+    let height = area.bottom.max(1) as f32;
+    let scale = platform::dpi_for_window(window) as f32 / 96.0;
+    let tree_w = (width * 0.19).max(220.0 * scale);
+    let graph_w = (width * 0.27).max(300.0 * scale);
+    let editor_right = width - graph_w;
+    if x as f32 <= tree_w || x as f32 >= editor_right {
+        return None;
+    }
+    APP.with(|cell| {
+        let app = cell.borrow();
+        let terminal_h = (28.0 + 214.0 * app.terminal_motion.clamp(0.0, 1.0)) * scale;
+        let body_bottom = height - terminal_h;
+        let code_top = 106.0 * scale;
+        let line_step = 25.0 * scale;
+        let bubble_right = editor_right - 14.0 * scale;
+        let bubble_left = (bubble_right - 286.0 * scale).max(tree_w + 130.0 * scale);
+        for (line, value) in app.lines.iter().enumerate() {
+            if editor_core::comment_bounds(value, &app.file_name).is_none() {
+                continue;
+            }
+            let top = code_top + line as f32 * line_step - 5.0 * scale;
+            if top >= body_bottom {
+                break;
+            }
+            let height = if app.expanded_comments.contains(&line) {
+                112.0
+            } else {
+                34.0
+            } * scale;
+            if x as f32 >= bubble_left
+                && x as f32 <= bubble_right
+                && y as f32 >= top
+                && y as f32 <= top + height
+            {
+                return Some((line, x as f32 <= bubble_left + 76.0 * scale));
+            }
+        }
+        None
+    })
+}
+
 fn perform_command(window: Hwnd, command: Wparam) {
     APP.with(|cell| {
         let mut app = cell.borrow_mut();
@@ -1104,7 +1208,18 @@ fn perform_command(window: Hwnd, command: Wparam) {
                 Ok(value) => app.insert_text(&value),
                 Err(error) => app.status = format!("Clipboard read failed: {error}"),
             },
-            platform::COMMAND_SELECT_ALL => app.select_all(),
+            platform::COMMAND_SELECT_ALL => {
+                if let Some((line, start, end)) = app.comment_edit_bounds() {
+                    app.selection_anchor = Some(TextPosition {
+                        line,
+                        column: start,
+                    });
+                    app.caret_line = line;
+                    app.caret_column = end;
+                } else {
+                    app.select_all();
+                }
+            }
             platform::COMMAND_CUT => {
                 if let Some(value) = app.cut_selection() {
                     match platform::write_clipboard(window, &value) {
@@ -1214,6 +1329,7 @@ fn render_window(window: Hwnd) {
                 .collect::<Vec<_>>();
             let completions = app.completions();
             let symbols = editor_core::symbol_occurrences(&app.lines, &app.file_name);
+            let expanded_comments = app.expanded_comments.iter().copied().collect::<Vec<_>>();
             let create_location = app.create_location.to_string_lossy().into_owned();
             let background_path = app
                 .background_path
@@ -1272,6 +1388,9 @@ fn render_window(window: Hwnd) {
                 symbols: &symbols,
                 project_symbols: &app.project_symbols,
                 hovered_symbol: app.hovered_symbol.as_ref(),
+                expanded_comments: &expanded_comments,
+                editing_comment: app.editing_comment,
+                pointer_x: app.pointer_x,
                 background_path: background_path.as_deref(),
                 background_opacity: app.background_opacity,
                 background_offset_x: app.background_offset_x,
@@ -1330,6 +1449,10 @@ fn handle_character(window: Hwnd, value: char) {
                     let _ = tab.session.write(&ch.to_string());
                 }
                 _ => {}
+            }
+        } else if app.editing_comment.is_some() {
+            if !value.is_control() {
+                app.insert_char(value);
             }
         } else if value == '\r' || value == '\n' {
             app.newline();
@@ -1538,6 +1661,9 @@ unsafe extern "system" fn window_proc(
                         _ => return,
                     }
                     app.clamp_caret();
+                    if app.editing_comment.is_some() {
+                        app.clamp_comment_caret();
+                    }
                     if !matches!(w_param as u32, VK_BACK | VK_DELETE) {
                         if platform::shift_pressed() {
                             if app.selection_anchor.is_none() {
@@ -1574,6 +1700,28 @@ unsafe extern "system" fn window_proc(
             let mut area = unsafe { std::mem::zeroed::<Rect>() };
             unsafe { GetClientRect(window, &mut area) };
             let scale = platform::dpi_for_window(window) as f32 / 96.0;
+            if let Some((line, toggle)) = comment_bubble_at(window, x, y) {
+                APP.with(|cell| {
+                    let mut app = cell.borrow_mut();
+                    if toggle {
+                        if !app.expanded_comments.remove(&line) {
+                            app.expanded_comments.insert(line);
+                        }
+                    } else if let Some((_, _, end)) = app
+                        .lines
+                        .get(line)
+                        .and_then(|value| editor_core::comment_bounds(value, &app.file_name))
+                    {
+                        app.editing_comment = Some(line);
+                        app.caret_line = line;
+                        app.caret_column = app.lines[line][..end].chars().count();
+                        app.selection_anchor = None;
+                        app.status = "Comment bubble edit mode: boundaries protected".into();
+                    }
+                });
+                invalidate(window);
+                return 0;
+            }
             let terminal_top = APP.with(|cell| {
                 let motion = cell.borrow().terminal_motion.clamp(0.0, 1.0);
                 area.bottom - ((28.0 + 214.0 * motion) * scale) as i32
@@ -1645,6 +1793,7 @@ unsafe extern "system" fn window_proc(
             } else if let Some(position) = editor_position_at(window, x, y) {
                 APP.with(|cell| {
                     let mut app = cell.borrow_mut();
+                    app.editing_comment = None;
                     app.set_caret(position, platform::shift_pressed());
                     app.dragging_selection = true;
                 });
@@ -1678,6 +1827,7 @@ unsafe extern "system" fn window_proc(
             let dragging = APP.with(|cell| cell.borrow().dragging_selection);
             let x = (l_param as u16 as i16) as i32;
             let y = ((l_param >> 16) as u16 as i16) as i32;
+            APP.with(|cell| cell.borrow_mut().pointer_x = x);
             if dragging && w_param & 1 != 0 {
                 if let Some(position) = editor_position_at(window, x, y) {
                     APP.with(|cell| cell.borrow_mut().set_caret(position, true));

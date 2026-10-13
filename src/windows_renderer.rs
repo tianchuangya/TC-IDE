@@ -58,6 +58,9 @@ pub struct WindowsScene<'a> {
     pub symbols: &'a [SymbolOccurrence],
     pub project_symbols: &'a [ProjectSymbolOccurrence],
     pub hovered_symbol: Option<&'a SymbolOccurrence>,
+    pub expanded_comments: &'a [usize],
+    pub editing_comment: Option<usize>,
+    pub pointer_x: i32,
     pub background_path: Option<&'a str>,
     pub background_opacity: f32,
     pub background_offset_x: f32,
@@ -739,6 +742,23 @@ impl DirectEditorRenderer {
                 .unwrap_or(0.0);
             let mut token_x = tree_w + 52.0 * scale + edit_offset;
             for token in editor_core::syntax_tokens(value, scene.file_name) {
+                if token.kind == TokenKind::Comment {
+                    unsafe {
+                        Self::text(
+                            &target_base,
+                            &self.code_format,
+                            &comment,
+                            "●",
+                            D2D_RECT_F {
+                                left: token_x,
+                                top: y,
+                                right: token_x + 20.0 * scale,
+                                bottom: y + line_step,
+                            },
+                        )
+                    };
+                    break;
+                }
                 let token_cells =
                     Self::visual_cells(&token.text, token.text.chars().count()) as f32;
                 let token_brush = match token.kind {
@@ -762,6 +782,70 @@ impl DirectEditorRenderer {
                     )
                 };
                 token_x += token_cells * self.code_cell * scale;
+            }
+        }
+        if scene.pointer_x as f32 >= tree_w {
+            for (line_index, value) in scene.lines.iter().take(max_lines).enumerate() {
+                let Some((marker_start, content_start, content_end)) =
+                    editor_core::comment_bounds(value, scene.file_name)
+                else {
+                    continue;
+                };
+                let expanded = scene.expanded_comments.contains(&line_index);
+                let editing = scene.editing_comment == Some(line_index);
+                let y = code_top + line_index as f32 * line_step - 5.0 * scale;
+                let bubble_right = editor_right - 14.0 * scale;
+                let bubble_left = (bubble_right - 286.0 * scale).max(tree_w + 130.0 * scale);
+                let bubble_height = if expanded { 112.0 } else { 34.0 } * scale;
+                let marker_column = value[..marker_start].chars().count();
+                let anchor_x = tree_w
+                    + (52.0 + Self::visual_cells(value, marker_column) as f32 * self.code_cell)
+                        * scale;
+                unsafe {
+                    Self::fill(
+                        &target_base,
+                        if editing { &accent } else { &line },
+                        anchor_x + 10.0 * scale,
+                        y + 15.0 * scale,
+                        bubble_left,
+                        y + 16.5 * scale,
+                    );
+                    Self::rounded(
+                        &target_base,
+                        if editing { &selection } else { &raised },
+                        D2D_RECT_F {
+                            left: bubble_left,
+                            top: y,
+                            right: bubble_right,
+                            bottom: y + bubble_height,
+                        },
+                        9.0 * scale,
+                    );
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        if editing { &accent } else { &muted },
+                        if expanded { "⌄  Edit" } else { ">  Edit" },
+                        D2D_RECT_F {
+                            left: bubble_left + 10.0 * scale,
+                            top: y + 7.0 * scale,
+                            right: bubble_left + 76.0 * scale,
+                            bottom: y + 30.0 * scale,
+                        },
+                    );
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        &text,
+                        value[content_start..content_end].trim(),
+                        D2D_RECT_F {
+                            left: bubble_left + 78.0 * scale,
+                            top: y + 7.0 * scale,
+                            right: bubble_right - 10.0 * scale,
+                            bottom: y + bubble_height - 6.0 * scale,
+                        },
+                    );
+                }
             }
         }
         let caret_cells = scene
