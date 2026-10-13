@@ -941,6 +941,81 @@ impl WindowsAppState {
         }
     }
 
+    fn task_command(&self, build: bool) -> String {
+        let quoted_file = self
+            .file_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| format!("\"{}\"", name.to_string_lossy().replace('"', "\\\"")))
+            .unwrap_or_else(|| "\"main\"".into());
+        if self.project_root.join("Cargo.toml").exists() {
+            return if build { "cargo build" } else { "cargo run" }.into();
+        }
+        if self.project_root.join("package.json").exists() {
+            return if build {
+                "npm run build"
+            } else {
+                "npm run dev"
+            }
+            .into();
+        }
+        if self.project_root.join("go.mod").exists() {
+            return if build { "go build ./..." } else { "go run ." }.into();
+        }
+        match editor_core::language_for_file(&self.file_name) {
+            "Python" => {
+                if build {
+                    "python -m compileall .".into()
+                } else {
+                    format!("python {quoted_file}")
+                }
+            }
+            "C" => {
+                if build {
+                    format!("gcc {quoted_file} -o .\\tc-ide-build.exe")
+                } else {
+                    ".\\tc-ide-build.exe".into()
+                }
+            }
+            "C++" => {
+                if build {
+                    format!("g++ {quoted_file} -o .\\tc-ide-build.exe")
+                } else {
+                    ".\\tc-ide-build.exe".into()
+                }
+            }
+            "Java" => {
+                if build {
+                    format!("javac {quoted_file}")
+                } else {
+                    let class = self
+                        .file_path
+                        .as_ref()
+                        .and_then(|path| path.file_stem())
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "Main".into());
+                    format!("java {class}")
+                }
+            }
+            _ => format!(
+                "Write-Host 'No {} task configured for this project'",
+                if build { "build" } else { "run" }
+            ),
+        }
+    }
+
+    fn run_task(&mut self, build: bool) {
+        self.terminal_open = true;
+        self.ensure_terminal();
+        let index = if build { 0 } else { 1 }.min(self.terminals.len().saturating_sub(1));
+        let command = self.task_command(build);
+        if let Some(tab) = self.terminals.get(index) {
+            let _ = tab.session.write(&format!("{command}\r"));
+            self.active_terminal = index;
+            self.status = format!("{}: {command}", if build { "Build" } else { "Run" });
+        }
+    }
+
     fn update_motion(&mut self) {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.04);
@@ -1727,7 +1802,16 @@ unsafe extern "system" fn window_proc(
                 area.bottom - ((28.0 + 214.0 * motion) * scale) as i32
             });
             if y >= terminal_top && y <= terminal_top + (34.0 * scale) as i32 {
-                APP.with(|cell| cell.borrow_mut().toggle_terminal());
+                APP.with(|cell| {
+                    let mut app = cell.borrow_mut();
+                    if x as f32 >= 150.0 * scale && (x as f32) < 225.0 * scale {
+                        app.run_task(true);
+                    } else if x as f32 >= 225.0 * scale && (x as f32) < 310.0 * scale {
+                        app.run_task(false);
+                    } else {
+                        app.toggle_terminal();
+                    }
+                });
                 invalidate(window);
             } else if x as f32 >= area.right as f32 - 168.0 * scale
                 && y as f32 >= terminal_top as f32 + 38.0 * scale

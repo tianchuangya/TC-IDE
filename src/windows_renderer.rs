@@ -1142,6 +1142,20 @@ impl DirectEditorRenderer {
                 },
             )
         };
+        unsafe {
+            Self::text(
+                &target_base,
+                &self.small_format,
+                &accent,
+                "Build     Run",
+                D2D_RECT_F {
+                    left: 160.0 * scale,
+                    top: height - terminal_h + 9.0 * scale,
+                    right: 310.0 * scale,
+                    bottom: height - terminal_h + 32.0 * scale,
+                },
+            )
+        };
         if terminal_progress > 0.08 {
             let output_top = height - terminal_h + 38.0 * scale;
             let terminal_list_w = 168.0 * scale;
