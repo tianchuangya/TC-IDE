@@ -246,6 +246,1653 @@ fn hovering(pointer_x: i32, pointer_y: i32, left: f32, top: f32, right: f32, bot
         && (pointer_y as f32) <= bottom
 }
 
+/// The brushes and geometry of one frame, handed to the region painters below.
+///
+/// `render` keeps the frame together as a readable sequence of scene regions;
+/// each region draws itself against this shared state instead of living in one
+/// several thousand line function.
+struct ScenePaint<'a, 's> {
+    renderer: &'a DirectEditorRenderer,
+    target: &'a ID2D1RenderTarget,
+    scene: &'s WindowsScene<'s>,
+    accent: ID2D1SolidColorBrush,
+    bg: ID2D1SolidColorBrush,
+    bright: ID2D1SolidColorBrush,
+    /// Quiet separator colour, used for the thin rules between regions.
+    divider: ID2D1SolidColorBrush,
+    literal: ID2D1SolidColorBrush,
+    muted: ID2D1SolidColorBrush,
+    panel: ID2D1SolidColorBrush,
+    raised: ID2D1SolidColorBrush,
+    selection: ID2D1SolidColorBrush,
+    selected_text: ID2D1SolidColorBrush,
+    text: ID2D1SolidColorBrush,
+    height: f32,
+    scale: f32,
+    width: f32,
+    header_h: f32,
+    code_top: f32,
+    body_bottom: f32,
+    editor_right: f32,
+    tree_w: f32,
+    terminal_h: f32,
+    terminal_panel: terminal_core::TerminalPanel,
+    terminal_progress: f32,
+    status_h: f32,
+}
+
+impl ScenePaint<'_, '_> {
+    /// Paint the terminal panel region.
+    fn draw_terminal_panel(&self) {
+        if self.terminal_progress > 0.08 {
+            let output_top = self.terminal_panel.body_top;
+            let terminal_right = self.terminal_panel.list_left;
+            unsafe {
+                DirectEditorRenderer::fill(
+                    self.target,
+                    &self.divider,
+                    terminal_right,
+                    self.height - self.terminal_h + 34.0 * self.scale,
+                    terminal_right + 1.0 * self.scale,
+                    self.height,
+                );
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.ui_format,
+                    &self.accent,
+                    "+  New        ↗  Detach",
+                    D2D_RECT_F {
+                        left: terminal_right + 15.0 * self.scale,
+                        top: output_top,
+                        right: self.width - 8.0 * self.scale,
+                        bottom: output_top + 28.0 * self.scale,
+                    },
+                );
+            }
+            for (index, name) in self
+                .scene
+                .terminal_names
+                .iter()
+                .take(terminal_core::PANEL_VISIBLE_ROWS)
+                .enumerate()
+            {
+                let top = output_top + (34.0 + index as f32 * 30.0) * self.scale;
+                if index == self.scene.active_terminal {
+                    unsafe {
+                        DirectEditorRenderer::rounded(
+                            self.target,
+                            &self.selection,
+                            D2D_RECT_F {
+                                left: terminal_right + 8.0 * self.scale,
+                                top,
+                                right: self.width - 8.0 * self.scale,
+                                bottom: top + 27.0 * self.scale,
+                            },
+                            6.0 * self.scale,
+                        )
+                    };
+                }
+                unsafe {
+                    DirectEditorRenderer::text(
+                        self.target,
+                        &self.renderer.small_format,
+                        if index == self.scene.active_terminal {
+                            &self.bright
+                        } else {
+                            &self.muted
+                        },
+                        name,
+                        D2D_RECT_F {
+                            left: terminal_right + 15.0 * self.scale,
+                            top: top + 5.0 * self.scale,
+                            right: self.width - 8.0 * self.scale,
+                            bottom: top + 27.0 * self.scale,
+                        },
+                    )
+                };
+            }
+            for (index, value) in self.scene.terminal_lines.iter().enumerate() {
+                let row_top = output_top + index as f32 * self.terminal_panel.row_height;
+                let line = self.scene.terminal_first_line + index;
+                if let Some(((start_line, start_column), (end_line, end_column))) =
+                    self.scene.terminal_selection
+                {
+                    if line >= start_line && line <= end_line {
+                        let from = if line == start_line {
+                            terminal_core::visual_cells(value, start_column)
+                        } else {
+                            0
+                        };
+                        let to = if line == end_line {
+                            terminal_core::visual_cells(value, end_column)
+                        } else {
+                            value.chars().count()
+                        };
+                        if to > from {
+                            let cell = self.renderer.code_cell * self.scale;
+                            unsafe {
+                                DirectEditorRenderer::rounded(
+                                    self.target,
+                                    &self.selected_text,
+                                    D2D_RECT_F {
+                                        left: self.terminal_panel.body_left + from as f32 * cell,
+                                        top: row_top,
+                                        right: (self.terminal_panel.body_left + to as f32 * cell)
+                                            .min(self.terminal_panel.body_right),
+                                        bottom: row_top + self.terminal_panel.row_height,
+                                    },
+                                    3.0 * self.scale,
+                                )
+                            };
+                        }
+                    }
+                }
+                unsafe {
+                    DirectEditorRenderer::text(
+                        self.target,
+                        &self.renderer.code_format,
+                        &self.text,
+                        value,
+                        D2D_RECT_F {
+                            left: self.terminal_panel.body_left,
+                            top: row_top,
+                            right: self.terminal_panel.body_right,
+                            bottom: row_top + self.terminal_panel.row_height,
+                        },
+                    )
+                };
+            }
+            unsafe {
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.code_format,
+                    &self.accent,
+                    &format!("$ {}", self.scene.terminal_input),
+                    D2D_RECT_F {
+                        left: self.terminal_panel.body_left,
+                        top: self.height - 30.0 * self.scale,
+                        right: self.terminal_panel.body_right,
+                        bottom: self.height,
+                    },
+                )
+            };
+        } else {
+            unsafe {
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.small_format,
+                    &self.muted,
+                    self.scene.status,
+                    D2D_RECT_F {
+                        left: 160.0 * self.scale,
+                        top: self.height - self.status_h + 7.0 * self.scale,
+                        right: self.width,
+                        bottom: self.height,
+                    },
+                )
+            };
+        }
+    }
+
+    /// Paint the package progress region.
+    fn draw_package_progress(&self) {
+        if self.scene.package_progress > 0.0 {
+            let center_x = (self.tree_w + self.editor_right) * 0.5;
+            let center_y = (self.header_h + self.body_bottom) * 0.5;
+            let complete = !self.scene.package_running && self.scene.package_progress >= 1.0;
+            for ring in 0..7 {
+                let pulse = (self.scene.animation_seconds * 2.4 + ring as f32 * 0.37).sin() * 4.0;
+                let radius = (22.0 + ring as f32 * 9.0 + pulse) * self.scale;
+                let mut ellipse = D2D1_ELLIPSE::default();
+                ellipse.point.X = center_x;
+                ellipse.point.Y = center_y;
+                ellipse.radiusX = radius * (1.0 + ring as f32 * 0.018);
+                ellipse.radiusY = radius;
+                unsafe {
+                    self.target.DrawEllipse(
+                        &ellipse,
+                        if complete { &self.bright } else { &self.muted },
+                        (1.0 + ring as f32 * 0.12) * self.scale,
+                        None,
+                    )
+                };
+            }
+            for index in 0..18 {
+                let source_x =
+                    self.tree_w + 35.0 * self.scale + (index % 6) as f32 * 74.0 * self.scale;
+                let source_y = self.code_top + (index / 6) as f32 * 68.0 * self.scale;
+                let travel = if complete {
+                    (self.scene.animation_seconds * 1.8).fract()
+                } else {
+                    self.scene.package_progress.clamp(0.0, 1.0).powf(1.8)
+                };
+                let x = if complete {
+                    center_x + (source_x - center_x) * travel
+                } else {
+                    source_x + (center_x - source_x) * travel
+                };
+                let y = if complete {
+                    center_y + (source_y - center_y) * travel
+                } else {
+                    source_y + (center_y - source_y) * travel
+                };
+                let stretch = 5.0 + 24.0 * travel;
+                unsafe {
+                    DirectEditorRenderer::fill(
+                        self.target,
+                        if complete { &self.bright } else { &self.text },
+                        x - stretch * self.scale,
+                        y - 1.5 * self.scale,
+                        x + 5.0 * self.scale,
+                        y + 1.5 * self.scale,
+                    )
+                };
+            }
+        }
+    }
+
+    /// Paint the package overlay region.
+    fn draw_package_overlay(&self) {
+        if self.scene.package_motion > 0.001 {
+            let left = self.width - 326.0 * self.scale;
+            let top = self.header_h + 8.0 * self.scale
+                - (1.0 - self.scene.package_motion.min(1.0)) * 30.0 * self.scale;
+            unsafe {
+                DirectEditorRenderer::rounded(
+                    self.target,
+                    &self.panel,
+                    D2D_RECT_F {
+                        left,
+                        top,
+                        right: self.width - 14.0 * self.scale,
+                        bottom: top + 240.0 * self.scale,
+                    },
+                    14.0 * self.scale,
+                )
+            };
+            let labels = if self.scene.ui_chinese {
+                [
+                    "1  原生可执行文件",
+                    "2  Portable ZIP",
+                    "3  MSIX（Windows SDK）",
+                ]
+            } else {
+                [
+                    "1  Portable native artifact",
+                    "2  Portable ZIP",
+                    "3  MSIX (Windows SDK)",
+                ]
+            };
+            for (index, label) in labels.iter().enumerate() {
+                let y = top + (48.0 + index as f32 * 42.0) * self.scale;
+                let hovered = hovering(
+                    self.scene.pointer_x,
+                    self.scene.pointer_y,
+                    left + 10.0 * self.scale,
+                    y - 6.0 * self.scale,
+                    self.width - 20.0 * self.scale,
+                    y + 30.0 * self.scale,
+                );
+                if hovered {
+                    unsafe {
+                        DirectEditorRenderer::rounded(
+                            self.target,
+                            &self.raised,
+                            D2D_RECT_F {
+                                left: left + 10.0 * self.scale,
+                                top: y - 6.0 * self.scale,
+                                right: self.width - 20.0 * self.scale,
+                                bottom: y + 30.0 * self.scale,
+                            },
+                            6.0 * self.scale,
+                        )
+                    };
+                }
+                unsafe {
+                    DirectEditorRenderer::text(
+                        self.target,
+                        &self.renderer.ui_format,
+                        if self.scene.package_targets[index] || hovered {
+                            &self.accent
+                        } else {
+                            &self.text
+                        },
+                        &format!(
+                            "{}  {label}",
+                            if self.scene.package_targets[index] {
+                                "[x]"
+                            } else {
+                                "[ ]"
+                            }
+                        ),
+                        D2D_RECT_F {
+                            left: left + 18.0 * self.scale,
+                            top: y,
+                            right: self.width - 24.0 * self.scale,
+                            bottom: y + 30.0 * self.scale,
+                        },
+                    )
+                };
+            }
+            let certificate = if self.scene.signing_certificate.is_empty() {
+                if self.scene.ui_chinese {
+                    "4  签名证书：未选择（点击选择）".to_string()
+                } else {
+                    "4  Signing certificate: none (click to choose)".to_string()
+                }
+            } else if self.scene.ui_chinese {
+                format!("4  签名证书：{}", self.scene.signing_certificate)
+            } else {
+                format!("4  Signing certificate: {}", self.scene.signing_certificate)
+            };
+            unsafe {
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.small_format,
+                    if self.scene.signing_certificate.is_empty() {
+                        &self.muted
+                    } else {
+                        &self.accent
+                    },
+                    &certificate,
+                    D2D_RECT_F {
+                        left: left + 18.0 * self.scale,
+                        top: top + 172.0 * self.scale,
+                        right: self.width - 24.0 * self.scale,
+                        bottom: top + 198.0 * self.scale,
+                    },
+                );
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.small_format,
+                    &self.bright,
+                    if self.scene.ui_chinese {
+                        "Enter  开始打包     Esc  关闭"
+                    } else {
+                        "Enter  Start packaging     Esc  Close"
+                    },
+                    D2D_RECT_F {
+                        left: left + 18.0 * self.scale,
+                        top: top + 194.0 * self.scale,
+                        right: self.width - 24.0 * self.scale,
+                        bottom: top + 222.0 * self.scale,
+                    },
+                )
+            };
+        }
+    }
+
+    /// Paint the settings overlay region.
+    fn draw_settings_overlay(&self) {
+        if self.scene.settings_motion > 0.001 {
+            let panel_w = 390.0 * self.scale;
+            let left = self.width - panel_w - 20.0 * self.scale;
+            let top = (58.0 - (1.0 - self.scene.settings_motion.min(1.0)) * 34.0) * self.scale;
+            unsafe {
+                DirectEditorRenderer::rounded(
+                    self.target,
+                    &self.panel,
+                    D2D_RECT_F {
+                        left,
+                        top,
+                        right: self.width - 20.0 * self.scale,
+                        bottom: (top + 680.0 * self.scale).min(self.height - 20.0 * self.scale),
+                    },
+                    16.0 * self.scale,
+                )
+            };
+            let settings = [
+                (
+                    24.0,
+                    if self.scene.ui_chinese {
+                        "设置".into()
+                    } else {
+                        "SETTINGS".into()
+                    },
+                ),
+                (
+                    78.0,
+                    format!(
+                        "L   Interface language: {}",
+                        if self.scene.ui_chinese {
+                            "简体中文"
+                        } else {
+                            "English"
+                        }
+                    ),
+                ),
+                (
+                    132.0,
+                    format!(
+                        "T   Theme: {}",
+                        if self.scene.light_theme {
+                            "Light"
+                        } else {
+                            "Dark"
+                        }
+                    ),
+                ),
+                (
+                    186.0,
+                    format!("←→  Code font size: {}", 15 + self.scene.code_zoom),
+                ),
+                (
+                    240.0,
+                    format!(
+                        "Font search: {}{}",
+                        if self.scene.font_search.is_empty() {
+                            "type to filter"
+                        } else {
+                            self.scene.font_search
+                        },
+                        if self.scene.font_search_focused {
+                            "  |"
+                        } else {
+                            ""
+                        }
+                    ),
+                ),
+                (
+                    464.0,
+                    format!(
+                        "B   Background: {}",
+                        self.scene.background_path.unwrap_or("not selected")
+                    ),
+                ),
+                (
+                    518.0,
+                    format!(
+                        "O/P opacity {:.0}%   Z/X zoom {:.1}x",
+                        self.scene.background_opacity * 100.0,
+                        self.scene.background_zoom
+                    ),
+                ),
+                (572.0, "C   Clear background".into()),
+                (626.0, "Esc  Close settings".into()),
+            ];
+            for (index, (row_y, value)) in settings.iter().enumerate() {
+                // Rows 1..4 are clickable, so they light up under the pointer.
+                let row_top = top + row_y * self.scale;
+                let row_bottom = row_top + (if index == 5 { 34.0 } else { 54.0 }) * self.scale;
+                let clickable = (1..=9).contains(&index);
+                let hovered = clickable
+                    && hovering(
+                        self.scene.pointer_x,
+                        self.scene.pointer_y,
+                        left + 16.0 * self.scale,
+                        row_top - 6.0 * self.scale,
+                        self.width - 30.0 * self.scale,
+                        row_bottom - 6.0 * self.scale,
+                    );
+                if hovered {
+                    unsafe {
+                        DirectEditorRenderer::rounded(
+                            self.target,
+                            &self.raised,
+                            D2D_RECT_F {
+                                left: left + 16.0 * self.scale,
+                                top: row_top - 6.0 * self.scale,
+                                right: self.width - 30.0 * self.scale,
+                                bottom: row_bottom - 6.0 * self.scale,
+                            },
+                            6.0 * self.scale,
+                        )
+                    };
+                }
+                let (row_y, value) = (*row_y, settings_row_text(self.scene, index, value));
+                unsafe {
+                    DirectEditorRenderer::text(
+                        self.target,
+                        if index == 0 {
+                            &self.renderer.ui_format
+                        } else {
+                            &self.renderer.small_format
+                        },
+                        if index == 0 || hovered {
+                            &self.bright
+                        } else if index < 4 {
+                            &self.text
+                        } else {
+                            &self.muted
+                        },
+                        &value,
+                        D2D_RECT_F {
+                            left: left + 22.0 * self.scale,
+                            top: top + row_y * self.scale,
+                            right: self.width - 38.0 * self.scale,
+                            bottom: top + (row_y + 28.0) * self.scale,
+                        },
+                    )
+                };
+            }
+            let needle = self.scene.font_search.trim().to_ascii_lowercase();
+            for (visible, (index, family)) in self
+                .scene
+                .font_options
+                .iter()
+                .enumerate()
+                .filter(|(_, family)| {
+                    needle.is_empty() || family.to_ascii_lowercase().contains(&needle)
+                })
+                .take(5)
+                .enumerate()
+            {
+                let row_top = top + (282.0 + visible as f32 * 34.0) * self.scale;
+                if index == self.scene.code_font_family {
+                    unsafe {
+                        DirectEditorRenderer::rounded(
+                            self.target,
+                            &self.selection,
+                            D2D_RECT_F {
+                                left: left + 18.0 * self.scale,
+                                top: row_top - 4.0 * self.scale,
+                                right: self.width - 34.0 * self.scale,
+                                bottom: row_top + 28.0 * self.scale,
+                            },
+                            6.0 * self.scale,
+                        )
+                    };
+                }
+                unsafe {
+                    DirectEditorRenderer::text(
+                        self.target,
+                        &self.renderer.small_format,
+                        if index == self.scene.code_font_family {
+                            &self.bright
+                        } else {
+                            &self.text
+                        },
+                        &format!(
+                            "{}{}",
+                            if index == self.scene.code_font_family {
+                                "✓  "
+                            } else {
+                                "   "
+                            },
+                            family
+                        ),
+                        D2D_RECT_F {
+                            left: left + 28.0 * self.scale,
+                            top: row_top,
+                            right: self.width - 42.0 * self.scale,
+                            bottom: row_top + 28.0 * self.scale,
+                        },
+                    )
+                };
+            }
+        }
+    }
+
+    /// Paint the extensions overlay region.
+    fn draw_extensions_overlay(&self) {
+        if self.scene.extensions_motion > 0.001 {
+            let panel_w = (920.0 * self.scale).min(self.width - 50.0 * self.scale);
+            let panel_h = (610.0 * self.scale).min(self.height - 80.0 * self.scale);
+            let left = (self.width - panel_w) * 0.5;
+            let top = (58.0 - (1.0 - self.scene.extensions_motion.min(1.0)) * 34.0) * self.scale;
+            unsafe {
+                DirectEditorRenderer::rounded(
+                    self.target,
+                    &self.panel,
+                    D2D_RECT_F {
+                        left,
+                        top,
+                        right: left + panel_w,
+                        bottom: top + panel_h,
+                    },
+                    16.0 * self.scale,
+                )
+            };
+            let categories = if self.scene.ui_chinese {
+                ["语言", "主题", "调试器", "格式化器", "AI / 代理"]
+            } else {
+                [
+                    "Languages",
+                    "Themes",
+                    "Debuggers",
+                    "Formatters",
+                    "AI / Agents",
+                ]
+            };
+            unsafe {
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.ui_format,
+                    &self.bright,
+                    if self.scene.ui_chinese {
+                        "扩展"
+                    } else {
+                        "EXTENSIONS"
+                    },
+                    D2D_RECT_F {
+                        left: left + 22.0 * self.scale,
+                        top: top + 20.0 * self.scale,
+                        right: left + panel_w,
+                        bottom: top + 50.0 * self.scale,
+                    },
+                )
+            };
+            for (index, category) in categories.iter().enumerate() {
+                let y = top + (78.0 + index as f32 * 44.0) * self.scale;
+                if index == self.scene.extension_category {
+                    unsafe {
+                        DirectEditorRenderer::rounded(
+                            self.target,
+                            &self.selection,
+                            D2D_RECT_F {
+                                left: left + 14.0 * self.scale,
+                                top: y - 20.0 * self.scale,
+                                right: left + 172.0 * self.scale,
+                                bottom: y + 14.0 * self.scale,
+                            },
+                            7.0 * self.scale,
+                        )
+                    };
+                }
+                unsafe {
+                    DirectEditorRenderer::text(
+                        self.target,
+                        &self.renderer.small_format,
+                        if index == self.scene.extension_category {
+                            &self.bright
+                        } else {
+                            &self.text
+                        },
+                        category,
+                        D2D_RECT_F {
+                            left: left + 26.0 * self.scale,
+                            top: y - 8.0 * self.scale,
+                            right: left + 168.0 * self.scale,
+                            bottom: y + 20.0 * self.scale,
+                        },
+                    )
+                };
+            }
+            let content_left = left + 205.0 * self.scale;
+            if self.scene.extension_category == 0 {
+                unsafe {
+                    DirectEditorRenderer::rounded(
+                        self.target,
+                        if self.scene.extension_search_focused {
+                            &self.selection
+                        } else {
+                            &self.raised
+                        },
+                        D2D_RECT_F {
+                            left: content_left,
+                            top: top + 72.0 * self.scale,
+                            right: left + panel_w - 24.0 * self.scale,
+                            bottom: top + 114.0 * self.scale,
+                        },
+                        8.0 * self.scale,
+                    );
+                    DirectEditorRenderer::text(
+                        self.target,
+                        &self.renderer.small_format,
+                        &self.text,
+                        if self.scene.extension_search.is_empty() {
+                            "Search programming languages"
+                        } else {
+                            self.scene.extension_search
+                        },
+                        D2D_RECT_F {
+                            left: content_left + 14.0 * self.scale,
+                            top: top + 83.0 * self.scale,
+                            right: left + panel_w - 36.0 * self.scale,
+                            bottom: top + 110.0 * self.scale,
+                        },
+                    );
+                }
+                let needle = self.scene.extension_search.trim().to_ascii_lowercase();
+                for (visible, (index, language)) in self
+                    .scene
+                    .language_options
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, language)| {
+                        needle.is_empty() || language.to_ascii_lowercase().contains(&needle)
+                    })
+                    .skip(self.scene.extension_scroll)
+                    .take(8)
+                    .enumerate()
+                {
+                    let y = top + (142.0 + visible as f32 * 48.0) * self.scale;
+                    if index == self.scene.selected_language {
+                        unsafe {
+                            DirectEditorRenderer::rounded(
+                                self.target,
+                                &self.selection,
+                                D2D_RECT_F {
+                                    left: content_left,
+                                    top: y - 22.0 * self.scale,
+                                    right: content_left + 300.0 * self.scale,
+                                    bottom: y + 16.0 * self.scale,
+                                },
+                                7.0 * self.scale,
+                            )
+                        };
+                    }
+                    let installed = self
+                        .scene
+                        .language_installed
+                        .get(index)
+                        .copied()
+                        .unwrap_or(false);
+                    unsafe {
+                        DirectEditorRenderer::text(
+                            self.target,
+                            &self.renderer.small_format,
+                            &self.text,
+                            language,
+                            D2D_RECT_F {
+                                left: content_left + 12.0 * self.scale,
+                                top: y - 9.0 * self.scale,
+                                right: content_left + 160.0 * self.scale,
+                                bottom: y + 18.0 * self.scale,
+                            },
+                        )
+                    };
+                    unsafe {
+                        DirectEditorRenderer::text(
+                            self.target,
+                            &self.renderer.small_format,
+                            &self.accent,
+                            DirectEditorRenderer::language_version(
+                                index,
+                                self.scene
+                                    .language_versions
+                                    .get(index)
+                                    .copied()
+                                    .unwrap_or(0),
+                            ),
+                            D2D_RECT_F {
+                                left: content_left + 110.0 * self.scale,
+                                top: y - 9.0 * self.scale,
+                                right: content_left + 190.0 * self.scale,
+                                bottom: y + 18.0 * self.scale,
+                            },
+                        )
+                    };
+                    unsafe {
+                        DirectEditorRenderer::text(
+                            self.target,
+                            &self.renderer.small_format,
+                            if installed { &self.accent } else { &self.muted },
+                            if installed {
+                                "INSTALLED"
+                            } else {
+                                "BUILT-IN DETECTION"
+                            },
+                            D2D_RECT_F {
+                                left: content_left + 240.0 * self.scale,
+                                top: y - 9.0 * self.scale,
+                                right: content_left + 390.0 * self.scale,
+                                bottom: y + 18.0 * self.scale,
+                            },
+                        )
+                    };
+                }
+                let version = DirectEditorRenderer::language_version(
+                    self.scene.selected_language,
+                    self.scene
+                        .language_versions
+                        .get(self.scene.selected_language)
+                        .copied()
+                        .unwrap_or(0),
+                );
+                unsafe {
+                    DirectEditorRenderer::text(
+                        self.target,
+                        &self.renderer.small_format,
+                        &self.muted,
+                        &format!("↑↓ Select  ·  V Version {version}  ·  Space Install/remove"),
+                        D2D_RECT_F {
+                            left: content_left,
+                            top: top + panel_h - 48.0 * self.scale,
+                            right: left + panel_w,
+                            bottom: top + panel_h - 18.0 * self.scale,
+                        },
+                    )
+                };
+            } else {
+                let detail = match self.scene.extension_category {
+                    1 => "Dark and light semantic themes apply immediately.",
+                    2 => "Native debugger adapters · click a tool to check the Windows runtime.",
+                    3 => "Native formatter adapters · click a tool to check the Windows runtime.",
+                    _ => {
+                        "OpenAI-compatible endpoint, model and session-only API key configuration."
+                    }
+                };
+                unsafe {
+                    DirectEditorRenderer::text(
+                        self.target,
+                        &self.renderer.ui_format,
+                        &self.bright,
+                        categories[self.scene.extension_category],
+                        D2D_RECT_F {
+                            left: content_left,
+                            top: top + 82.0 * self.scale,
+                            right: left + panel_w - 20.0 * self.scale,
+                            bottom: top + 118.0 * self.scale,
+                        },
+                    )
+                };
+                unsafe {
+                    DirectEditorRenderer::text(
+                        self.target,
+                        &self.renderer.small_format,
+                        &self.muted,
+                        detail,
+                        D2D_RECT_F {
+                            left: content_left,
+                            top: top + 132.0 * self.scale,
+                            right: left + panel_w - 30.0 * self.scale,
+                            bottom: top + 220.0 * self.scale,
+                        },
+                    )
+                };
+                if self.scene.extension_category == 1 {
+                    for (index, label) in ["Dark", "Light"].iter().enumerate() {
+                        let active = (index == 0 && !self.scene.light_theme)
+                            || (index == 1 && self.scene.light_theme);
+                        let row_top = top + (190.0 + index as f32 * 50.0) * self.scale;
+                        unsafe {
+                            DirectEditorRenderer::rounded(
+                                self.target,
+                                if active {
+                                    &self.selection
+                                } else {
+                                    &self.raised
+                                },
+                                D2D_RECT_F {
+                                    left: content_left,
+                                    top: row_top,
+                                    right: content_left + 315.0 * self.scale,
+                                    bottom: row_top + 40.0 * self.scale,
+                                },
+                                8.0 * self.scale,
+                            );
+                            DirectEditorRenderer::text(
+                                self.target,
+                                &self.renderer.small_format,
+                                if active { &self.bright } else { &self.text },
+                                &format!(
+                                    "{}{}",
+                                    label,
+                                    if active {
+                                        if self.scene.ui_chinese {
+                                            "    已启用"
+                                        } else {
+                                            "    ACTIVE"
+                                        }
+                                    } else {
+                                        ""
+                                    }
+                                ),
+                                D2D_RECT_F {
+                                    left: content_left + 16.0 * self.scale,
+                                    top: row_top + 10.0 * self.scale,
+                                    right: content_left + 300.0 * self.scale,
+                                    bottom: row_top + 36.0 * self.scale,
+                                },
+                            );
+                        }
+                    }
+                }
+                if self.scene.extension_category == 0 {
+                    // The language page reports what is really installed.
+                    unsafe {
+                        DirectEditorRenderer::text(
+                            self.target,
+                            &self.renderer.small_format,
+                            &self.muted,
+                            self.scene.language_tooling,
+                            D2D_RECT_F {
+                                left: content_left,
+                                top: top + 520.0 * self.scale,
+                                right: left + panel_w - 24.0 * self.scale,
+                                bottom: top + 548.0 * self.scale,
+                            },
+                        )
+                    };
+                }
+                if matches!(self.scene.extension_category, 2 | 3) {
+                    let items = if self.scene.extension_category == 2 {
+                        ["LLDB", "GDB", "debugpy"]
+                    } else {
+                        ["Biome", "clang-format", "Ruff"]
+                    };
+                    for (index, label) in items.iter().enumerate() {
+                        let row_top = top + (190.0 + index as f32 * 50.0) * self.scale;
+                        unsafe {
+                            DirectEditorRenderer::rounded(
+                                self.target,
+                                &self.raised,
+                                D2D_RECT_F {
+                                    left: content_left,
+                                    top: row_top,
+                                    right: content_left + 360.0 * self.scale,
+                                    bottom: row_top + 40.0 * self.scale,
+                                },
+                                8.0 * self.scale,
+                            );
+                            DirectEditorRenderer::text(
+                                self.target,
+                                &self.renderer.small_format,
+                                &self.text,
+                                &format!(
+                                    "{label}{}",
+                                    if self.scene.ui_chinese {
+                                        "    检测"
+                                    } else {
+                                        "    CHECK"
+                                    }
+                                ),
+                                D2D_RECT_F {
+                                    left: content_left + 16.0 * self.scale,
+                                    top: row_top + 10.0 * self.scale,
+                                    right: content_left + 340.0 * self.scale,
+                                    bottom: row_top + 36.0 * self.scale,
+                                },
+                            );
+                        }
+                    }
+                    // One real action per category, for the file that is open.
+                    let action = if self.scene.extension_category == 2 {
+                        format!("Start debug adapter for {}", self.scene.file_name)
+                    } else {
+                        format!("Format {}", self.scene.file_name)
+                    };
+                    let row_top = top + 348.0 * self.scale;
+                    unsafe {
+                        DirectEditorRenderer::rounded(
+                            self.target,
+                            &self.selection,
+                            D2D_RECT_F {
+                                left: content_left,
+                                top: row_top,
+                                right: content_left + 520.0 * self.scale,
+                                bottom: row_top + 44.0 * self.scale,
+                            },
+                            8.0 * self.scale,
+                        );
+                        DirectEditorRenderer::text(
+                            self.target,
+                            &self.renderer.small_format,
+                            &self.accent,
+                            &action,
+                            D2D_RECT_F {
+                                left: content_left + 16.0 * self.scale,
+                                top: row_top + 12.0 * self.scale,
+                                right: content_left + 500.0 * self.scale,
+                                bottom: row_top + 40.0 * self.scale,
+                            },
+                        );
+                    }
+                }
+                if self.scene.extension_category == 4 {
+                    for (index, (label, value)) in [
+                        ("ENDPOINT", self.scene.ai_endpoint),
+                        ("MODEL", self.scene.ai_model),
+                        (
+                            "API KEY (session only)",
+                            if self.scene.ai_key_present {
+                                "****************"
+                            } else {
+                                ""
+                            },
+                        ),
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        let label_top = top + (116.0 + index as f32 * 92.0) * self.scale;
+                        unsafe {
+                            DirectEditorRenderer::text(
+                                self.target,
+                                &self.renderer.small_format,
+                                &self.muted,
+                                label,
+                                D2D_RECT_F {
+                                    left: content_left,
+                                    top: label_top,
+                                    right: content_left + 600.0 * self.scale,
+                                    bottom: label_top + 24.0 * self.scale,
+                                },
+                            );
+                            DirectEditorRenderer::rounded(
+                                self.target,
+                                if self.scene.ai_field_focused == Some(index) {
+                                    &self.selection
+                                } else {
+                                    &self.bg
+                                },
+                                D2D_RECT_F {
+                                    left: content_left,
+                                    top: label_top + 26.0 * self.scale,
+                                    right: content_left + 600.0 * self.scale,
+                                    bottom: label_top + 68.0 * self.scale,
+                                },
+                                7.0 * self.scale,
+                            );
+                            DirectEditorRenderer::text(
+                                self.target,
+                                &self.renderer.small_format,
+                                &self.text,
+                                value,
+                                D2D_RECT_F {
+                                    left: content_left + 12.0 * self.scale,
+                                    top: label_top + 36.0 * self.scale,
+                                    right: content_left + 586.0 * self.scale,
+                                    bottom: label_top + 64.0 * self.scale,
+                                },
+                            );
+                        }
+                    }
+                    unsafe {
+                        DirectEditorRenderer::rounded(
+                            self.target,
+                            &self.accent,
+                            D2D_RECT_F {
+                                left: content_left,
+                                top: top + 440.0 * self.scale,
+                                right: content_left + 210.0 * self.scale,
+                                bottom: top + 482.0 * self.scale,
+                            },
+                            8.0 * self.scale,
+                        );
+                        DirectEditorRenderer::text(
+                            self.target,
+                            &self.renderer.small_format,
+                            &self.bg,
+                            if self.scene.ui_chinese {
+                                "保存 API 配置"
+                            } else {
+                                "SAVE API SETTINGS"
+                            },
+                            D2D_RECT_F {
+                                left: content_left + 28.0 * self.scale,
+                                top: top + 451.0 * self.scale,
+                                right: content_left + 200.0 * self.scale,
+                                bottom: top + 478.0 * self.scale,
+                            },
+                        );
+                    }
+                    // Prompt plus the connection test and streamed send actions.
+                    let prompt_top = top + 500.0 * self.scale;
+                    unsafe {
+                        DirectEditorRenderer::text(
+                            self.target,
+                            &self.renderer.small_format,
+                            &self.muted,
+                            if self.scene.ui_chinese {
+                                "提问（回车发送，终端里 Ctrl+C 取消）"
+                            } else {
+                                "PROMPT (enter sends, Ctrl+C in the terminal cancels)"
+                            },
+                            D2D_RECT_F {
+                                left: content_left,
+                                top: prompt_top,
+                                right: content_left + 600.0 * self.scale,
+                                bottom: prompt_top + 24.0 * self.scale,
+                            },
+                        );
+                        DirectEditorRenderer::rounded(
+                            self.target,
+                            if self.scene.ai_prompt_focused {
+                                &self.selection
+                            } else {
+                                &self.bg
+                            },
+                            D2D_RECT_F {
+                                left: content_left,
+                                top: prompt_top + 26.0 * self.scale,
+                                right: content_left + 600.0 * self.scale,
+                                bottom: prompt_top + 68.0 * self.scale,
+                            },
+                            7.0 * self.scale,
+                        );
+                        DirectEditorRenderer::text(
+                            self.target,
+                            &self.renderer.small_format,
+                            &self.text,
+                            self.scene.ai_prompt,
+                            D2D_RECT_F {
+                                left: content_left + 12.0 * self.scale,
+                                top: prompt_top + 36.0 * self.scale,
+                                right: content_left + 586.0 * self.scale,
+                                bottom: prompt_top + 64.0 * self.scale,
+                            },
+                        );
+                        DirectEditorRenderer::rounded(
+                            self.target,
+                            &self.accent,
+                            D2D_RECT_F {
+                                left: content_left,
+                                top: prompt_top + 78.0 * self.scale,
+                                right: content_left + 210.0 * self.scale,
+                                bottom: prompt_top + 120.0 * self.scale,
+                            },
+                            8.0 * self.scale,
+                        );
+                        DirectEditorRenderer::text(
+                            self.target,
+                            &self.renderer.small_format,
+                            &self.bg,
+                            if self.scene.ui_chinese {
+                                "发送"
+                            } else {
+                                "SEND"
+                            },
+                            D2D_RECT_F {
+                                left: content_left + 28.0 * self.scale,
+                                top: prompt_top + 89.0 * self.scale,
+                                right: content_left + 200.0 * self.scale,
+                                bottom: prompt_top + 116.0 * self.scale,
+                            },
+                        );
+                        DirectEditorRenderer::rounded(
+                            self.target,
+                            &self.raised,
+                            D2D_RECT_F {
+                                left: content_left + 226.0 * self.scale,
+                                top: prompt_top + 78.0 * self.scale,
+                                right: content_left + 466.0 * self.scale,
+                                bottom: prompt_top + 120.0 * self.scale,
+                            },
+                            8.0 * self.scale,
+                        );
+                        DirectEditorRenderer::text(
+                            self.target,
+                            &self.renderer.small_format,
+                            &self.bright,
+                            if self.scene.ui_chinese {
+                                "测试连接"
+                            } else {
+                                "TEST CONNECTION"
+                            },
+                            D2D_RECT_F {
+                                left: content_left + 254.0 * self.scale,
+                                top: prompt_top + 89.0 * self.scale,
+                                right: content_left + 460.0 * self.scale,
+                                bottom: prompt_top + 116.0 * self.scale,
+                            },
+                        );
+                        DirectEditorRenderer::text(
+                            self.target,
+                            &self.renderer.small_format,
+                            &self.muted,
+                            self.scene.ai_cache_summary,
+                            D2D_RECT_F {
+                                left: content_left,
+                                top: prompt_top + 130.0 * self.scale,
+                                right: content_left + 600.0 * self.scale,
+                                bottom: prompt_top + 156.0 * self.scale,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Paint the problems panel region.
+    fn draw_problems_panel(&self) {
+        if self.scene.problems_open {
+            let panel_w = (560.0 * self.scale).min(self.width - 60.0 * self.scale);
+            let panel_h = (420.0 * self.scale).min(self.height - 120.0 * self.scale);
+            let left = (self.width - panel_w) * 0.5;
+            let top = 60.0 * self.scale;
+            unsafe {
+                DirectEditorRenderer::rounded(
+                    self.target,
+                    &self.panel,
+                    D2D_RECT_F {
+                        left,
+                        top,
+                        right: left + panel_w,
+                        bottom: top + panel_h,
+                    },
+                    16.0 * self.scale,
+                );
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.ui_format,
+                    &self.bright,
+                    if self.scene.ui_chinese {
+                        "问题与调试"
+                    } else {
+                        "PROBLEMS & DEBUG"
+                    },
+                    D2D_RECT_F {
+                        left: left + 20.0 * self.scale,
+                        top: top + 14.0 * self.scale,
+                        right: left + panel_w - 20.0 * self.scale,
+                        bottom: top + 42.0 * self.scale,
+                    },
+                );
+            }
+            let visible = ((panel_h - 96.0 * self.scale) / (24.0 * self.scale)) as usize;
+            let first = self
+                .scene
+                .problems_selected
+                .saturating_sub(visible.saturating_sub(1));
+            for (row, line) in self
+                .scene
+                .problems
+                .iter()
+                .skip(first)
+                .take(visible)
+                .enumerate()
+            {
+                let index = first + row;
+                let row_top = top + (52.0 + row as f32 * 24.0) * self.scale;
+                let selected = index == self.scene.problems_selected;
+                if selected {
+                    unsafe {
+                        DirectEditorRenderer::rounded(
+                            self.target,
+                            &self.selection,
+                            D2D_RECT_F {
+                                left: left + 12.0 * self.scale,
+                                top: row_top - 3.0 * self.scale,
+                                right: left + panel_w - 12.0 * self.scale,
+                                bottom: row_top + 21.0 * self.scale,
+                            },
+                            5.0 * self.scale,
+                        )
+                    };
+                }
+                unsafe {
+                    DirectEditorRenderer::text(
+                        self.target,
+                        &self.renderer.small_format,
+                        if selected { &self.bright } else { &self.text },
+                        line,
+                        D2D_RECT_F {
+                            left: left + 24.0 * self.scale,
+                            top: row_top,
+                            right: left + panel_w - 20.0 * self.scale,
+                            bottom: row_top + 22.0 * self.scale,
+                        },
+                    )
+                };
+            }
+            if self.scene.problems.is_empty() {
+                unsafe {
+                    DirectEditorRenderer::text(
+                        self.target,
+                        &self.renderer.small_format,
+                        &self.muted,
+                        if self.scene.ui_chinese {
+                            "没有诊断或调试信息"
+                        } else {
+                            "Nothing reported yet"
+                        },
+                        D2D_RECT_F {
+                            left: left + 24.0 * self.scale,
+                            top: top + 60.0 * self.scale,
+                            right: left + panel_w - 20.0 * self.scale,
+                            bottom: top + 90.0 * self.scale,
+                        },
+                    )
+                };
+            }
+            unsafe {
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.small_format,
+                    &self.muted,
+                    self.scene.problems_hint,
+                    D2D_RECT_F {
+                        left: left + 20.0 * self.scale,
+                        top: top + panel_h - 32.0 * self.scale,
+                        right: left + panel_w - 20.0 * self.scale,
+                        bottom: top + panel_h - 8.0 * self.scale,
+                    },
+                )
+            };
+        }
+    }
+
+    /// Paint the chat panel region.
+    fn draw_chat_panel(&self) {
+        if self.scene.chat_open {
+            let panel_w = (520.0 * self.scale).min(self.width - 40.0 * self.scale);
+            let panel_h = (560.0 * self.scale).min(self.height - 90.0 * self.scale);
+            let left = (self.width - panel_w) * 0.5;
+            let top = 54.0 * self.scale;
+            unsafe {
+                DirectEditorRenderer::rounded(
+                    self.target,
+                    &self.panel,
+                    D2D_RECT_F {
+                        left,
+                        top,
+                        right: left + panel_w,
+                        bottom: top + panel_h,
+                    },
+                    16.0 * self.scale,
+                );
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.ui_format,
+                    &self.bright,
+                    if self.scene.ui_chinese {
+                        "AI 面板"
+                    } else {
+                        "AI PANEL"
+                    },
+                    D2D_RECT_F {
+                        left: left + 20.0 * self.scale,
+                        top: top + 14.0 * self.scale,
+                        right: left + panel_w - 20.0 * self.scale,
+                        bottom: top + 42.0 * self.scale,
+                    },
+                );
+            }
+            // Newest turns first, so the answer stays visible while it streams.
+            let mut message_y = top + 50.0 * self.scale;
+            let line_limit = ((panel_h - 130.0 * self.scale) / (18.0 * self.scale)) as usize;
+            let mut drawn = 0usize;
+            for (is_user, message) in self
+                .scene
+                .chat_messages
+                .iter()
+                .rev()
+                .filter(|(_, message)| !message.is_empty())
+            {
+                for line in message.lines().rev().take(4) {
+                    if drawn >= line_limit {
+                        break;
+                    }
+                    let prefix = if *is_user { "you  " } else { "ai   " };
+                    unsafe {
+                        DirectEditorRenderer::text(
+                            self.target,
+                            &self.renderer.small_format,
+                            if *is_user { &self.muted } else { &self.text },
+                            &format!("{prefix}{line}"),
+                            D2D_RECT_F {
+                                left: left + 20.0 * self.scale,
+                                top: message_y,
+                                right: left + panel_w - 20.0 * self.scale,
+                                bottom: message_y + 20.0 * self.scale,
+                            },
+                        )
+                    };
+                    message_y += 18.0 * self.scale;
+                    drawn += 1;
+                }
+                if drawn >= line_limit {
+                    break;
+                }
+            }
+            unsafe {
+                DirectEditorRenderer::rounded(
+                    self.target,
+                    &self.raised,
+                    D2D_RECT_F {
+                        left: left + 16.0 * self.scale,
+                        top: top + panel_h - 92.0 * self.scale,
+                        right: left + panel_w - 16.0 * self.scale,
+                        bottom: top + panel_h - 46.0 * self.scale,
+                    },
+                    8.0 * self.scale,
+                );
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.small_format,
+                    &self.bright,
+                    if self.scene.chat_input.is_empty() {
+                        if self.scene.ui_chinese {
+                            "输入问题，回车发送，Esc 取消"
+                        } else {
+                            "Ask something, Enter sends, Esc cancels"
+                        }
+                    } else {
+                        self.scene.chat_input
+                    },
+                    D2D_RECT_F {
+                        left: left + 28.0 * self.scale,
+                        top: top + panel_h - 82.0 * self.scale,
+                        right: left + panel_w - 28.0 * self.scale,
+                        bottom: top + panel_h - 52.0 * self.scale,
+                    },
+                );
+                let footer = if !self.scene.chat_error.is_empty() {
+                    self.scene.chat_error
+                } else if self.scene.chat_running {
+                    if self.scene.ui_chinese {
+                        "正在接收回答…（Esc 取消）"
+                    } else {
+                        "Receiving the answer… (Esc cancels)"
+                    }
+                } else if self.scene.ui_chinese {
+                    "Ctrl+Shift+A 关闭面板"
+                } else {
+                    "Ctrl+Shift+A closes this panel"
+                };
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.small_format,
+                    if self.scene.chat_error.is_empty() {
+                        &self.muted
+                    } else {
+                        &self.literal
+                    },
+                    footer,
+                    D2D_RECT_F {
+                        left: left + 20.0 * self.scale,
+                        top: top + panel_h - 38.0 * self.scale,
+                        right: left + panel_w - 20.0 * self.scale,
+                        bottom: top + panel_h - 10.0 * self.scale,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Paint the create dialog region.
+    fn draw_create_dialog(&self) {
+        if let Some(kind) = self.scene.create_kind {
+            let dialog_w = (520.0 * self.scale).min(self.width - 40.0 * self.scale);
+            let dialog_h = if kind == "New project" { 350.0 } else { 230.0 } * self.scale;
+            let left = (self.width - dialog_w) * 0.5;
+            let top = (self.height - dialog_h) * 0.42
+                - (1.0 - self.scene.create_motion.min(1.0)) * 28.0 * self.scale;
+            unsafe {
+                DirectEditorRenderer::rounded(
+                    self.target,
+                    &self.panel,
+                    D2D_RECT_F {
+                        left,
+                        top,
+                        right: left + dialog_w,
+                        bottom: top + dialog_h,
+                    },
+                    16.0 * self.scale,
+                )
+            };
+            unsafe {
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.ui_format,
+                    &self.bright,
+                    kind,
+                    D2D_RECT_F {
+                        left: left + 24.0 * self.scale,
+                        top: top + 22.0 * self.scale,
+                        right: left + dialog_w,
+                        bottom: top + 52.0 * self.scale,
+                    },
+                )
+            };
+            unsafe {
+                DirectEditorRenderer::rounded(
+                    self.target,
+                    &self.selection,
+                    D2D_RECT_F {
+                        left: left + 24.0 * self.scale,
+                        top: top + 70.0 * self.scale,
+                        right: left + dialog_w - 24.0 * self.scale,
+                        bottom: top + 112.0 * self.scale,
+                    },
+                    9.0 * self.scale,
+                )
+            };
+            unsafe {
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.code_format,
+                    &self.bright,
+                    if self.scene.create_name.is_empty() {
+                        "name"
+                    } else {
+                        self.scene.create_name
+                    },
+                    D2D_RECT_F {
+                        left: left + 38.0 * self.scale,
+                        top: top + 81.0 * self.scale,
+                        right: left + dialog_w - 32.0 * self.scale,
+                        bottom: top + 108.0 * self.scale,
+                    },
+                )
+            };
+            unsafe {
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.small_format,
+                    if self.scene.create_error.is_empty() {
+                        &self.muted
+                    } else {
+                        &self.literal
+                    },
+                    if self.scene.create_error.is_empty() {
+                        if self.scene.ui_chinese {
+                            "输入名称后点击确定，或使用 Enter / Esc"
+                        } else {
+                            "Enter a name, then click Create or Cancel"
+                        }
+                    } else {
+                        self.scene.create_error
+                    },
+                    D2D_RECT_F {
+                        left: left + 26.0 * self.scale,
+                        top: top + 132.0 * self.scale,
+                        right: left + dialog_w - 26.0 * self.scale,
+                        bottom: top + 170.0 * self.scale,
+                    },
+                )
+            };
+            if kind == "New project" {
+                unsafe {
+                    DirectEditorRenderer::text(
+                        self.target,
+                        &self.renderer.small_format,
+                        &self.text,
+                        &format!(
+                            "↑↓ Language: {}    ←→ Environment: {}",
+                            self.scene.create_language, self.scene.create_environment
+                        ),
+                        D2D_RECT_F {
+                            left: left + 26.0 * self.scale,
+                            top: top + 172.0 * self.scale,
+                            right: left + dialog_w - 26.0 * self.scale,
+                            bottom: top + 204.0 * self.scale,
+                        },
+                    )
+                };
+                unsafe {
+                    DirectEditorRenderer::text(
+                        self.target,
+                        &self.renderer.small_format,
+                        &self.accent,
+                        &format!("Version (click): {}", self.scene.create_version),
+                        D2D_RECT_F {
+                            left: left + 26.0 * self.scale,
+                            top: top + 204.0 * self.scale,
+                            right: left + dialog_w - 26.0 * self.scale,
+                            bottom: top + 236.0 * self.scale,
+                        },
+                    )
+                };
+                unsafe {
+                    DirectEditorRenderer::text(
+                        self.target,
+                        &self.renderer.small_format,
+                        &self.muted,
+                        &format!("Location: {}", self.scene.create_location),
+                        D2D_RECT_F {
+                            left: left + 26.0 * self.scale,
+                            top: top + 242.0 * self.scale,
+                            right: left + dialog_w - 26.0 * self.scale,
+                            bottom: top + 270.0 * self.scale,
+                        },
+                    )
+                };
+            }
+            let button_top = top + dialog_h - 56.0 * self.scale;
+            unsafe {
+                DirectEditorRenderer::rounded(
+                    self.target,
+                    &self.raised,
+                    D2D_RECT_F {
+                        left: left + 24.0 * self.scale,
+                        top: button_top,
+                        right: left + dialog_w * 0.5 - 8.0 * self.scale,
+                        bottom: button_top + 36.0 * self.scale,
+                    },
+                    8.0 * self.scale,
+                );
+                DirectEditorRenderer::rounded(
+                    self.target,
+                    &self.selection,
+                    D2D_RECT_F {
+                        left: left + dialog_w * 0.5 + 8.0 * self.scale,
+                        top: button_top,
+                        right: left + dialog_w - 24.0 * self.scale,
+                        bottom: button_top + 36.0 * self.scale,
+                    },
+                    8.0 * self.scale,
+                );
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.small_format,
+                    &self.text,
+                    if self.scene.ui_chinese {
+                        "取消"
+                    } else {
+                        "Cancel"
+                    },
+                    D2D_RECT_F {
+                        left: left + 86.0 * self.scale,
+                        top: button_top + 9.0 * self.scale,
+                        right: left + dialog_w * 0.5,
+                        bottom: button_top + 34.0 * self.scale,
+                    },
+                );
+                DirectEditorRenderer::text(
+                    self.target,
+                    &self.renderer.small_format,
+                    &self.bright,
+                    if self.scene.ui_chinese {
+                        "确定"
+                    } else {
+                        "Create"
+                    },
+                    D2D_RECT_F {
+                        left: left + dialog_w * 0.5 + 82.0 * self.scale,
+                        top: button_top + 9.0 * self.scale,
+                        right: left + dialog_w - 28.0 * self.scale,
+                        bottom: button_top + 34.0 * self.scale,
+                    },
+                );
+            }
+        }
+    }
+}
+
 impl DirectEditorRenderer {
     fn language_version(language: usize, version: usize) -> &'static str {
         let values = match language {
@@ -1637,1541 +3284,42 @@ impl DirectEditorRenderer {
                 },
             )
         };
-        if terminal_progress > 0.08 {
-            let output_top = terminal_panel.body_top;
-            let terminal_right = terminal_panel.list_left;
-            unsafe {
-                Self::fill(
-                    &target_base,
-                    &line,
-                    terminal_right,
-                    height - terminal_h + 34.0 * scale,
-                    terminal_right + 1.0 * scale,
-                    height,
-                );
-                Self::text(
-                    &target_base,
-                    &self.ui_format,
-                    &accent,
-                    "+  New        ↗  Detach",
-                    D2D_RECT_F {
-                        left: terminal_right + 15.0 * scale,
-                        top: output_top,
-                        right: width - 8.0 * scale,
-                        bottom: output_top + 28.0 * scale,
-                    },
-                );
-            }
-            for (index, name) in scene
-                .terminal_names
-                .iter()
-                .take(terminal_core::PANEL_VISIBLE_ROWS)
-                .enumerate()
-            {
-                let top = output_top + (34.0 + index as f32 * 30.0) * scale;
-                if index == scene.active_terminal {
-                    unsafe {
-                        Self::rounded(
-                            &target_base,
-                            &selection,
-                            D2D_RECT_F {
-                                left: terminal_right + 8.0 * scale,
-                                top,
-                                right: width - 8.0 * scale,
-                                bottom: top + 27.0 * scale,
-                            },
-                            6.0 * scale,
-                        )
-                    };
-                }
-                unsafe {
-                    Self::text(
-                        &target_base,
-                        &self.small_format,
-                        if index == scene.active_terminal {
-                            &bright
-                        } else {
-                            &muted
-                        },
-                        name,
-                        D2D_RECT_F {
-                            left: terminal_right + 15.0 * scale,
-                            top: top + 5.0 * scale,
-                            right: width - 8.0 * scale,
-                            bottom: top + 27.0 * scale,
-                        },
-                    )
-                };
-            }
-            for (index, value) in scene.terminal_lines.iter().enumerate() {
-                let row_top = output_top + index as f32 * terminal_panel.row_height;
-                let line = scene.terminal_first_line + index;
-                if let Some(((start_line, start_column), (end_line, end_column))) =
-                    scene.terminal_selection
-                {
-                    if line >= start_line && line <= end_line {
-                        let from = if line == start_line {
-                            terminal_core::visual_cells(value, start_column)
-                        } else {
-                            0
-                        };
-                        let to = if line == end_line {
-                            terminal_core::visual_cells(value, end_column)
-                        } else {
-                            value.chars().count()
-                        };
-                        if to > from {
-                            let cell = self.code_cell * scale;
-                            unsafe {
-                                Self::rounded(
-                                    &target_base,
-                                    &selected_text,
-                                    D2D_RECT_F {
-                                        left: terminal_panel.body_left + from as f32 * cell,
-                                        top: row_top,
-                                        right: (terminal_panel.body_left + to as f32 * cell)
-                                            .min(terminal_panel.body_right),
-                                        bottom: row_top + terminal_panel.row_height,
-                                    },
-                                    3.0 * scale,
-                                )
-                            };
-                        }
-                    }
-                }
-                unsafe {
-                    Self::text(
-                        &target_base,
-                        &self.code_format,
-                        &text,
-                        value,
-                        D2D_RECT_F {
-                            left: terminal_panel.body_left,
-                            top: row_top,
-                            right: terminal_panel.body_right,
-                            bottom: row_top + terminal_panel.row_height,
-                        },
-                    )
-                };
-            }
-            unsafe {
-                Self::text(
-                    &target_base,
-                    &self.code_format,
-                    &accent,
-                    &format!("$ {}", scene.terminal_input),
-                    D2D_RECT_F {
-                        left: terminal_panel.body_left,
-                        top: height - 30.0 * scale,
-                        right: terminal_panel.body_right,
-                        bottom: height,
-                    },
-                )
-            };
-        } else {
-            unsafe {
-                Self::text(
-                    &target_base,
-                    &self.small_format,
-                    &muted,
-                    scene.status,
-                    D2D_RECT_F {
-                        left: 160.0 * scale,
-                        top: height - status_h + 7.0 * scale,
-                        right: width,
-                        bottom: height,
-                    },
-                )
-            };
-        }
-        if scene.package_progress > 0.0 {
-            let center_x = (tree_w + editor_right) * 0.5;
-            let center_y = (header_h + body_bottom) * 0.5;
-            let complete = !scene.package_running && scene.package_progress >= 1.0;
-            for ring in 0..7 {
-                let pulse = (scene.animation_seconds * 2.4 + ring as f32 * 0.37).sin() * 4.0;
-                let radius = (22.0 + ring as f32 * 9.0 + pulse) * scale;
-                let mut ellipse = D2D1_ELLIPSE::default();
-                ellipse.point.X = center_x;
-                ellipse.point.Y = center_y;
-                ellipse.radiusX = radius * (1.0 + ring as f32 * 0.018);
-                ellipse.radiusY = radius;
-                unsafe {
-                    target_base.DrawEllipse(
-                        &ellipse,
-                        if complete { &bright } else { &muted },
-                        (1.0 + ring as f32 * 0.12) * scale,
-                        None,
-                    )
-                };
-            }
-            for index in 0..18 {
-                let source_x = tree_w + 35.0 * scale + (index % 6) as f32 * 74.0 * scale;
-                let source_y = code_top + (index / 6) as f32 * 68.0 * scale;
-                let travel = if complete {
-                    (scene.animation_seconds * 1.8).fract()
-                } else {
-                    scene.package_progress.clamp(0.0, 1.0).powf(1.8)
-                };
-                let x = if complete {
-                    center_x + (source_x - center_x) * travel
-                } else {
-                    source_x + (center_x - source_x) * travel
-                };
-                let y = if complete {
-                    center_y + (source_y - center_y) * travel
-                } else {
-                    source_y + (center_y - source_y) * travel
-                };
-                let stretch = 5.0 + 24.0 * travel;
-                unsafe {
-                    Self::fill(
-                        &target_base,
-                        if complete { &bright } else { &text },
-                        x - stretch * scale,
-                        y - 1.5 * scale,
-                        x + 5.0 * scale,
-                        y + 1.5 * scale,
-                    )
-                };
-            }
-        }
-        if scene.package_motion > 0.001 {
-            let left = width - 326.0 * scale;
-            let top = header_h + 8.0 * scale - (1.0 - scene.package_motion.min(1.0)) * 30.0 * scale;
-            unsafe {
-                Self::rounded(
-                    &target_base,
-                    &panel,
-                    D2D_RECT_F {
-                        left,
-                        top,
-                        right: width - 14.0 * scale,
-                        bottom: top + 240.0 * scale,
-                    },
-                    14.0 * scale,
-                )
-            };
-            let labels = if scene.ui_chinese {
-                [
-                    "1  原生可执行文件",
-                    "2  Portable ZIP",
-                    "3  MSIX（Windows SDK）",
-                ]
-            } else {
-                [
-                    "1  Portable native artifact",
-                    "2  Portable ZIP",
-                    "3  MSIX (Windows SDK)",
-                ]
-            };
-            for (index, label) in labels.iter().enumerate() {
-                let y = top + (48.0 + index as f32 * 42.0) * scale;
-                let hovered = hovering(
-                    scene.pointer_x,
-                    scene.pointer_y,
-                    left + 10.0 * scale,
-                    y - 6.0 * scale,
-                    width - 20.0 * scale,
-                    y + 30.0 * scale,
-                );
-                if hovered {
-                    unsafe {
-                        Self::rounded(
-                            &target_base,
-                            &raised,
-                            D2D_RECT_F {
-                                left: left + 10.0 * scale,
-                                top: y - 6.0 * scale,
-                                right: width - 20.0 * scale,
-                                bottom: y + 30.0 * scale,
-                            },
-                            6.0 * scale,
-                        )
-                    };
-                }
-                unsafe {
-                    Self::text(
-                        &target_base,
-                        &self.ui_format,
-                        if scene.package_targets[index] || hovered {
-                            &accent
-                        } else {
-                            &text
-                        },
-                        &format!(
-                            "{}  {label}",
-                            if scene.package_targets[index] {
-                                "[x]"
-                            } else {
-                                "[ ]"
-                            }
-                        ),
-                        D2D_RECT_F {
-                            left: left + 18.0 * scale,
-                            top: y,
-                            right: width - 24.0 * scale,
-                            bottom: y + 30.0 * scale,
-                        },
-                    )
-                };
-            }
-            let certificate = if scene.signing_certificate.is_empty() {
-                if scene.ui_chinese {
-                    "4  签名证书：未选择（点击选择）".to_string()
-                } else {
-                    "4  Signing certificate: none (click to choose)".to_string()
-                }
-            } else if scene.ui_chinese {
-                format!("4  签名证书：{}", scene.signing_certificate)
-            } else {
-                format!("4  Signing certificate: {}", scene.signing_certificate)
-            };
-            unsafe {
-                Self::text(
-                    &target_base,
-                    &self.small_format,
-                    if scene.signing_certificate.is_empty() {
-                        &muted
-                    } else {
-                        &accent
-                    },
-                    &certificate,
-                    D2D_RECT_F {
-                        left: left + 18.0 * scale,
-                        top: top + 172.0 * scale,
-                        right: width - 24.0 * scale,
-                        bottom: top + 198.0 * scale,
-                    },
-                );
-                Self::text(
-                    &target_base,
-                    &self.small_format,
-                    &bright,
-                    if scene.ui_chinese {
-                        "Enter  开始打包     Esc  关闭"
-                    } else {
-                        "Enter  Start packaging     Esc  Close"
-                    },
-                    D2D_RECT_F {
-                        left: left + 18.0 * scale,
-                        top: top + 194.0 * scale,
-                        right: width - 24.0 * scale,
-                        bottom: top + 222.0 * scale,
-                    },
-                )
-            };
-        }
-        if scene.settings_motion > 0.001 {
-            let panel_w = 390.0 * scale;
-            let left = width - panel_w - 20.0 * scale;
-            let top = (58.0 - (1.0 - scene.settings_motion.min(1.0)) * 34.0) * scale;
-            unsafe {
-                Self::rounded(
-                    &target_base,
-                    &panel,
-                    D2D_RECT_F {
-                        left,
-                        top,
-                        right: width - 20.0 * scale,
-                        bottom: (top + 680.0 * scale).min(height - 20.0 * scale),
-                    },
-                    16.0 * scale,
-                )
-            };
-            let settings = [
-                (
-                    24.0,
-                    if scene.ui_chinese {
-                        "设置".into()
-                    } else {
-                        "SETTINGS".into()
-                    },
-                ),
-                (
-                    78.0,
-                    format!(
-                        "L   Interface language: {}",
-                        if scene.ui_chinese {
-                            "简体中文"
-                        } else {
-                            "English"
-                        }
-                    ),
-                ),
-                (
-                    132.0,
-                    format!(
-                        "T   Theme: {}",
-                        if scene.light_theme { "Light" } else { "Dark" }
-                    ),
-                ),
-                (
-                    186.0,
-                    format!("←→  Code font size: {}", 15 + scene.code_zoom),
-                ),
-                (
-                    240.0,
-                    format!(
-                        "Font search: {}{}",
-                        if scene.font_search.is_empty() {
-                            "type to filter"
-                        } else {
-                            scene.font_search
-                        },
-                        if scene.font_search_focused { "  |" } else { "" }
-                    ),
-                ),
-                (
-                    464.0,
-                    format!(
-                        "B   Background: {}",
-                        scene.background_path.unwrap_or("not selected")
-                    ),
-                ),
-                (
-                    518.0,
-                    format!(
-                        "O/P opacity {:.0}%   Z/X zoom {:.1}x",
-                        scene.background_opacity * 100.0,
-                        scene.background_zoom
-                    ),
-                ),
-                (572.0, "C   Clear background".into()),
-                (626.0, "Esc  Close settings".into()),
-            ];
-            for (index, (row_y, value)) in settings.iter().enumerate() {
-                // Rows 1..4 are clickable, so they light up under the pointer.
-                let row_top = top + row_y * scale;
-                let row_bottom = row_top + (if index == 5 { 34.0 } else { 54.0 }) * scale;
-                let clickable = (1..=9).contains(&index);
-                let hovered = clickable
-                    && hovering(
-                        scene.pointer_x,
-                        scene.pointer_y,
-                        left + 16.0 * scale,
-                        row_top - 6.0 * scale,
-                        width - 30.0 * scale,
-                        row_bottom - 6.0 * scale,
-                    );
-                if hovered {
-                    unsafe {
-                        Self::rounded(
-                            &target_base,
-                            &raised,
-                            D2D_RECT_F {
-                                left: left + 16.0 * scale,
-                                top: row_top - 6.0 * scale,
-                                right: width - 30.0 * scale,
-                                bottom: row_bottom - 6.0 * scale,
-                            },
-                            6.0 * scale,
-                        )
-                    };
-                }
-                let (row_y, value) = (*row_y, settings_row_text(scene, index, value));
-                unsafe {
-                    Self::text(
-                        &target_base,
-                        if index == 0 {
-                            &self.ui_format
-                        } else {
-                            &self.small_format
-                        },
-                        if index == 0 || hovered {
-                            &bright
-                        } else if index < 4 {
-                            &text
-                        } else {
-                            &muted
-                        },
-                        &value,
-                        D2D_RECT_F {
-                            left: left + 22.0 * scale,
-                            top: top + row_y * scale,
-                            right: width - 38.0 * scale,
-                            bottom: top + (row_y + 28.0) * scale,
-                        },
-                    )
-                };
-            }
-            let needle = scene.font_search.trim().to_ascii_lowercase();
-            for (visible, (index, family)) in scene
-                .font_options
-                .iter()
-                .enumerate()
-                .filter(|(_, family)| {
-                    needle.is_empty() || family.to_ascii_lowercase().contains(&needle)
-                })
-                .take(5)
-                .enumerate()
-            {
-                let row_top = top + (282.0 + visible as f32 * 34.0) * scale;
-                if index == scene.code_font_family {
-                    unsafe {
-                        Self::rounded(
-                            &target_base,
-                            &selection,
-                            D2D_RECT_F {
-                                left: left + 18.0 * scale,
-                                top: row_top - 4.0 * scale,
-                                right: width - 34.0 * scale,
-                                bottom: row_top + 28.0 * scale,
-                            },
-                            6.0 * scale,
-                        )
-                    };
-                }
-                unsafe {
-                    Self::text(
-                        &target_base,
-                        &self.small_format,
-                        if index == scene.code_font_family {
-                            &bright
-                        } else {
-                            &text
-                        },
-                        &format!(
-                            "{}{}",
-                            if index == scene.code_font_family {
-                                "✓  "
-                            } else {
-                                "   "
-                            },
-                            family
-                        ),
-                        D2D_RECT_F {
-                            left: left + 28.0 * scale,
-                            top: row_top,
-                            right: width - 42.0 * scale,
-                            bottom: row_top + 28.0 * scale,
-                        },
-                    )
-                };
-            }
-        }
-        if scene.extensions_motion > 0.001 {
-            let panel_w = (920.0 * scale).min(width - 50.0 * scale);
-            let panel_h = (610.0 * scale).min(height - 80.0 * scale);
-            let left = (width - panel_w) * 0.5;
-            let top = (58.0 - (1.0 - scene.extensions_motion.min(1.0)) * 34.0) * scale;
-            unsafe {
-                Self::rounded(
-                    &target_base,
-                    &panel,
-                    D2D_RECT_F {
-                        left,
-                        top,
-                        right: left + panel_w,
-                        bottom: top + panel_h,
-                    },
-                    16.0 * scale,
-                )
-            };
-            let categories = if scene.ui_chinese {
-                ["语言", "主题", "调试器", "格式化器", "AI / 代理"]
-            } else {
-                [
-                    "Languages",
-                    "Themes",
-                    "Debuggers",
-                    "Formatters",
-                    "AI / Agents",
-                ]
-            };
-            unsafe {
-                Self::text(
-                    &target_base,
-                    &self.ui_format,
-                    &bright,
-                    if scene.ui_chinese {
-                        "扩展"
-                    } else {
-                        "EXTENSIONS"
-                    },
-                    D2D_RECT_F {
-                        left: left + 22.0 * scale,
-                        top: top + 20.0 * scale,
-                        right: left + panel_w,
-                        bottom: top + 50.0 * scale,
-                    },
-                )
-            };
-            for (index, category) in categories.iter().enumerate() {
-                let y = top + (78.0 + index as f32 * 44.0) * scale;
-                if index == scene.extension_category {
-                    unsafe {
-                        Self::rounded(
-                            &target_base,
-                            &selection,
-                            D2D_RECT_F {
-                                left: left + 14.0 * scale,
-                                top: y - 20.0 * scale,
-                                right: left + 172.0 * scale,
-                                bottom: y + 14.0 * scale,
-                            },
-                            7.0 * scale,
-                        )
-                    };
-                }
-                unsafe {
-                    Self::text(
-                        &target_base,
-                        &self.small_format,
-                        if index == scene.extension_category {
-                            &bright
-                        } else {
-                            &text
-                        },
-                        category,
-                        D2D_RECT_F {
-                            left: left + 26.0 * scale,
-                            top: y - 8.0 * scale,
-                            right: left + 168.0 * scale,
-                            bottom: y + 20.0 * scale,
-                        },
-                    )
-                };
-            }
-            let content_left = left + 205.0 * scale;
-            if scene.extension_category == 0 {
-                unsafe {
-                    Self::rounded(
-                        &target_base,
-                        if scene.extension_search_focused {
-                            &selection
-                        } else {
-                            &raised
-                        },
-                        D2D_RECT_F {
-                            left: content_left,
-                            top: top + 72.0 * scale,
-                            right: left + panel_w - 24.0 * scale,
-                            bottom: top + 114.0 * scale,
-                        },
-                        8.0 * scale,
-                    );
-                    Self::text(
-                        &target_base,
-                        &self.small_format,
-                        &text,
-                        if scene.extension_search.is_empty() {
-                            "Search programming languages"
-                        } else {
-                            scene.extension_search
-                        },
-                        D2D_RECT_F {
-                            left: content_left + 14.0 * scale,
-                            top: top + 83.0 * scale,
-                            right: left + panel_w - 36.0 * scale,
-                            bottom: top + 110.0 * scale,
-                        },
-                    );
-                }
-                let needle = scene.extension_search.trim().to_ascii_lowercase();
-                for (visible, (index, language)) in scene
-                    .language_options
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, language)| {
-                        needle.is_empty() || language.to_ascii_lowercase().contains(&needle)
-                    })
-                    .skip(scene.extension_scroll)
-                    .take(8)
-                    .enumerate()
-                {
-                    let y = top + (142.0 + visible as f32 * 48.0) * scale;
-                    if index == scene.selected_language {
-                        unsafe {
-                            Self::rounded(
-                                &target_base,
-                                &selection,
-                                D2D_RECT_F {
-                                    left: content_left,
-                                    top: y - 22.0 * scale,
-                                    right: content_left + 300.0 * scale,
-                                    bottom: y + 16.0 * scale,
-                                },
-                                7.0 * scale,
-                            )
-                        };
-                    }
-                    let installed = scene
-                        .language_installed
-                        .get(index)
-                        .copied()
-                        .unwrap_or(false);
-                    unsafe {
-                        Self::text(
-                            &target_base,
-                            &self.small_format,
-                            &text,
-                            language,
-                            D2D_RECT_F {
-                                left: content_left + 12.0 * scale,
-                                top: y - 9.0 * scale,
-                                right: content_left + 160.0 * scale,
-                                bottom: y + 18.0 * scale,
-                            },
-                        )
-                    };
-                    unsafe {
-                        Self::text(
-                            &target_base,
-                            &self.small_format,
-                            &accent,
-                            Self::language_version(
-                                index,
-                                scene.language_versions.get(index).copied().unwrap_or(0),
-                            ),
-                            D2D_RECT_F {
-                                left: content_left + 110.0 * scale,
-                                top: y - 9.0 * scale,
-                                right: content_left + 190.0 * scale,
-                                bottom: y + 18.0 * scale,
-                            },
-                        )
-                    };
-                    unsafe {
-                        Self::text(
-                            &target_base,
-                            &self.small_format,
-                            if installed { &accent } else { &muted },
-                            if installed {
-                                "INSTALLED"
-                            } else {
-                                "BUILT-IN DETECTION"
-                            },
-                            D2D_RECT_F {
-                                left: content_left + 240.0 * scale,
-                                top: y - 9.0 * scale,
-                                right: content_left + 390.0 * scale,
-                                bottom: y + 18.0 * scale,
-                            },
-                        )
-                    };
-                }
-                let version = Self::language_version(
-                    scene.selected_language,
-                    scene
-                        .language_versions
-                        .get(scene.selected_language)
-                        .copied()
-                        .unwrap_or(0),
-                );
-                unsafe {
-                    Self::text(
-                        &target_base,
-                        &self.small_format,
-                        &muted,
-                        &format!("↑↓ Select  ·  V Version {version}  ·  Space Install/remove"),
-                        D2D_RECT_F {
-                            left: content_left,
-                            top: top + panel_h - 48.0 * scale,
-                            right: left + panel_w,
-                            bottom: top + panel_h - 18.0 * scale,
-                        },
-                    )
-                };
-            } else {
-                let detail = match scene.extension_category {
-                    1 => "Dark and light semantic themes apply immediately.",
-                    2 => "Native debugger adapters · click a tool to check the Windows runtime.",
-                    3 => "Native formatter adapters · click a tool to check the Windows runtime.",
-                    _ => {
-                        "OpenAI-compatible endpoint, model and session-only API key configuration."
-                    }
-                };
-                unsafe {
-                    Self::text(
-                        &target_base,
-                        &self.ui_format,
-                        &bright,
-                        categories[scene.extension_category],
-                        D2D_RECT_F {
-                            left: content_left,
-                            top: top + 82.0 * scale,
-                            right: left + panel_w - 20.0 * scale,
-                            bottom: top + 118.0 * scale,
-                        },
-                    )
-                };
-                unsafe {
-                    Self::text(
-                        &target_base,
-                        &self.small_format,
-                        &muted,
-                        detail,
-                        D2D_RECT_F {
-                            left: content_left,
-                            top: top + 132.0 * scale,
-                            right: left + panel_w - 30.0 * scale,
-                            bottom: top + 220.0 * scale,
-                        },
-                    )
-                };
-                if scene.extension_category == 1 {
-                    for (index, label) in ["Dark", "Light"].iter().enumerate() {
-                        let active =
-                            (index == 0 && !scene.light_theme) || (index == 1 && scene.light_theme);
-                        let row_top = top + (190.0 + index as f32 * 50.0) * scale;
-                        unsafe {
-                            Self::rounded(
-                                &target_base,
-                                if active { &selection } else { &raised },
-                                D2D_RECT_F {
-                                    left: content_left,
-                                    top: row_top,
-                                    right: content_left + 315.0 * scale,
-                                    bottom: row_top + 40.0 * scale,
-                                },
-                                8.0 * scale,
-                            );
-                            Self::text(
-                                &target_base,
-                                &self.small_format,
-                                if active { &bright } else { &text },
-                                &format!(
-                                    "{}{}",
-                                    label,
-                                    if active {
-                                        if scene.ui_chinese {
-                                            "    已启用"
-                                        } else {
-                                            "    ACTIVE"
-                                        }
-                                    } else {
-                                        ""
-                                    }
-                                ),
-                                D2D_RECT_F {
-                                    left: content_left + 16.0 * scale,
-                                    top: row_top + 10.0 * scale,
-                                    right: content_left + 300.0 * scale,
-                                    bottom: row_top + 36.0 * scale,
-                                },
-                            );
-                        }
-                    }
-                }
-                if scene.extension_category == 0 {
-                    // The language page reports what is really installed.
-                    unsafe {
-                        Self::text(
-                            &target_base,
-                            &self.small_format,
-                            &muted,
-                            scene.language_tooling,
-                            D2D_RECT_F {
-                                left: content_left,
-                                top: top + 520.0 * scale,
-                                right: left + panel_w - 24.0 * scale,
-                                bottom: top + 548.0 * scale,
-                            },
-                        )
-                    };
-                }
-                if matches!(scene.extension_category, 2 | 3) {
-                    let items = if scene.extension_category == 2 {
-                        ["LLDB", "GDB", "debugpy"]
-                    } else {
-                        ["Biome", "clang-format", "Ruff"]
-                    };
-                    for (index, label) in items.iter().enumerate() {
-                        let row_top = top + (190.0 + index as f32 * 50.0) * scale;
-                        unsafe {
-                            Self::rounded(
-                                &target_base,
-                                &raised,
-                                D2D_RECT_F {
-                                    left: content_left,
-                                    top: row_top,
-                                    right: content_left + 360.0 * scale,
-                                    bottom: row_top + 40.0 * scale,
-                                },
-                                8.0 * scale,
-                            );
-                            Self::text(
-                                &target_base,
-                                &self.small_format,
-                                &text,
-                                &format!(
-                                    "{label}{}",
-                                    if scene.ui_chinese {
-                                        "    检测"
-                                    } else {
-                                        "    CHECK"
-                                    }
-                                ),
-                                D2D_RECT_F {
-                                    left: content_left + 16.0 * scale,
-                                    top: row_top + 10.0 * scale,
-                                    right: content_left + 340.0 * scale,
-                                    bottom: row_top + 36.0 * scale,
-                                },
-                            );
-                        }
-                    }
-                    // One real action per category, for the file that is open.
-                    let action = if scene.extension_category == 2 {
-                        format!("Start debug adapter for {}", scene.file_name)
-                    } else {
-                        format!("Format {}", scene.file_name)
-                    };
-                    let row_top = top + 348.0 * scale;
-                    unsafe {
-                        Self::rounded(
-                            &target_base,
-                            &selection,
-                            D2D_RECT_F {
-                                left: content_left,
-                                top: row_top,
-                                right: content_left + 520.0 * scale,
-                                bottom: row_top + 44.0 * scale,
-                            },
-                            8.0 * scale,
-                        );
-                        Self::text(
-                            &target_base,
-                            &self.small_format,
-                            &accent,
-                            &action,
-                            D2D_RECT_F {
-                                left: content_left + 16.0 * scale,
-                                top: row_top + 12.0 * scale,
-                                right: content_left + 500.0 * scale,
-                                bottom: row_top + 40.0 * scale,
-                            },
-                        );
-                    }
-                }
-                if scene.extension_category == 4 {
-                    for (index, (label, value)) in [
-                        ("ENDPOINT", scene.ai_endpoint),
-                        ("MODEL", scene.ai_model),
-                        (
-                            "API KEY (session only)",
-                            if scene.ai_key_present {
-                                "****************"
-                            } else {
-                                ""
-                            },
-                        ),
-                    ]
-                    .iter()
-                    .enumerate()
-                    {
-                        let label_top = top + (116.0 + index as f32 * 92.0) * scale;
-                        unsafe {
-                            Self::text(
-                                &target_base,
-                                &self.small_format,
-                                &muted,
-                                label,
-                                D2D_RECT_F {
-                                    left: content_left,
-                                    top: label_top,
-                                    right: content_left + 600.0 * scale,
-                                    bottom: label_top + 24.0 * scale,
-                                },
-                            );
-                            Self::rounded(
-                                &target_base,
-                                if scene.ai_field_focused == Some(index) {
-                                    &selection
-                                } else {
-                                    &bg
-                                },
-                                D2D_RECT_F {
-                                    left: content_left,
-                                    top: label_top + 26.0 * scale,
-                                    right: content_left + 600.0 * scale,
-                                    bottom: label_top + 68.0 * scale,
-                                },
-                                7.0 * scale,
-                            );
-                            Self::text(
-                                &target_base,
-                                &self.small_format,
-                                &text,
-                                value,
-                                D2D_RECT_F {
-                                    left: content_left + 12.0 * scale,
-                                    top: label_top + 36.0 * scale,
-                                    right: content_left + 586.0 * scale,
-                                    bottom: label_top + 64.0 * scale,
-                                },
-                            );
-                        }
-                    }
-                    unsafe {
-                        Self::rounded(
-                            &target_base,
-                            &accent,
-                            D2D_RECT_F {
-                                left: content_left,
-                                top: top + 440.0 * scale,
-                                right: content_left + 210.0 * scale,
-                                bottom: top + 482.0 * scale,
-                            },
-                            8.0 * scale,
-                        );
-                        Self::text(
-                            &target_base,
-                            &self.small_format,
-                            &bg,
-                            if scene.ui_chinese {
-                                "保存 API 配置"
-                            } else {
-                                "SAVE API SETTINGS"
-                            },
-                            D2D_RECT_F {
-                                left: content_left + 28.0 * scale,
-                                top: top + 451.0 * scale,
-                                right: content_left + 200.0 * scale,
-                                bottom: top + 478.0 * scale,
-                            },
-                        );
-                    }
-                    // Prompt plus the connection test and streamed send actions.
-                    let prompt_top = top + 500.0 * scale;
-                    unsafe {
-                        Self::text(
-                            &target_base,
-                            &self.small_format,
-                            &muted,
-                            if scene.ui_chinese {
-                                "提问（回车发送，终端里 Ctrl+C 取消）"
-                            } else {
-                                "PROMPT (enter sends, Ctrl+C in the terminal cancels)"
-                            },
-                            D2D_RECT_F {
-                                left: content_left,
-                                top: prompt_top,
-                                right: content_left + 600.0 * scale,
-                                bottom: prompt_top + 24.0 * scale,
-                            },
-                        );
-                        Self::rounded(
-                            &target_base,
-                            if scene.ai_prompt_focused {
-                                &selection
-                            } else {
-                                &bg
-                            },
-                            D2D_RECT_F {
-                                left: content_left,
-                                top: prompt_top + 26.0 * scale,
-                                right: content_left + 600.0 * scale,
-                                bottom: prompt_top + 68.0 * scale,
-                            },
-                            7.0 * scale,
-                        );
-                        Self::text(
-                            &target_base,
-                            &self.small_format,
-                            &text,
-                            scene.ai_prompt,
-                            D2D_RECT_F {
-                                left: content_left + 12.0 * scale,
-                                top: prompt_top + 36.0 * scale,
-                                right: content_left + 586.0 * scale,
-                                bottom: prompt_top + 64.0 * scale,
-                            },
-                        );
-                        Self::rounded(
-                            &target_base,
-                            &accent,
-                            D2D_RECT_F {
-                                left: content_left,
-                                top: prompt_top + 78.0 * scale,
-                                right: content_left + 210.0 * scale,
-                                bottom: prompt_top + 120.0 * scale,
-                            },
-                            8.0 * scale,
-                        );
-                        Self::text(
-                            &target_base,
-                            &self.small_format,
-                            &bg,
-                            if scene.ui_chinese { "发送" } else { "SEND" },
-                            D2D_RECT_F {
-                                left: content_left + 28.0 * scale,
-                                top: prompt_top + 89.0 * scale,
-                                right: content_left + 200.0 * scale,
-                                bottom: prompt_top + 116.0 * scale,
-                            },
-                        );
-                        Self::rounded(
-                            &target_base,
-                            &raised,
-                            D2D_RECT_F {
-                                left: content_left + 226.0 * scale,
-                                top: prompt_top + 78.0 * scale,
-                                right: content_left + 466.0 * scale,
-                                bottom: prompt_top + 120.0 * scale,
-                            },
-                            8.0 * scale,
-                        );
-                        Self::text(
-                            &target_base,
-                            &self.small_format,
-                            &bright,
-                            if scene.ui_chinese {
-                                "测试连接"
-                            } else {
-                                "TEST CONNECTION"
-                            },
-                            D2D_RECT_F {
-                                left: content_left + 254.0 * scale,
-                                top: prompt_top + 89.0 * scale,
-                                right: content_left + 460.0 * scale,
-                                bottom: prompt_top + 116.0 * scale,
-                            },
-                        );
-                        Self::text(
-                            &target_base,
-                            &self.small_format,
-                            &muted,
-                            scene.ai_cache_summary,
-                            D2D_RECT_F {
-                                left: content_left,
-                                top: prompt_top + 130.0 * scale,
-                                right: content_left + 600.0 * scale,
-                                bottom: prompt_top + 156.0 * scale,
-                            },
-                        );
-                    }
-                }
-            }
-        }
-        if scene.problems_open {
-            let panel_w = (560.0 * scale).min(width - 60.0 * scale);
-            let panel_h = (420.0 * scale).min(height - 120.0 * scale);
-            let left = (width - panel_w) * 0.5;
-            let top = 60.0 * scale;
-            unsafe {
-                Self::rounded(
-                    &target_base,
-                    &panel,
-                    D2D_RECT_F {
-                        left,
-                        top,
-                        right: left + panel_w,
-                        bottom: top + panel_h,
-                    },
-                    16.0 * scale,
-                );
-                Self::text(
-                    &target_base,
-                    &self.ui_format,
-                    &bright,
-                    if scene.ui_chinese {
-                        "问题与调试"
-                    } else {
-                        "PROBLEMS & DEBUG"
-                    },
-                    D2D_RECT_F {
-                        left: left + 20.0 * scale,
-                        top: top + 14.0 * scale,
-                        right: left + panel_w - 20.0 * scale,
-                        bottom: top + 42.0 * scale,
-                    },
-                );
-            }
-            let visible = ((panel_h - 96.0 * scale) / (24.0 * scale)) as usize;
-            let first = scene
-                .problems_selected
-                .saturating_sub(visible.saturating_sub(1));
-            for (row, line) in scene.problems.iter().skip(first).take(visible).enumerate() {
-                let index = first + row;
-                let row_top = top + (52.0 + row as f32 * 24.0) * scale;
-                let selected = index == scene.problems_selected;
-                if selected {
-                    unsafe {
-                        Self::rounded(
-                            &target_base,
-                            &selection,
-                            D2D_RECT_F {
-                                left: left + 12.0 * scale,
-                                top: row_top - 3.0 * scale,
-                                right: left + panel_w - 12.0 * scale,
-                                bottom: row_top + 21.0 * scale,
-                            },
-                            5.0 * scale,
-                        )
-                    };
-                }
-                unsafe {
-                    Self::text(
-                        &target_base,
-                        &self.small_format,
-                        if selected { &bright } else { &text },
-                        line,
-                        D2D_RECT_F {
-                            left: left + 24.0 * scale,
-                            top: row_top,
-                            right: left + panel_w - 20.0 * scale,
-                            bottom: row_top + 22.0 * scale,
-                        },
-                    )
-                };
-            }
-            if scene.problems.is_empty() {
-                unsafe {
-                    Self::text(
-                        &target_base,
-                        &self.small_format,
-                        &muted,
-                        if scene.ui_chinese {
-                            "没有诊断或调试信息"
-                        } else {
-                            "Nothing reported yet"
-                        },
-                        D2D_RECT_F {
-                            left: left + 24.0 * scale,
-                            top: top + 60.0 * scale,
-                            right: left + panel_w - 20.0 * scale,
-                            bottom: top + 90.0 * scale,
-                        },
-                    )
-                };
-            }
-            unsafe {
-                Self::text(
-                    &target_base,
-                    &self.small_format,
-                    &muted,
-                    scene.problems_hint,
-                    D2D_RECT_F {
-                        left: left + 20.0 * scale,
-                        top: top + panel_h - 32.0 * scale,
-                        right: left + panel_w - 20.0 * scale,
-                        bottom: top + panel_h - 8.0 * scale,
-                    },
-                )
-            };
-        }
-        if scene.chat_open {
-            let panel_w = (520.0 * scale).min(width - 40.0 * scale);
-            let panel_h = (560.0 * scale).min(height - 90.0 * scale);
-            let left = (width - panel_w) * 0.5;
-            let top = 54.0 * scale;
-            unsafe {
-                Self::rounded(
-                    &target_base,
-                    &panel,
-                    D2D_RECT_F {
-                        left,
-                        top,
-                        right: left + panel_w,
-                        bottom: top + panel_h,
-                    },
-                    16.0 * scale,
-                );
-                Self::text(
-                    &target_base,
-                    &self.ui_format,
-                    &bright,
-                    if scene.ui_chinese {
-                        "AI 面板"
-                    } else {
-                        "AI PANEL"
-                    },
-                    D2D_RECT_F {
-                        left: left + 20.0 * scale,
-                        top: top + 14.0 * scale,
-                        right: left + panel_w - 20.0 * scale,
-                        bottom: top + 42.0 * scale,
-                    },
-                );
-            }
-            // Newest turns first, so the answer stays visible while it streams.
-            let mut message_y = top + 50.0 * scale;
-            let line_limit = ((panel_h - 130.0 * scale) / (18.0 * scale)) as usize;
-            let mut drawn = 0usize;
-            for (is_user, message) in scene
-                .chat_messages
-                .iter()
-                .rev()
-                .filter(|(_, message)| !message.is_empty())
-            {
-                for line in message.lines().rev().take(4) {
-                    if drawn >= line_limit {
-                        break;
-                    }
-                    let prefix = if *is_user { "you  " } else { "ai   " };
-                    unsafe {
-                        Self::text(
-                            &target_base,
-                            &self.small_format,
-                            if *is_user { &muted } else { &text },
-                            &format!("{prefix}{line}"),
-                            D2D_RECT_F {
-                                left: left + 20.0 * scale,
-                                top: message_y,
-                                right: left + panel_w - 20.0 * scale,
-                                bottom: message_y + 20.0 * scale,
-                            },
-                        )
-                    };
-                    message_y += 18.0 * scale;
-                    drawn += 1;
-                }
-                if drawn >= line_limit {
-                    break;
-                }
-            }
-            unsafe {
-                Self::rounded(
-                    &target_base,
-                    &raised,
-                    D2D_RECT_F {
-                        left: left + 16.0 * scale,
-                        top: top + panel_h - 92.0 * scale,
-                        right: left + panel_w - 16.0 * scale,
-                        bottom: top + panel_h - 46.0 * scale,
-                    },
-                    8.0 * scale,
-                );
-                Self::text(
-                    &target_base,
-                    &self.small_format,
-                    &bright,
-                    if scene.chat_input.is_empty() {
-                        if scene.ui_chinese {
-                            "输入问题，回车发送，Esc 取消"
-                        } else {
-                            "Ask something, Enter sends, Esc cancels"
-                        }
-                    } else {
-                        scene.chat_input
-                    },
-                    D2D_RECT_F {
-                        left: left + 28.0 * scale,
-                        top: top + panel_h - 82.0 * scale,
-                        right: left + panel_w - 28.0 * scale,
-                        bottom: top + panel_h - 52.0 * scale,
-                    },
-                );
-                let footer = if !scene.chat_error.is_empty() {
-                    scene.chat_error
-                } else if scene.chat_running {
-                    if scene.ui_chinese {
-                        "正在接收回答…（Esc 取消）"
-                    } else {
-                        "Receiving the answer… (Esc cancels)"
-                    }
-                } else if scene.ui_chinese {
-                    "Ctrl+Shift+A 关闭面板"
-                } else {
-                    "Ctrl+Shift+A closes this panel"
-                };
-                Self::text(
-                    &target_base,
-                    &self.small_format,
-                    if scene.chat_error.is_empty() {
-                        &muted
-                    } else {
-                        &literal
-                    },
-                    footer,
-                    D2D_RECT_F {
-                        left: left + 20.0 * scale,
-                        top: top + panel_h - 38.0 * scale,
-                        right: left + panel_w - 20.0 * scale,
-                        bottom: top + panel_h - 10.0 * scale,
-                    },
-                );
-            }
-        }
-        if let Some(kind) = scene.create_kind {
-            let dialog_w = (520.0 * scale).min(width - 40.0 * scale);
-            let dialog_h = if kind == "New project" { 350.0 } else { 230.0 } * scale;
-            let left = (width - dialog_w) * 0.5;
-            let top =
-                (height - dialog_h) * 0.42 - (1.0 - scene.create_motion.min(1.0)) * 28.0 * scale;
-            unsafe {
-                Self::rounded(
-                    &target_base,
-                    &panel,
-                    D2D_RECT_F {
-                        left,
-                        top,
-                        right: left + dialog_w,
-                        bottom: top + dialog_h,
-                    },
-                    16.0 * scale,
-                )
-            };
-            unsafe {
-                Self::text(
-                    &target_base,
-                    &self.ui_format,
-                    &bright,
-                    kind,
-                    D2D_RECT_F {
-                        left: left + 24.0 * scale,
-                        top: top + 22.0 * scale,
-                        right: left + dialog_w,
-                        bottom: top + 52.0 * scale,
-                    },
-                )
-            };
-            unsafe {
-                Self::rounded(
-                    &target_base,
-                    &selection,
-                    D2D_RECT_F {
-                        left: left + 24.0 * scale,
-                        top: top + 70.0 * scale,
-                        right: left + dialog_w - 24.0 * scale,
-                        bottom: top + 112.0 * scale,
-                    },
-                    9.0 * scale,
-                )
-            };
-            unsafe {
-                Self::text(
-                    &target_base,
-                    &self.code_format,
-                    &bright,
-                    if scene.create_name.is_empty() {
-                        "name"
-                    } else {
-                        scene.create_name
-                    },
-                    D2D_RECT_F {
-                        left: left + 38.0 * scale,
-                        top: top + 81.0 * scale,
-                        right: left + dialog_w - 32.0 * scale,
-                        bottom: top + 108.0 * scale,
-                    },
-                )
-            };
-            unsafe {
-                Self::text(
-                    &target_base,
-                    &self.small_format,
-                    if scene.create_error.is_empty() {
-                        &muted
-                    } else {
-                        &literal
-                    },
-                    if scene.create_error.is_empty() {
-                        if scene.ui_chinese {
-                            "输入名称后点击确定，或使用 Enter / Esc"
-                        } else {
-                            "Enter a name, then click Create or Cancel"
-                        }
-                    } else {
-                        scene.create_error
-                    },
-                    D2D_RECT_F {
-                        left: left + 26.0 * scale,
-                        top: top + 132.0 * scale,
-                        right: left + dialog_w - 26.0 * scale,
-                        bottom: top + 170.0 * scale,
-                    },
-                )
-            };
-            if kind == "New project" {
-                unsafe {
-                    Self::text(
-                        &target_base,
-                        &self.small_format,
-                        &text,
-                        &format!(
-                            "↑↓ Language: {}    ←→ Environment: {}",
-                            scene.create_language, scene.create_environment
-                        ),
-                        D2D_RECT_F {
-                            left: left + 26.0 * scale,
-                            top: top + 172.0 * scale,
-                            right: left + dialog_w - 26.0 * scale,
-                            bottom: top + 204.0 * scale,
-                        },
-                    )
-                };
-                unsafe {
-                    Self::text(
-                        &target_base,
-                        &self.small_format,
-                        &accent,
-                        &format!("Version (click): {}", scene.create_version),
-                        D2D_RECT_F {
-                            left: left + 26.0 * scale,
-                            top: top + 204.0 * scale,
-                            right: left + dialog_w - 26.0 * scale,
-                            bottom: top + 236.0 * scale,
-                        },
-                    )
-                };
-                unsafe {
-                    Self::text(
-                        &target_base,
-                        &self.small_format,
-                        &muted,
-                        &format!("Location: {}", scene.create_location),
-                        D2D_RECT_F {
-                            left: left + 26.0 * scale,
-                            top: top + 242.0 * scale,
-                            right: left + dialog_w - 26.0 * scale,
-                            bottom: top + 270.0 * scale,
-                        },
-                    )
-                };
-            }
-            let button_top = top + dialog_h - 56.0 * scale;
-            unsafe {
-                Self::rounded(
-                    &target_base,
-                    &raised,
-                    D2D_RECT_F {
-                        left: left + 24.0 * scale,
-                        top: button_top,
-                        right: left + dialog_w * 0.5 - 8.0 * scale,
-                        bottom: button_top + 36.0 * scale,
-                    },
-                    8.0 * scale,
-                );
-                Self::rounded(
-                    &target_base,
-                    &selection,
-                    D2D_RECT_F {
-                        left: left + dialog_w * 0.5 + 8.0 * scale,
-                        top: button_top,
-                        right: left + dialog_w - 24.0 * scale,
-                        bottom: button_top + 36.0 * scale,
-                    },
-                    8.0 * scale,
-                );
-                Self::text(
-                    &target_base,
-                    &self.small_format,
-                    &text,
-                    if scene.ui_chinese { "取消" } else { "Cancel" },
-                    D2D_RECT_F {
-                        left: left + 86.0 * scale,
-                        top: button_top + 9.0 * scale,
-                        right: left + dialog_w * 0.5,
-                        bottom: button_top + 34.0 * scale,
-                    },
-                );
-                Self::text(
-                    &target_base,
-                    &self.small_format,
-                    &bright,
-                    if scene.ui_chinese { "确定" } else { "Create" },
-                    D2D_RECT_F {
-                        left: left + dialog_w * 0.5 + 82.0 * scale,
-                        top: button_top + 9.0 * scale,
-                        right: left + dialog_w - 28.0 * scale,
-                        bottom: button_top + 34.0 * scale,
-                    },
-                );
-            }
-        }
+        let paint = ScenePaint {
+            renderer: self,
+            target: &target_base,
+            scene,
+            accent,
+            bg,
+            bright,
+            divider: line,
+            literal,
+            muted,
+            panel,
+            raised,
+            selection,
+            selected_text,
+            text,
+            height,
+            scale,
+            width,
+            header_h,
+            code_top,
+            body_bottom,
+            editor_right,
+            tree_w,
+            terminal_h,
+            terminal_panel,
+            terminal_progress,
+            status_h,
+        };
+        paint.draw_terminal_panel();
+        paint.draw_package_progress();
+        paint.draw_package_overlay();
+        paint.draw_settings_overlay();
+        paint.draw_extensions_overlay();
+        paint.draw_problems_panel();
+        paint.draw_chat_panel();
+        paint.draw_create_dialog();
         if let Err(error) = unsafe { target_base.EndDraw(None, None) } {
             self.target = None;
             return Err(error);

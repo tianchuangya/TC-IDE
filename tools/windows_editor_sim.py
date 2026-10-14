@@ -3,7 +3,7 @@
 
 Windows-only code cannot be executed on a Linux workstation, which makes an
 editor regression invisible until the Windows CI job runs. This script extracts
-the editing methods from `src/windows_app.rs` into a small scratch crate that
+the editing methods from the `src/windows_app` module into a small scratch crate that
 links the real `text_buffer` and `editor_core` modules, drives a set of editing
 sequences and reports any mismatch.
 
@@ -192,9 +192,22 @@ fn main() {{
 '''
 
 
+def source_files(repo: str) -> list:
+    """Every file the Windows app is made of: the module root plus its children."""
+    root = os.path.join(repo, "src", "windows_app.rs")
+    paths = [root]
+    directory = os.path.join(repo, "src", "windows_app")
+    if os.path.isdir(directory):
+        paths += [os.path.join(directory, name) for name in sorted(os.listdir(directory))]
+    return [path for path in paths if path.endswith(".rs")]
+
+
 def extract_methods(source: str) -> str:
     def extract(name: str) -> str:
-        start = source.index(f"    fn {name}(")
+        match = re.search(rf"^    (?:pub\(super\) )?fn {re.escape(name)}\(", source, re.M)
+        if match is None:
+            raise SystemExit(f"editor sim: {name} is not defined as an inherent method")
+        start = match.start()
         depth = 0
         index = source.index("{", start)
         while True:
@@ -205,7 +218,10 @@ def extract_methods(source: str) -> str:
                 if depth == 0:
                     break
             index += 1
-        return source[start:index + 1]
+        found = source[start:index + 1]
+        # The methods are `pub(super)` inside the app module; the scratch crate
+        # has no parent module, so the visibility prefix has to go.
+        return found.replace("    pub(super) fn ", "    fn ")
 
     return "\n\n".join(extract(name) for name in METHODS)
 
@@ -216,7 +232,7 @@ def main() -> int:
     parser.add_argument("--repo", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     arguments = parser.parse_args()
 
-    source = open(os.path.join(arguments.repo, "src", "windows_app.rs")).read()
+    source = "\n".join(open(path).read() for path in source_files(arguments.repo))
     methods = extract_methods(source)
 
     shutil.rmtree(arguments.work, ignore_errors=True)

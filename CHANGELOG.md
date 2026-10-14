@@ -88,6 +88,17 @@
 
 ### 工程与 CI
 
+- Windows 后端按区域拆分为模块：`windows_app.rs` 从 7131 行的单文件降为 1359 行的模块根
+  （Win32 声明、常量、应用状态与生命周期），其余拆到 `src/windows_app/` 下的 14 个模块——
+  窗口过程与命令分发（`events`）、键盘（`keys`）、鼠标（`pointer`）、编辑器（`editor`）、
+  工作区（`workspace`）、语言服务（`language`）、扩展（`extensions`）、打包（`packaging`）、
+  调试（`debug`）、AI（`ai`）、底部终端面板（`panel`）、弹出终端（`detached`）、场景（`scene`）、
+  动效（`motion`）。行为不变：拆分由逐行比对与 Windows 目标类型检查核对。
+- 渲染器按场景区域拆分：`windows_renderer.rs` 中 2651 行的 `render` 改为共享 `ScenePaint`
+  （画笔与几何）加 8 个区域绘制方法（终端面板、打包进度、打包浮层、设置、扩展、问题、AI、新建对话框），
+  `render` 现在是一串可读的区域调用。
+- 新增 `tests/module_layout.rs`：守卫这次拆分——区域模块必须存在且各带模块注释、
+  单文件不得超过 1000/1500 行、每个场景区域都要有独立绘制方法并在 `render` 中被调用。
 - CI 新增 `cargo fmt --check`、Linux 与 Windows 目标的 Clippy（`-D warnings`）、
   Windows 目标的类型检查，以及在 Xvfb 中渲染一帧的冒烟测试。
 - 发布工作流（仅手动触发）在各自系统上生成产物：Linux 生成 `.tar.gz` 与真实 `.deb`
@@ -96,6 +107,6 @@
 
 ### 尚未完成
 
-见 `docs/KNOWN-ISSUES.md` 与 `docs/HANDOFF.md` 第 5 节：Windows 实机验收、文本缓冲升级、
-LSP/DAP 传输层接入、Tree-sitter、macOS 原生后端、`windows_app.rs` 拆分、大项目后台增量索引、
-控件状态与完整中文文案等仍未完成。
+见 `docs/KNOWN-ISSUES.md` 与 `docs/HANDOFF.md` 第 5 节：Windows 实机验收、语义分析的完整语法树、
+macOS 原生后端、偏好设置与打包命令的共享模型下沉、控件按下/禁用/焦点状态、
+文件树行位置弹簧与背景图裁剪框等仍未完成。

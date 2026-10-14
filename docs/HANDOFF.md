@@ -206,8 +206,8 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 ### P2：macOS 与共享架构
 
 - [ ] `macos_app.rs` 目前远落后于 Windows/Linux；实现 Cocoa 原生窗口、CoreText/Metal、NSPasteboard、NSOpenPanel、PTY 和 NSWorkspace。
-- [~] 共享模型下沉：工作区（`workspace_core`）、设置、项目模板、会话（`session_core`）、终端（`terminal_core`）、关系图（`graph_core`）、AI/扩展/LSP/DAP 与动画模型（`motion_core`）都已下沉；**仍待下沉的是 `windows_app.rs` 中的打包命令拼装与偏好设置持久化细节**。
-- [ ] 把 `windows_app.rs` 拆为事件/编辑器/工作区/扩展/打包/终端窗口模块；把绘制按场景区域拆分。
+- [~] 共享模型下沉：工作区（`workspace_core`）、设置、项目模板、会话（`session_core`）、终端（`terminal_core`）、关系图（`graph_core`）、AI/扩展/LSP/DAP 与动画模型（`motion_core`）都已下沉；**仍待下沉的是 `windows_app.rs` 中的打包命令拼装与偏好设置持久化细节**（`windows_app.rs` 现已按区域拆开，这两处分别落在 `src/windows_app/packaging.rs` 与 `src/windows_app/workspace.rs`，下沉时改动面已经很小）。
+- [x] 把 `windows_app.rs` 拆为事件/编辑器/工作区/扩展/打包/终端窗口模块；把绘制按场景区域拆分。（`windows_app.rs` 从 7131 行降为 1359 行的模块根：只留 Win32 声明、常量、应用状态与生命周期，其余拆到 `src/windows_app/` 下的 14 个模块——`events`（窗口过程与命令分发）、`keys`、`pointer`、`editor`、`workspace`、`language`、`extensions`、`packaging`、`debug`、`ai`、`panel`、`detached`、`scene`、`motion`；`windows_renderer.rs` 中 2651 行的 `render` 拆为共享 `ScenePaint`（画笔与几何）加 8 个场景区域绘制方法：终端面板、打包进度、打包浮层、设置、扩展、问题、AI、新建对话框。`tests/module_layout.rs` 守卫这次拆分：模块文件必须存在且各带模块注释、单文件不得超过 1000/1500 行、每个场景区域必须有独立绘制方法并在 `render` 中被调用）
 - [x] 平台边界：`tests/platform_boundary.rs` 会拒绝共享核心里的平台导入、窗口句柄、原始 FFI 类型与 `unsafe` 块，检查每个共享核心都在 `main.rs` 中声明（防止守卫漏掉新模块），并断言三个平台模块仍处于 `cfg(target_os)` 之后。
 
 ### P2：自动化与发布前门槛
@@ -235,8 +235,8 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 8. **视觉细节**：悬停高亮与完整中文文案已完成；仍缺文件树行位置弹簧、多字符粘贴/撤销动画、
    背景图可视化裁剪框、按钮按下/禁用/键盘焦点状态与浅色主题对比度检查。
 9. **macOS 原生后端**：Cocoa/CoreText/Metal、NSPasteboard、NSOpenPanel、PTY、NSWorkspace。
-10. **架构收尾**：拆分 `windows_app.rs`（事件/编辑器/工作区/扩展/打包/终端窗口）与绘制区域；
-    Linux 接入会话恢复与运行时缓存清单；下沉偏好设置/项目模板/打包命令剩余的重复实现。
+10. **架构收尾**：`windows_app.rs` 的模块拆分与绘制区域拆分已完成（见 P2 条目），
+    Linux 已接入会话恢复与运行时缓存清单；剩余的是下沉偏好设置/项目模板/打包命令的重复实现。
 
 ## 6. 下一位开发者的第一批任务
 
@@ -338,7 +338,7 @@ cargo run --release
 
 ```bash
 cargo fmt --check
-cargo test --all-targets                                   # 167 项共享内核测试 + 4 项平台边界测试
+cargo test --all-targets                                   # 167 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试
 cargo clippy --all-targets -- -D warnings                   # 共享内核 + Linux 后端
 cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo check --all-targets --target x86_64-pc-windows-msvc    # Windows 类型检查
