@@ -14,7 +14,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::editor_core;
+use crate::extension_core;
 use crate::graph_core;
+use crate::session_core;
 use crate::workspace_core;
 
 type Window = c_ulong;
@@ -579,6 +581,8 @@ struct App {
     terminal_menu_open: bool,
     graph_current: bool,
     graph_zoom: f32,
+    session: session_core::Session,
+    runtime_cache: extension_core::RuntimeCache,
     graph_relation: graph_core::GraphRelation,
     graph_scope: usize,
     graph_scroll: usize,
@@ -1634,6 +1638,88 @@ impl App {
         )
     }
 
+    /// Summary of the extension runtime cache, for the extensions panel.
+    fn runtime_cache_summary(&self) -> String {
+        format!(
+            "{} {} · {}",
+            self.runtime_cache.entries().len(),
+            if self.ui_chinese {
+                "个已缓存扩展"
+            } else {
+                "cached extension(s)"
+            },
+            extension_core::format_bytes(self.runtime_cache.total_bytes())
+        )
+    }
+
+    /// Record the project and the open documents, then persist the session.
+    fn remember_session(&mut self) {
+        if let Some(path) = self.project_path.clone() {
+            self.session.set_project(Some(path.clone()));
+            self.session.remember_project(&path);
+        }
+        let documents = self
+            .files
+            .iter()
+            .filter(|file| file.path.is_file())
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>();
+        for path in documents {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.session.open(Some(path), name);
+        }
+        self.session.prune_recent_projects(|path| path.is_dir());
+        save_session(&self.session);
+    }
+
+    /// Restore the previous session: project first, then its documents.
+    fn restore_session(&mut self) {
+        let session = load_session();
+        self.session = session;
+        if let Some(project) = self.session.project().cloned() {
+            if project.is_dir() {
+                self.project_path = Some(project.clone());
+                self.project_name = project
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "TC-IDE".into());
+            }
+        }
+        let restored = self.session.restorable_documents();
+        let mut files = Vec::new();
+        for path in restored {
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let mut lines = content.lines().map(str::to_string).collect::<Vec<_>>();
+            if lines.is_empty() {
+                lines.push(String::new());
+            }
+            files.push(FileBuffer {
+                name: path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                path,
+                lines,
+            });
+        }
+        if !files.is_empty() {
+            self.files = files;
+            self.selected_file = 0;
+            self.caret_line = 0;
+            self.caret_column = 0;
+            self.status_message = format!(
+                "Restored {} document(s) from the previous session",
+                self.files.len()
+            );
+        }
+        self.rebuild_project_index();
+    }
+
     /// Relation graph of the current editor state, built by the shared model.
     fn graph(&self) -> graph_core::Graph {
         let file = &self.files[self.selected_file];
@@ -1729,6 +1815,7 @@ impl App {
             return false;
         };
         self.selected_file = index;
+        self.remember_session();
         self.graph_scroll = 0;
         self.caret_line = target
             .line
@@ -3344,9 +3431,19 @@ impl App {
                     self.tr("- project symbol completion", "- 项目符号补全"),
                 );
                 self.text(
+                    self.colors.muted,
+                    dx,
+                    y + s(485),
+                    &format!(
+                        "{} {}",
+                        self.tr("Runtime cache:", "运行时缓存："),
+                        self.runtime_cache_summary()
+                    ),
+                );
+                self.text(
                     self.colors.text,
                     dx + s(16),
-                    y + s(485),
+                    y + s(515),
                     self.tr(
                         "- LSP / formatter / debugger adapter",
                         "- LSP / 格式化 / 调试器适配",
@@ -4340,6 +4437,7 @@ impl App {
                 self.caret_line = 0;
                 self.caret_column = 0;
                 self.editor_focused = true;
+                self.remember_session();
                 if let Some(index) = pack_index {
                     let language = self.languages[index].name;
                     if self.languages[index].installed {
@@ -4483,6 +4581,7 @@ impl App {
         self.caret_column = 0;
         self.graph_current = true;
         self.rebuild_project_index();
+        self.remember_session();
         self.load_project_package_targets();
         self.reset_terminals_for_project();
         self.status_message = format!(
@@ -5973,6 +6072,39 @@ fn background_settings_path() -> PathBuf {
     ui_settings_path().with_file_name("background.conf")
 }
 
+fn session_settings_path() -> PathBuf {
+    ui_settings_path().with_file_name("session.conf")
+}
+
+/// Runtime cache manifest of the user level extension cache.
+fn runtime_cache_path() -> PathBuf {
+    ui_settings_path().with_file_name("runtimes.conf")
+}
+
+fn load_runtime_cache() -> extension_core::RuntimeCache {
+    match fs::read_to_string(runtime_cache_path()) {
+        Ok(content) => extension_core::RuntimeCache::parse(&content),
+        Err(_) => extension_core::RuntimeCache::default(),
+    }
+}
+
+/// Read the previous session, if any.
+fn load_session() -> session_core::Session {
+    match fs::read_to_string(session_settings_path()) {
+        Ok(content) => session_core::Session::parse(&content),
+        Err(_) => session_core::Session::default(),
+    }
+}
+
+/// Persist the session: project, open documents and recent projects.
+fn save_session(session: &session_core::Session) {
+    let path = session_settings_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, session.serialize());
+}
+
 fn ai_settings_path() -> PathBuf {
     ui_settings_path().with_file_name("ai-api.conf")
 }
@@ -6917,6 +7049,8 @@ pub fn run() {
             terminal_menu_open: false,
             graph_current: true,
             graph_zoom: 1.0,
+            session: session_core::Session::default(),
+            runtime_cache: extension_core::RuntimeCache::default(),
             graph_relation: graph_core::GraphRelation::Follow,
             graph_scope: 0,
             graph_scroll: 0,
@@ -6957,6 +7091,8 @@ pub fn run() {
             started: Instant::now(),
         };
         app.rebuild_project_index();
+        app.restore_session();
+        app.runtime_cache = load_runtime_cache();
         let frame = Duration::from_micros(16_667);
         if let Some(path) = frame_export {
             app.update_background();
