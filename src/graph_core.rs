@@ -82,6 +82,102 @@ pub fn occurrence_key(file: &str, line: usize, name: &str) -> String {
     format!("occurrence:{file}:{line}:{name}")
 }
 
+/// Every name the project declares.
+fn declared_names(inputs: &GraphInputs<'_>) -> Vec<String> {
+    let mut names = inputs
+        .project_symbols
+        .iter()
+        .filter(|entry| entry.symbol.role == SymbolRole::Declaration)
+        .map(|entry| entry.symbol.name.clone())
+        .collect::<Vec<_>>();
+    names.extend(
+        inputs
+            .file_symbols
+            .iter()
+            .filter(|symbol| symbol.role == SymbolRole::Declaration)
+            .map(|symbol| symbol.name.clone()),
+    );
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Whether a call site uses call syntax rather than a bare mention.
+fn is_call_syntax(
+    inputs: &GraphInputs<'_>,
+    file: &str,
+    line: usize,
+    column: usize,
+    name: &str,
+) -> bool {
+    if file != inputs.current_file {
+        return true;
+    }
+    let Some(value) = inputs.file_lines.get(line) else {
+        return true;
+    };
+    let after = value
+        .char_indices()
+        .nth(column + name.chars().count())
+        .map(|(offset, _)| &value[offset..])
+        .unwrap_or("");
+    after.trim_start().starts_with('(')
+}
+
+/// Classify an occurrence of a focused name.
+fn occurrence_edge(
+    inputs: &GraphInputs<'_>,
+    file: &str,
+    line: usize,
+    column: usize,
+    name: &str,
+    role: SymbolRole,
+    declared: bool,
+) -> GraphEdge {
+    if role == SymbolRole::Declaration {
+        return GraphEdge::Declaration;
+    }
+    if !declared {
+        return GraphEdge::Weak;
+    }
+    if is_call_syntax(inputs, file, line, column, name) {
+        GraphEdge::Caller
+    } else {
+        GraphEdge::Inferred
+    }
+}
+
+/// Names the focused declaration calls inside its own block.
+fn callee_names(inputs: &GraphInputs<'_>, hovered: &SymbolOccurrence) -> Vec<String> {
+    let Some(lines) = inputs
+        .file_lines
+        .get(hovered.line)
+        .map(|_| inputs.file_lines)
+    else {
+        return Vec::new();
+    };
+    let end = block_end(lines, hovered.line);
+    let declared = declared_names(inputs);
+    let mut names = Vec::new();
+    for line in lines.iter().take(end + 1).skip(hovered.line) {
+        let code = editor_core::comment_bounds(line, inputs.current_file)
+            .map(|(start, _, _)| &line[..start])
+            .unwrap_or(line);
+        for word in code
+            .split(|value: char| !value.is_alphanumeric() && value != '_')
+            .filter(|word| !word.is_empty())
+        {
+            if word == hovered.name || !declared.contains(&word.to_string()) {
+                continue;
+            }
+            if !names.iter().any(|known| known == word) {
+                names.push(word.to_string());
+            }
+        }
+    }
+    names
+}
+
 fn is_folded(inputs: &GraphInputs<'_>, key: &str) -> bool {
     inputs.folded.iter().any(|folded| folded == key)
 }
@@ -152,6 +248,76 @@ impl GraphScope {
     }
 }
 
+/// Relation an edge expresses between the focus and a node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphEdge {
+    /// The declaration that owns the name.
+    Declaration,
+    /// A call site that reaches the focus.
+    Caller,
+    /// A name the focus calls.
+    Callee,
+    /// Referenced but never declared in the project.
+    Weak,
+    /// Mentioned without call syntax, so the relation is only inferred.
+    Inferred,
+}
+
+impl GraphEdge {
+    /// Short prefix drawn in front of a node label.
+    pub fn marker(self) -> &'static str {
+        match self {
+            GraphEdge::Declaration => "declare",
+            GraphEdge::Caller => "call",
+            GraphEdge::Callee => "called",
+            GraphEdge::Weak => "weak",
+            GraphEdge::Inferred => "ref",
+        }
+    }
+}
+
+/// Which relations the graph lists for the focused symbol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphRelation {
+    /// Declarations and call sites together.
+    Follow,
+    /// Only the sites that reach the focus.
+    Callers,
+    /// Only the names the focus calls.
+    Callees,
+}
+
+impl GraphRelation {
+    pub const ALL: [GraphRelation; 3] = [
+        GraphRelation::Follow,
+        GraphRelation::Callers,
+        GraphRelation::Callees,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GraphRelation::Follow => "follow",
+            GraphRelation::Callers => "callers",
+            GraphRelation::Callees => "callees",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|relation| *relation == self)
+            .unwrap_or(0)
+    }
+
+    pub fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    pub fn previous(self) -> Self {
+        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
 /// Hierarchy level of a graph node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphLevel {
@@ -206,6 +372,8 @@ pub struct GraphNode {
     pub label: String,
     pub detail: String,
     pub role: Option<SymbolRole>,
+    /// Relation the node expresses, empty for structural nodes.
+    pub edge: Option<GraphEdge>,
     pub target: Option<GraphTarget>,
     pub depth: usize,
     /// Stable identity of the node, used as the fold state key.
@@ -223,6 +391,7 @@ impl GraphNode {
             label,
             detail,
             role: None,
+            edge: None,
             target: None,
             depth: level.depth(),
             key: String::new(),
@@ -252,6 +421,11 @@ impl GraphNode {
         self
     }
 
+    fn with_edge(mut self, edge: GraphEdge) -> Self {
+        self.edge = Some(edge);
+        self
+    }
+
     fn with_target(mut self, file: &str, line: usize, column: usize) -> Self {
         self.target = Some(GraphTarget {
             file: file.to_string(),
@@ -273,7 +447,11 @@ impl GraphNode {
 
     /// Marker and label the backends draw on the node card.
     pub fn caption(&self) -> String {
-        format!("{}  {}", self.level.marker(self.role), self.label)
+        let marker = match self.edge {
+            Some(edge) => edge.marker(),
+            None => self.level.marker(self.role),
+        };
+        format!("{marker}  {}", self.label)
     }
 }
 
@@ -288,6 +466,8 @@ pub struct GraphInputs<'a> {
     pub project_symbols: &'a [ProjectSymbolOccurrence],
     /// Node keys the user has collapsed.
     pub folded: &'a [String],
+    /// Relations listed for the focused symbol.
+    pub relation: GraphRelation,
 }
 
 /// Built graph for one frame: scope, search and the ordered node list.
@@ -461,9 +641,19 @@ fn add_search_nodes(
         left.0 == right.0 && left.1.line == right.1.line && left.1.name == right.1.name
     });
     let found = matches.len();
+    let declared = declared_names(inputs);
     let children = matches
         .into_iter()
         .map(|(file, symbol)| {
+            let edge = occurrence_edge(
+                inputs,
+                file,
+                symbol.line,
+                symbol.start,
+                &symbol.name,
+                symbol.role,
+                declared.contains(&symbol.name),
+            );
             GraphNode::new(
                 GraphLevel::Occurrence,
                 format!("{}()", symbol.name),
@@ -471,6 +661,7 @@ fn add_search_nodes(
             )
             .keyed(occurrence_key(file, symbol.line, &symbol.name))
             .with_role(symbol.role)
+            .with_edge(edge)
             .with_target(file, symbol.line, symbol.start)
             .nested(GraphLevel::Project.depth() + 1)
         })
@@ -495,6 +686,8 @@ fn add_symbol_nodes(nodes: &mut Vec<GraphNode>, inputs: &GraphInputs<'_>, trunca
         add_file_nodes(nodes, inputs, truncated);
         return;
     };
+    let declared = declared_names(inputs);
+    let is_declared = declared.contains(&hovered.name);
     let mut occurrences = inputs
         .project_symbols
         .iter()
@@ -508,40 +701,112 @@ fn add_symbol_nodes(nodes: &mut Vec<GraphNode>, inputs: &GraphInputs<'_>, trunca
             .then_with(|| left.file.cmp(&right.file))
             .then_with(|| left.symbol.line.cmp(&right.symbol.line))
     });
-    let children = if occurrences.is_empty() {
-        vec![GraphNode::new(
-            GraphLevel::Occurrence,
-            format!("{}()", hovered.name),
-            format!("{}:{}", inputs.current_file, hovered.line + 1),
-        )
-        .with_role(hovered.role)
-        .with_target(inputs.current_file, hovered.line, hovered.start)
-        .nested(GraphLevel::File.depth())]
-    } else {
-        occurrences
-            .into_iter()
-            .map(|entry| {
+    let mut children = Vec::new();
+    match inputs.relation {
+        GraphRelation::Callees => {
+            for name in callee_names(inputs, hovered) {
+                let declaration = inputs
+                    .project_symbols
+                    .iter()
+                    .find(|entry| {
+                        entry.symbol.name == name && entry.symbol.role == SymbolRole::Declaration
+                    })
+                    .map(|entry| (entry.file.clone(), entry.symbol.line, entry.symbol.start));
+                let (file, line, column) = declaration.unwrap_or_else(|| {
+                    (inputs.current_file.to_string(), hovered.line, hovered.start)
+                });
+                children.push(
+                    GraphNode::new(
+                        GraphLevel::Occurrence,
+                        format!("{name}()"),
+                        format!("{}:{}", file, line + 1),
+                    )
+                    .keyed(occurrence_key(&file, line, &name))
+                    .with_edge(GraphEdge::Callee)
+                    .with_target(&file, line, column)
+                    .nested(GraphLevel::Symbol.depth()),
+                );
+            }
+        }
+        GraphRelation::Follow | GraphRelation::Callers => {
+            let listed = occurrences.iter().filter(|entry| {
+                inputs.relation == GraphRelation::Follow
+                    || entry.symbol.role == SymbolRole::Reference
+            });
+            for entry in listed {
+                let edge = occurrence_edge(
+                    inputs,
+                    &entry.file,
+                    entry.symbol.line,
+                    entry.symbol.start,
+                    &entry.symbol.name,
+                    entry.symbol.role,
+                    is_declared,
+                );
                 let detail = if entry.file == inputs.current_file {
                     format!("this file :{}", entry.symbol.line + 1)
                 } else {
                     format!("{}:{}", entry.file, entry.symbol.line + 1)
                 };
-                GraphNode::new(
-                    GraphLevel::Occurrence,
-                    format!("{}()", entry.symbol.name),
-                    detail,
-                )
-                .keyed(occurrence_key(
-                    &entry.file,
-                    entry.symbol.line,
-                    &entry.symbol.name,
-                ))
-                .with_role(entry.symbol.role)
-                .with_target(&entry.file, entry.symbol.line, entry.symbol.start)
-                .nested(GraphLevel::Symbol.depth())
-            })
-            .collect::<Vec<_>>()
-    };
+                children.push(
+                    GraphNode::new(
+                        GraphLevel::Occurrence,
+                        format!("{}()", entry.symbol.name),
+                        detail,
+                    )
+                    .keyed(occurrence_key(
+                        &entry.file,
+                        entry.symbol.line,
+                        &entry.symbol.name,
+                    ))
+                    .with_role(entry.symbol.role)
+                    .with_edge(edge)
+                    .with_target(&entry.file, entry.symbol.line, entry.symbol.start)
+                    .nested(GraphLevel::Symbol.depth()),
+                );
+            }
+            if children.is_empty() {
+                let edge = occurrence_edge(
+                    inputs,
+                    inputs.current_file,
+                    hovered.line,
+                    hovered.start,
+                    &hovered.name,
+                    hovered.role,
+                    is_declared,
+                );
+                children.push(
+                    GraphNode::new(
+                        GraphLevel::Occurrence,
+                        format!("{}()", hovered.name),
+                        format!("{}:{}", inputs.current_file, hovered.line + 1),
+                    )
+                    .keyed(occurrence_key(
+                        inputs.current_file,
+                        hovered.line,
+                        &hovered.name,
+                    ))
+                    .with_role(hovered.role)
+                    .with_edge(edge)
+                    .with_target(inputs.current_file, hovered.line, hovered.start)
+                    .nested(GraphLevel::Symbol.depth()),
+                );
+            }
+        }
+    }
+    let symbol = GraphNode::new(
+        GraphLevel::Symbol,
+        format!("{}()", hovered.name),
+        format!("{}:{}", inputs.current_file, hovered.line + 1),
+    )
+    .keyed(symbol_key(inputs.current_file, hovered.line, &hovered.name))
+    .with_edge(if is_declared {
+        GraphEdge::Declaration
+    } else {
+        GraphEdge::Weak
+    })
+    .with_target(inputs.current_file, hovered.line, hovered.start)
+    .nested(GraphLevel::File.depth());
     push_group(
         nodes,
         GraphNode::new(
@@ -551,24 +816,14 @@ fn add_symbol_nodes(nodes: &mut Vec<GraphNode>, inputs: &GraphInputs<'_>, trunca
         )
         .keyed(file_key(inputs.current_file))
         .with_target(inputs.current_file, hovered.line, hovered.start),
-        vec![{
-            let symbol_children = children;
-            let symbol = GraphNode::new(
-                GraphLevel::Symbol,
-                format!("{}()", hovered.name),
-                format!("{}:{}", inputs.current_file, hovered.line + 1),
-            )
-            .keyed(symbol_key(inputs.current_file, hovered.line, &hovered.name))
-            .with_target(inputs.current_file, hovered.line, hovered.start)
-            .nested(GraphLevel::File.depth());
+        {
             let folded = is_folded(inputs, &symbol.key);
-            let mut flat = vec![symbol.with_children(symbol_children.len(), folded)];
+            let mut flat = vec![symbol.with_children(children.len(), folded)];
             if !folded {
-                flat.extend(symbol_children);
+                flat.extend(children);
             }
             flat
-        }]
-        .concat(),
+        },
         inputs,
         truncated,
     );
@@ -682,12 +937,23 @@ fn add_file_nodes(nodes: &mut Vec<GraphNode>, inputs: &GraphInputs<'_>, truncate
                 .filter(|symbol| symbol.name == *name && symbol.role == SymbolRole::Reference)
                 .take(MAX_CALL_CHILDREN)
                 .map(|call| {
+                    let edge = occurrence_edge(
+                        inputs,
+                        inputs.current_file,
+                        call.line,
+                        call.start,
+                        &call.name,
+                        call.role,
+                        true,
+                    );
                     GraphNode::new(
                         GraphLevel::Occurrence,
                         format!("{}()", call.name),
                         format!(":{}", call.line + 1),
                     )
-                    .with_role(SymbolRole::Reference)
+                    .keyed(occurrence_key(inputs.current_file, call.line, &call.name))
+                    .with_role(call.role)
+                    .with_edge(edge)
                     .with_target(inputs.current_file, call.line, call.start)
                     .nested(GraphLevel::File.depth() + 1)
                 })
@@ -1005,6 +1271,20 @@ mod tests {
             file_symbols: symbols,
             project_symbols: project,
             folded,
+            relation: GraphRelation::Follow,
+        }
+    }
+
+    fn inputs_relation<'a>(
+        lines: &'a [String],
+        symbols: &'a [SymbolOccurrence],
+        project: &'a [ProjectSymbolOccurrence],
+        hovered: Option<&'a SymbolOccurrence>,
+        relation: GraphRelation,
+    ) -> GraphInputs<'a> {
+        GraphInputs {
+            relation,
+            ..inputs_folded(lines, symbols, project, hovered, &[])
         }
     }
 
@@ -1090,7 +1370,7 @@ mod tests {
         ];
         let inputs = inputs_current_file(&lines, &symbols, &project, Some(&hovered));
         let graph = build_graph(&inputs, GraphScope::Symbol, "");
-        assert_eq!(graph.nodes[2].caption(), "symbol  run()");
+        assert_eq!(graph.nodes[2].caption(), "declare  run()");
         let roles = graph.nodes[3..]
             .iter()
             .map(|node| node.caption())
@@ -1263,6 +1543,137 @@ mod tests {
             visible_rows(48.0, 900.0, 1.0)
         );
         assert_eq!(visible_rows(f32::NAN, f32::NAN, 0.0), 1);
+    }
+
+    #[test]
+    fn callee_mode_lists_names_called_by_the_focus() {
+        let lines = vec![
+            "pub fn run() {".to_string(),
+            "    helper();".to_string(),
+            "    missing();".to_string(),
+            "}".to_string(),
+            "pub fn helper() {}".to_string(),
+        ];
+        let symbols = editor_core::symbol_occurrences(&lines, "src/engine.rs");
+        let hovered = occurrence("run", 0, SymbolRole::Declaration);
+        let project = vec![
+            project_entry("src/engine.rs", "run", 0, SymbolRole::Declaration),
+            project_entry("src/engine.rs", "helper", 1, SymbolRole::Reference),
+            project_entry("src/engine.rs", "helper", 4, SymbolRole::Declaration),
+        ];
+        let inputs = inputs_folded(&lines, &symbols, &project, Some(&hovered), &[]);
+        let callees = build_graph(
+            &GraphInputs {
+                relation: GraphRelation::Callees,
+                ..inputs_folded(&lines, &symbols, &project, Some(&hovered), &[])
+            },
+            GraphScope::Symbol,
+            "",
+        );
+        let captions = callees
+            .nodes
+            .iter()
+            .map(|node| node.caption())
+            .collect::<Vec<_>>();
+        assert!(
+            captions.contains(&"called  helper()".to_string()),
+            "{captions:?}"
+        );
+        assert!(!captions.contains(&"called  run()".to_string()));
+
+        // Follow mode keeps the declaration and its call sites.
+        let graph = build_graph(&inputs, GraphScope::Symbol, "");
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.caption() == "declare  run()"));
+    }
+
+    #[test]
+    fn caller_mode_lists_references_only() {
+        let lines = vec![
+            "pub fn run() {".to_string(),
+            "    run();".to_string(),
+            "}".to_string(),
+        ];
+        let symbols = editor_core::symbol_occurrences(&lines, "src/engine.rs");
+        let hovered = occurrence("run", 0, SymbolRole::Declaration);
+        let project = vec![
+            project_entry("src/engine.rs", "run", 0, SymbolRole::Declaration),
+            project_entry("src/engine.rs", "run", 1, SymbolRole::Reference),
+            project_entry("src/main.rs", "run", 9, SymbolRole::Reference),
+        ];
+        let callers = build_graph(
+            &GraphInputs {
+                relation: GraphRelation::Callers,
+                ..inputs_folded(&lines, &symbols, &project, Some(&hovered), &[])
+            },
+            GraphScope::Symbol,
+            "",
+        );
+        // The focus node stays a declaration; the children are call sites only.
+        assert_eq!(callers.nodes[2].edge, Some(GraphEdge::Declaration));
+        let captions = callers.nodes[3..]
+            .iter()
+            .map(|node| node.caption())
+            .collect::<Vec<_>>();
+        assert_eq!(captions, ["call  run()", "call  run()"]);
+    }
+
+    #[test]
+    fn weak_and_inferred_edges_are_marked() {
+        let lines = vec![
+            "pub fn helper() {".to_string(),
+            "    helper".to_string(),
+            "    missing();".to_string(),
+        ];
+        let symbols = editor_core::symbol_occurrences(&lines, "src/engine.rs");
+        // A declared name without call syntax is only an inferred relation.
+        let hovered = occurrence("helper", 1, SymbolRole::Reference);
+        let project = vec![
+            project_entry("src/engine.rs", "helper", 0, SymbolRole::Declaration),
+            project_entry("src/engine.rs", "helper", 1, SymbolRole::Reference),
+        ];
+        let inputs = inputs_folded(&lines, &symbols, &project, Some(&hovered), &[]);
+        let graph = build_graph(&inputs, GraphScope::Symbol, "");
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.edge == Some(GraphEdge::Inferred)));
+
+        // A name without any declaration in the project is a weak relation.
+        let weak_hover = occurrence("missing", 2, SymbolRole::Reference);
+        let weak_project = vec![project_entry(
+            "src/engine.rs",
+            "missing",
+            2,
+            SymbolRole::Reference,
+        )];
+        let weak = build_graph(
+            &inputs_folded(&lines, &symbols, &weak_project, Some(&weak_hover), &[]),
+            GraphScope::Symbol,
+            "",
+        );
+        let captions = weak
+            .nodes
+            .iter()
+            .map(|node| node.caption())
+            .collect::<Vec<_>>();
+        assert!(
+            captions.contains(&"weak  missing()".to_string()),
+            "{captions:?}"
+        );
+    }
+
+    #[test]
+    fn relation_cycle_walks_follow_callers_callees() {
+        assert_eq!(GraphRelation::Follow.next(), GraphRelation::Callers);
+        assert_eq!(GraphRelation::Callers.next(), GraphRelation::Callees);
+        assert_eq!(GraphRelation::Callees.next(), GraphRelation::Follow);
+        assert_eq!(GraphRelation::Follow.previous(), GraphRelation::Callees);
+        assert_eq!(GraphRelation::Callers.index(), 1);
+        assert_eq!(GraphEdge::Declaration.marker(), "declare");
+        assert_eq!(GraphEdge::Callee.marker(), "called");
     }
 
     #[test]

@@ -245,6 +245,7 @@ struct WindowsAppState {
     graph_search_focused: bool,
     graph_scope: Option<graph_core::GraphScope>,
     graph_folded: Vec<String>,
+    graph_relation: graph_core::GraphRelation,
     graph_selected: Option<usize>,
     graph_keyboard_active: bool,
     background_path: Option<PathBuf>,
@@ -459,6 +460,7 @@ impl WindowsAppState {
             graph_search_focused: false,
             graph_scope: None,
             graph_folded: Vec::new(),
+            graph_relation: graph_core::GraphRelation::Follow,
             graph_selected: None,
             graph_keyboard_active: false,
             background_path: preferences.background_path,
@@ -2227,6 +2229,7 @@ fn build_graph(
         file_symbols: symbols,
         project_symbols: &app.project_symbols,
         folded: &app.graph_folded,
+        relation: app.graph_relation,
     };
     let scope = graph_core::auto_scope(
         app.hovered_symbol.as_ref(),
@@ -3496,11 +3499,22 @@ unsafe extern "system" fn window_proc(
                         app.terminal_motion,
                     );
                     match w_param as u32 {
-                        VK_UP | VK_DOWN | 0x0d | 0x20 => {}
+                        VK_UP | VK_DOWN | 0x0d | 0x20 | VK_LEFT | VK_RIGHT => {}
                         _ => {
                             app.graph_keyboard_active = false;
                             return;
                         }
+                    }
+                    if matches!(w_param as u32, VK_LEFT | VK_RIGHT) {
+                        app.graph_relation = if w_param as u32 == VK_RIGHT {
+                            app.graph_relation.next()
+                        } else {
+                            app.graph_relation.previous()
+                        };
+                        app.graph_scroll = 0;
+                        app.graph_selected = None;
+                        app.status = format!("Graph relation: {}", app.graph_relation.label());
+                        return;
                     }
                     let symbols = editor_core::symbol_occurrences(&app.lines, &app.file_name);
                     let graph = build_graph(&app, &symbols);
@@ -3898,13 +3912,18 @@ unsafe extern "system" fn window_proc(
                 if inside(&scope_rect, x, y) {
                     APP.with(|cell| {
                         let mut app = cell.borrow_mut();
-                        app.graph_scope = graph_core::cycle_scope(app.graph_scope, true);
+                        if platform::shift_pressed() {
+                            app.graph_relation = app.graph_relation.next();
+                            app.status = format!("Graph relation: {}", app.graph_relation.label());
+                        } else {
+                            app.graph_scope = graph_core::cycle_scope(app.graph_scope, true);
+                            let label = match app.graph_scope {
+                                Some(scope) => scope.label().to_string(),
+                                None => "auto".to_string(),
+                            };
+                            app.status = format!("Graph range: {label}");
+                        }
                         app.graph_scroll = 0;
-                        let label = match app.graph_scope {
-                            Some(scope) => scope.label().to_string(),
-                            None => "auto".to_string(),
-                        };
-                        app.status = format!("Graph range: {label}");
                     });
                     invalidate(window);
                     return 0;

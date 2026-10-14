@@ -1185,19 +1185,29 @@ impl DirectEditorRenderer {
                     8.0 * scale,
                 )
             };
+            // Restrained differentiation per relation kind.
             let color = if selected {
                 &accent
             } else {
-                match node.level {
-                    graph_core::GraphLevel::Class => &keyword,
-                    graph_core::GraphLevel::Occurrence | graph_core::GraphLevel::Folder => &muted,
-                    _ => {
-                        if active {
-                            &bright
-                        } else {
+                match node.edge {
+                    Some(graph_core::GraphEdge::Declaration) => &bright,
+                    Some(graph_core::GraphEdge::Caller) => &text,
+                    Some(graph_core::GraphEdge::Callee) => &accent,
+                    Some(graph_core::GraphEdge::Weak) => &comment,
+                    Some(graph_core::GraphEdge::Inferred) => &muted,
+                    None => match node.level {
+                        graph_core::GraphLevel::Class => &keyword,
+                        graph_core::GraphLevel::Occurrence | graph_core::GraphLevel::Folder => {
                             &muted
                         }
-                    }
+                        _ => {
+                            if active {
+                                &bright
+                            } else {
+                                &muted
+                            }
+                        }
+                    },
                 }
             };
             let marker = graph_core::marker_glyph(node);
