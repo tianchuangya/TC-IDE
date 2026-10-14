@@ -502,6 +502,121 @@ impl Drop for ChatSession {
     }
 }
 
+/// A conversation kept between requests.
+///
+/// The panel stores turns here so a follow-up question has context and so the
+/// history can be written next to the project and reloaded later.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Conversation {
+    turns: Vec<(bool, String)>,
+}
+
+/// Turns a conversation keeps on disk.
+pub const MAX_STORED_TURNS: usize = 40;
+
+impl Conversation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Turns as `(is_user, text)`, oldest first.
+    pub fn turns(&self) -> &[(bool, String)] {
+        &self.turns
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.turns.is_empty()
+    }
+
+    /// Start a new question; an empty answer turn is appended for the reply.
+    pub fn push_user(&mut self, prompt: &str) {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return;
+        }
+        self.turns.push((true, prompt.to_string()));
+        self.turns.push((false, String::new()));
+        self.trim();
+    }
+
+    /// Append streamed answer text to the newest reply.
+    pub fn append_answer(&mut self, text: &str) {
+        match self.turns.iter_mut().rev().find(|(user, _)| !*user) {
+            Some((_, answer)) => answer.push_str(text),
+            None => self.turns.push((false, text.to_string())),
+        }
+    }
+
+    /// Newest answer text.
+    pub fn answer(&self) -> &str {
+        self.turns
+            .iter()
+            .rev()
+            .find(|(user, _)| !*user)
+            .map(|(_, answer)| answer.as_str())
+            .unwrap_or("")
+    }
+
+    pub fn clear(&mut self) {
+        self.turns.clear();
+    }
+
+    fn trim(&mut self) {
+        if self.turns.len() > MAX_STORED_TURNS * 2 {
+            let excess = self.turns.len() - MAX_STORED_TURNS * 2;
+            self.turns.drain(..excess);
+        }
+    }
+
+    /// `role|text` lines, with newlines escaped, so the file stays line based.
+    pub fn serialize(&self) -> String {
+        let mut text = String::new();
+        for (is_user, content) in &self.turns {
+            let escaped = content
+                .replace('\\', "\\\\")
+                .replace('\n', "\\n")
+                .replace('\r', "");
+            text.push_str(&format!(
+                "{}|{escaped}\n",
+                if *is_user { "user" } else { "assistant" }
+            ));
+        }
+        text
+    }
+
+    pub fn parse(content: &str) -> Conversation {
+        let mut conversation = Conversation::new();
+        for line in content.lines() {
+            let Some((role, text)) = line.split_once('|') else {
+                continue;
+            };
+            let mut decoded = String::new();
+            let mut escaped = false;
+            for character in text.chars() {
+                if escaped {
+                    decoded.push(match character {
+                        'n' => '\n',
+                        other => other,
+                    });
+                    escaped = false;
+                    continue;
+                }
+                match character {
+                    '\\' => escaped = true,
+                    other => decoded.push(other),
+                }
+            }
+            match role.trim() {
+                "user" => conversation.turns.push((true, decoded)),
+                "assistant" => conversation.turns.push((false, decoded)),
+                _ => {}
+            }
+        }
+        conversation.trim();
+        conversation
+    }
+}
+
 /// Environment entries a child process needs for an AI request.
 pub fn child_environment() -> [&'static str; 1] {
     [API_KEY_ENV]
@@ -542,6 +657,40 @@ mod tests {
         assert!(body.contains("line \\\"one\\\"\\nline two\\\\"));
         assert!(!body.contains('\n'));
         assert_eq!(json_escape("\u{1}"), "\\u0001");
+    }
+
+    #[test]
+    fn a_conversation_round_trips_through_its_file() {
+        let mut conversation = Conversation::new();
+        conversation.push_user("first question");
+        conversation.append_answer("first ");
+        conversation.append_answer("answer");
+        conversation.push_user("second\nquestion");
+        conversation.append_answer("done");
+        assert_eq!(conversation.answer(), "done");
+        assert_eq!(conversation.turns().len(), 4);
+
+        let text = conversation.serialize();
+        assert_eq!(text.lines().count(), 4);
+        assert!(text.contains("user|first question"));
+        let restored = Conversation::parse(&text);
+        assert_eq!(restored, conversation);
+        assert_eq!(restored.turns()[1].1, "first answer");
+        assert_eq!(restored.turns()[2].1, "second\nquestion");
+
+        // Unknown lines and stray separators are ignored rather than breaking the
+        // rest of the file.
+        let broken = Conversation::parse("nonsense\nsystem|ignored\nuser|kept\n");
+        assert_eq!(broken.turns(), [(true, "kept".to_string())]);
+
+        let mut long = Conversation::new();
+        for index in 0..(MAX_STORED_TURNS + 20) {
+            long.push_user(&format!("q{index}"));
+            long.append_answer("a");
+        }
+        assert!(long.turns().len() <= MAX_STORED_TURNS * 2);
+        long.clear();
+        assert!(long.is_empty());
     }
 
     #[test]

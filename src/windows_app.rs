@@ -281,7 +281,7 @@ struct WindowsAppState {
     chat_open: bool,
     chat_input: String,
     chat_input_focused: bool,
-    chat_messages: Vec<(bool, String)>,
+    chat_messages: ai_core::Conversation,
     chat_session: Option<ai_core::ChatSession>,
     chat_error: Option<String>,
     debug_session: Option<dap_core::DebugSession>,
@@ -577,7 +577,7 @@ impl WindowsAppState {
             chat_open: false,
             chat_input: String::new(),
             chat_input_focused: false,
-            chat_messages: Vec::new(),
+            chat_messages: ai_core::Conversation::new(),
             chat_session: None,
             chat_error: None,
             debug_session: None,
@@ -1445,6 +1445,7 @@ impl WindowsAppState {
             self.project_entry_is_dir,
         ) = Self::scan_project(&self.project_root, &self.collapsed_directories);
         self.shutdown_language_server();
+        self.load_chat_history();
         self.request_project_index();
         self.file_path = None;
         self.file_name = "Select a file".into();
@@ -1831,8 +1832,7 @@ impl WindowsAppState {
             ai_core::DEFAULT_TIMEOUT_SECONDS,
         ) {
             Ok(session) => {
-                self.chat_messages.push((true, prompt));
-                self.chat_messages.push((false, String::new()));
+                self.chat_messages.push_user(&prompt);
                 self.chat_input.clear();
                 self.chat_error = None;
                 self.chat_session = Some(session);
@@ -1853,13 +1853,7 @@ impl WindowsAppState {
         let mut failure = None;
         for event in events {
             match event {
-                ai_core::ChatEvent::Delta(text) => {
-                    if let Some((_, answer)) =
-                        self.chat_messages.iter_mut().rev().find(|(user, _)| !*user)
-                    {
-                        answer.push_str(&text);
-                    }
-                }
+                ai_core::ChatEvent::Delta(text) => self.chat_messages.append_answer(&text),
                 ai_core::ChatEvent::Done(status) => {
                     finished = true;
                     if let Some(status) = status {
@@ -1882,6 +1876,7 @@ impl WindowsAppState {
             } else {
                 self.status = "AI answer received".into();
             }
+            self.save_chat_history();
         } else {
             self.chat_session = Some(session);
         }
@@ -1895,9 +1890,39 @@ impl WindowsAppState {
         }
     }
 
-    /// Conversation as `(is_user, text)` pairs, newest last.
+    /// Conversation turns for the panel, oldest first.
     fn chat_lines(&self) -> Vec<(bool, String)> {
-        self.chat_messages.clone()
+        self.chat_messages.turns().to_vec()
+    }
+
+    /// Where the conversation of a project is stored.
+    fn chat_history_path(&self) -> PathBuf {
+        self.project_root.join(".tc-ide-ai").join("history.conf")
+    }
+
+    /// Load the saved conversation for the current project.
+    fn load_chat_history(&mut self) {
+        let path = self.chat_history_path();
+        self.chat_messages = match fs::read_to_string(&path) {
+            Ok(content) => ai_core::Conversation::parse(&content),
+            Err(_) => ai_core::Conversation::new(),
+        };
+        if !self.chat_messages.is_empty() {
+            self.status = format!(
+                "Restored {} AI turn(s) from {}",
+                self.chat_messages.turns().len(),
+                path.display()
+            );
+        }
+    }
+
+    /// Save the conversation next to the project.
+    fn save_chat_history(&self) {
+        let path = self.chat_history_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(path, self.chat_messages.serialize());
     }
 
     /// Breakpoint lines of the active file.
