@@ -83,6 +83,8 @@ pub struct WindowsScene<'a> {
     pub problems: &'a [String],
     pub problems_selected: usize,
     pub problems_hint: &'a str,
+    /// Real installation state of the selected language's tooling.
+    pub language_tooling: &'a str,
     /// AI panel: conversation, input line, run state and the last error.
     pub chat_open: bool,
     pub chat_messages: &'a [(bool, String)],
@@ -2451,6 +2453,23 @@ impl DirectEditorRenderer {
                             );
                         }
                     }
+                }
+                if scene.extension_category == 0 {
+                    // The language page reports what is really installed.
+                    unsafe {
+                        Self::text(
+                            &target_base,
+                            &self.small_format,
+                            &muted,
+                            scene.language_tooling,
+                            D2D_RECT_F {
+                                left: content_left,
+                                top: top + 520.0 * scale,
+                                right: left + panel_w - 24.0 * scale,
+                                bottom: top + 548.0 * scale,
+                            },
+                        )
+                    };
                 }
                 if matches!(scene.extension_category, 2 | 3) {
                     let items = if scene.extension_category == 2 {

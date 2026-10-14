@@ -88,6 +88,113 @@ impl ExtensionSource {
     }
 }
 
+/// Tools a language can use, and whether they are really installed.
+///
+/// The extension page reports this instead of a stored flag, so "installed"
+/// always means "the executable is on PATH", and the same answer is used for the
+/// language server, the formatter and the debugger.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LanguageTools {
+    pub language: String,
+    pub server: Option<String>,
+    pub formatter: Option<String>,
+    pub debugger: Option<String>,
+    pub server_installed: bool,
+    pub formatter_installed: bool,
+    pub debugger_installed: bool,
+}
+
+impl LanguageTools {
+    /// Whether at least one tool of this language is available.
+    pub fn has_any(&self) -> bool {
+        self.server_installed || self.formatter_installed || self.debugger_installed
+    }
+
+    /// Whether something is missing that the language would want.
+    pub fn missing(&self) -> Vec<&str> {
+        let mut missing = Vec::new();
+        if self.server.is_some() && !self.server_installed {
+            missing.push("language server");
+        }
+        if self.formatter.is_some() && !self.formatter_installed {
+            missing.push("formatter");
+        }
+        if self.debugger.is_some() && !self.debugger_installed {
+            missing.push("debugger");
+        }
+        missing
+    }
+
+    /// One line the panels can draw.
+    pub fn summary(&self) -> String {
+        let marks = [
+            (self.server.as_deref(), self.server_installed, "LSP"),
+            (self.formatter.as_deref(), self.formatter_installed, "fmt"),
+            (self.debugger.as_deref(), self.debugger_installed, "dbg"),
+        ];
+        let parts = marks
+            .iter()
+            .filter_map(|(tool, installed, label)| {
+                tool.map(|tool| {
+                    format!(
+                        "{label} {tool} {}",
+                        if *installed { "ok" } else { "missing" }
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if parts.is_empty() {
+            "no external tooling".to_string()
+        } else {
+            parts.join(" · ")
+        }
+    }
+}
+
+/// Tool names TC-IDE looks for, per language.
+pub fn tools_for_language(
+    language: &str,
+) -> (
+    Option<&'static str>,
+    Option<&'static str>,
+    Option<&'static str>,
+) {
+    match language {
+        "Rust" => (Some("rust-analyzer"), Some("rustfmt"), Some("lldb-dap")),
+        "Python" => (
+            Some("basedpyright-langserver"),
+            Some("ruff"),
+            Some("debugpy"),
+        ),
+        "C" | "C++" => (Some("clangd"), Some("clang-format"), Some("lldb-dap")),
+        "Java" => (Some("jdtls"), None, None),
+        "Go" => (Some("gopls"), Some("gofmt"), Some("dlv")),
+        "TypeScript / JavaScript" | "Web" => {
+            (Some("typescript-language-server"), Some("biome"), None)
+        }
+        _ => (None, None, None),
+    }
+}
+
+/// Real installation state of a language's tooling.
+///
+/// `probe` is injected so the rules are testable without the tools present.
+pub fn language_tools<F>(language: &str, probe: F) -> LanguageTools
+where
+    F: Fn(&str) -> bool,
+{
+    let (server, formatter, debugger) = tools_for_language(language);
+    LanguageTools {
+        language: language.to_string(),
+        server: server.map(str::to_string),
+        formatter: formatter.map(str::to_string),
+        debugger: debugger.map(str::to_string),
+        server_installed: server.map(&probe).unwrap_or(false),
+        formatter_installed: formatter.map(&probe).unwrap_or(false),
+        debugger_installed: debugger.map(&probe).unwrap_or(false),
+    }
+}
+
 /// Parse a catalog written as `[extension]` sections of `key=value` lines.
 pub fn parse_catalog(text: &str) -> Result<Vec<ExtensionSource>, String> {
     let mut sources = Vec::new();
@@ -454,6 +561,35 @@ mod tests {
         source.url = "http://example.test/x.zip".into();
         assert!(!source.is_installable());
         assert!(install_plan("/cache", &source, Shell::Unix).is_err());
+    }
+
+    #[test]
+    fn language_tooling_reports_what_is_really_installed() {
+        let installed = |tool: &str| matches!(tool, "rust-analyzer" | "rustfmt");
+        let rust = language_tools("Rust", installed);
+        assert_eq!(rust.server.as_deref(), Some("rust-analyzer"));
+        assert!(rust.server_installed);
+        assert!(rust.formatter_installed);
+        assert!(!rust.debugger_installed);
+        assert!(rust.has_any());
+        assert_eq!(rust.missing(), ["debugger"]);
+        assert!(rust.summary().contains("LSP rust-analyzer ok"));
+        assert!(rust.summary().contains("dbg lldb-dap missing"));
+
+        let nothing = |_: &str| false;
+        let python = language_tools("Python", nothing);
+        assert!(!python.has_any());
+        assert_eq!(python.missing().len(), 3);
+
+        let unknown = language_tools("Markdown", |_| true);
+        assert!(unknown.server.is_none());
+        assert!(!unknown.has_any());
+        assert_eq!(unknown.summary(), "no external tooling");
+
+        // Java has a server but no formatter or debugger configured.
+        let java = language_tools("Java", nothing);
+        assert_eq!(java.formatter, None);
+        assert_eq!(java.missing(), ["language server"]);
     }
 
     #[test]

@@ -2254,6 +2254,27 @@ impl WindowsAppState {
         self.lines.join("\n")
     }
 
+    /// Real installation state of a language's tooling.
+    fn language_tooling(&self, language: &str) -> extension_core::LanguageTools {
+        extension_core::language_tools(language, |tool| {
+            lsp_core::program_runs(tool, &["--version"])
+        })
+    }
+
+    /// Summary of the tooling for the selected extension language.
+    fn selected_language_tooling(&self) -> String {
+        let language = WindowsAppState::EXTENSION_LANGUAGES[self
+            .selected_language
+            .min(WindowsAppState::EXTENSION_LANGUAGES.len() - 1)];
+        // The registry names differ from the extension list, so map the common
+        // ones onto the names the tooling table understands.
+        let language = match language {
+            "Web" => "TypeScript / JavaScript",
+            other => other,
+        };
+        self.language_tooling(language).summary()
+    }
+
     /// Start the language server for the active file, when it is installed.
     fn ensure_language_server(&mut self) {
         let path = self
@@ -3755,6 +3776,7 @@ fn render_window(window: Hwnd) {
                 .and_then(|path| path.file_name())
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let language_tooling = app.selected_language_tooling();
             let chat_messages = app.chat_lines();
             let problem_rows = app
                 .problem_rows()
@@ -3887,6 +3909,7 @@ fn render_window(window: Hwnd) {
                 } else {
                     "Ctrl+Shift+D closes · Enter jumps"
                 },
+                language_tooling: &language_tooling,
                 chat_open: app.chat_open,
                 chat_messages: &chat_messages,
                 chat_input: &app.chat_input,
@@ -6831,6 +6854,14 @@ pub fn self_check() -> i32 {
     report(
         "rename edits apply to a document",
         applied == "let answer = 1;\n",
+        &mut failures,
+    );
+    let tooling = extension_core::language_tools("Rust", |tool| tool == "rustfmt");
+    report(
+        "tooling state follows the real executables",
+        tooling.formatter_installed
+            && !tooling.server_installed
+            && tooling.missing().contains(&"language server"),
         &mut failures,
     );
     let mut panel_state = WindowsAppState::new();

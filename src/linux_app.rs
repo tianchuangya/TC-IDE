@@ -1638,6 +1638,30 @@ impl App {
         )
     }
 
+    /// Real installation state of the selected language's tooling.
+    fn language_tooling_summary(&self) -> String {
+        let language = self
+            .languages
+            .get(self.selected_language.unwrap_or(0))
+            .map(|pack| pack.name)
+            .unwrap_or("Plain Text");
+        let language = match language {
+            "Web" => "TypeScript / JavaScript",
+            other => other,
+        };
+        extension_core::language_tools(language, |tool| {
+            std::process::Command::new(tool)
+                .arg("--version")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        })
+        .summary()
+    }
+
     /// Summary of the extension runtime cache, for the extensions panel.
     fn runtime_cache_summary(&self) -> String {
         format!(
@@ -3441,9 +3465,19 @@ impl App {
                     ),
                 );
                 self.text(
+                    self.colors.muted,
+                    dx,
+                    y + s(515),
+                    &format!(
+                        "{} {}",
+                        self.tr("Tooling:", "工具链："),
+                        self.language_tooling_summary()
+                    ),
+                );
+                self.text(
                     self.colors.text,
                     dx + s(16),
-                    y + s(515),
+                    y + s(545),
                     self.tr(
                         "- LSP / formatter / debugger adapter",
                         "- LSP / 格式化 / 调试器适配",
