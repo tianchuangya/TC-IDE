@@ -152,6 +152,7 @@ struct WindowsAppState {
     package_progress: f32,
     package_started: Option<Instant>,
     package_marker: String,
+    package_failure_marker: String,
     package_reveal_pending: bool,
     terminal_open: bool,
     terminal_motion: f32,
@@ -272,6 +273,7 @@ impl WindowsAppState {
             package_progress: 0.0,
             package_started: None,
             package_marker: String::new(),
+            package_failure_marker: String::new(),
             package_reveal_pending: false,
             terminal_open: false,
             terminal_motion: 0.0,
@@ -965,17 +967,81 @@ impl WindowsAppState {
             .unwrap_or_else(|| "main".into())
             .replace('"', "");
         let stage = format!(".tc-ide-packages\\{project}");
-        let build = if self.project_root.join("Cargo.toml").exists() {
+        let is_rust = self.project_root.join("Cargo.toml").exists();
+        let is_go = self.project_root.join("go.mod").exists();
+        let language = editor_core::language_for_file(&self.file_name);
+        let supports_windows_executable =
+            is_rust || is_go || matches!(language, "C" | "C++" | "Python");
+        if self.package_targets[2] && !supports_windows_executable {
+            self.status = format!(
+                "MSIX requires a Windows executable; {} packaging is not configured yet",
+                language
+            );
+            return;
+        }
+        if self.package_targets[2] {
+            let stage_path = self.project_root.join(".tc-ide-packages").join(&project);
+            let assets = stage_path.join("Assets");
+            let identity = project
+                .chars()
+                .map(|value| {
+                    if value.is_ascii_alphanumeric() {
+                        value
+                    } else {
+                        '.'
+                    }
+                })
+                .collect::<String>();
+            let identity = format!("TianChuangYa.{}", identity.trim_matches('.'));
+            let display = project.replace(['&', '<', '>'], "");
+            let manifest = format!(
+                r#"<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities" IgnorableNamespaces="uap rescap">
+  <Identity Name="{identity}" Publisher="CN=TianChuangYa" Version="0.2.0.0" />
+  <Properties><DisplayName>{display}</DisplayName><PublisherDisplayName>TianChuangYa</PublisherDisplayName><Logo>Assets\StoreLogo.png</Logo></Properties>
+  <Resources><Resource Language="en-us" /></Resources>
+  <Dependencies><TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" /></Dependencies>
+  <Applications><Application Id="TCIDE" Executable="{project}.exe" EntryPoint="Windows.FullTrustApplication"><uap:VisualElements DisplayName="{display}" Description="TC-IDE packaged project" BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" /></Application></Applications>
+  <Capabilities><rescap:Capability Name="runFullTrust" /></Capabilities>
+</Package>
+"#
+            );
+            let prepared = fs::create_dir_all(&assets)
+                .and_then(|()| fs::write(stage_path.join("AppxManifest.xml"), manifest))
+                .and_then(|()| {
+                    fs::write(
+                        assets.join("StoreLogo.png"),
+                        include_bytes!("../assets/tc-ide-icon.png"),
+                    )
+                })
+                .and_then(|()| {
+                    fs::write(
+                        assets.join("Square150x150Logo.png"),
+                        include_bytes!("../assets/tc-ide-icon.png"),
+                    )
+                })
+                .and_then(|()| {
+                    fs::write(
+                        assets.join("Square44x44Logo.png"),
+                        include_bytes!("../assets/tc-ide-icon.png"),
+                    )
+                });
+            if let Err(error) = prepared {
+                self.status = format!("Could not prepare MSIX layout: {error}");
+                return;
+            }
+        }
+        let build = if is_rust {
             format!(
                 "cargo build --release; $a=Get-ChildItem .\\target\\release\\*.exe | Where-Object {{$_.DirectoryName -notmatch 'deps'}} | Select-Object -First 1; if($a){{Copy-Item $a.FullName '{stage}\\{project}.exe' -Force}}"
             )
-        } else if self.project_root.join("go.mod").exists() {
+        } else if is_go {
             format!("go build -o '{stage}\\{project}.exe' .")
         } else {
-            match editor_core::language_for_file(&self.file_name) {
+            match language {
                 "C" => format!("gcc \"{file}\" -o '{stage}\\{project}.exe'"),
                 "C++" => format!("g++ \"{file}\" -o '{stage}\\{project}.exe'"),
-                "Python" => format!("python -m PyInstaller --noconfirm --onefile \"{file}\" --distpath '{stage}' --workpath .tc-ide-packages\\work --specpath .tc-ide-packages\\spec"),
+                "Python" => format!("python -m PyInstaller --noconfirm --onefile --name \"{project}\" \"{file}\" --distpath '{stage}' --workpath .tc-ide-packages\\work --specpath .tc-ide-packages\\spec"),
                 "Java" => format!("javac \"{file}\"; jar --create --file '{stage}\\{project}.jar' *.class"),
                 _ => self.task_command(true),
             }
@@ -986,14 +1052,18 @@ impl WindowsAppState {
             String::new()
         };
         let msix = if self.package_targets[2] {
-            "; if(Get-Command MakeAppx.exe -ErrorAction SilentlyContinue){Write-Output 'MSIX SDK detected: manifest/signing configuration is required'}else{Write-Warning 'MakeAppx.exe is not installed'}"
+            format!("; $makeappx=(Get-Command MakeAppx.exe -ErrorAction SilentlyContinue).Source; if(!$makeappx){{$makeappx=Get-ChildItem \"${{env:ProgramFiles(x86)}}\\Windows Kits\\10\\bin\\*\\x64\\makeappx.exe\" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName}}; if(!$makeappx){{throw 'Windows SDK MakeAppx.exe is not installed'}}; & $makeappx pack /d '{stage}' /p '.tc-ide-packages\\{project}.msix' /o")
         } else {
-            ""
+            String::new()
         };
         self.package_marker = format!("__TC_PACKAGE_DONE_{}__", self.started.elapsed().as_nanos());
+        self.package_failure_marker = format!(
+            "__TC_PACKAGE_FAILED_{}__",
+            self.started.elapsed().as_nanos()
+        );
         let command = format!(
-            "$ErrorActionPreference='Stop'; New-Item -ItemType Directory -Force '{stage}' | Out-Null; {build}{zip}{msix}; Write-Output '{}'",
-            self.package_marker
+            "$ErrorActionPreference='Stop'; try{{New-Item -ItemType Directory -Force '{stage}' | Out-Null; {build}{zip}{msix}; Write-Output '{}'}}catch{{Write-Host $_.Exception.Message; Write-Output '{}'}}",
+            self.package_marker, self.package_failure_marker
         );
         if let Some(tab) = self.terminals.first() {
             let _ = tab.session.write(&format!("{command}\r"));
@@ -1144,7 +1214,20 @@ impl WindowsAppState {
                         || view.current.contains(&self.package_marker)
                 })
             });
-            if done {
+            let failed = self.terminals.first().is_some_and(|tab| {
+                tab.session.view.lock().ok().is_some_and(|view| {
+                    view.lines
+                        .iter()
+                        .any(|line| line.contains(&self.package_failure_marker))
+                        || view.current.contains(&self.package_failure_marker)
+                })
+            });
+            if failed {
+                self.package_running = false;
+                self.package_progress = 0.0;
+                self.package_started = None;
+                self.status = "Packaging failed; see the Build terminal for details".into();
+            } else if done {
                 self.package_running = false;
                 self.package_progress = 1.0;
                 self.package_reveal_pending = true;
