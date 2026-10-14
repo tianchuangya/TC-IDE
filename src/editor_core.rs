@@ -52,6 +52,70 @@ fn identifier_ranges(line: &str) -> Vec<(usize, usize, String)> {
     result
 }
 
+const FLOW_KEYWORDS: [&str; 16] = [
+    "if", "else", "elif", "for", "while", "switch", "case", "catch", "match", "return", "await",
+    "try", "loop", "throw", "unless", "yield",
+];
+
+const DECLARATION_MODIFIERS: [&str; 14] = [
+    "pub",
+    "public",
+    "private",
+    "protected",
+    "internal",
+    "export",
+    "declare",
+    "static",
+    "readonly",
+    "final",
+    "open",
+    "unsafe",
+    "async",
+    "extern",
+];
+
+/// Name of a `let`/`const`/`var` style declaration, if the line starts one.
+fn variable_declaration(code: &str, identifiers: &[(usize, usize, String)]) -> Option<String> {
+    for (index, (_, _, word)) in identifiers.iter().enumerate() {
+        let strict = match word.as_str() {
+            "let" | "const" | "var" | "val" => false,
+            // `static` is also a Java/C# modifier, so it only declares a name when
+            // a type annotation or initialiser follows directly.
+            "static" => true,
+            _ => continue,
+        };
+        let modifiers_only = identifiers[..index].iter().all(|(_, _, earlier)| {
+            earlier != "static" && DECLARATION_MODIFIERS.contains(&earlier.as_str())
+        });
+        if !modifiers_only {
+            continue;
+        }
+        let mut next = index + 1;
+        while matches!(
+            identifiers.get(next).map(|(_, _, name)| name.as_str()),
+            Some("mut" | "ref" | "final")
+        ) {
+            next += 1;
+        }
+        let Some((_, end, name)) = identifiers.get(next) else {
+            continue;
+        };
+        if strict {
+            let after = code
+                .char_indices()
+                .nth(*end)
+                .map(|(offset, _)| &code[offset..])
+                .unwrap_or("")
+                .trim_start();
+            if !after.starts_with(':') && !after.starts_with('=') {
+                continue;
+            }
+        }
+        return Some(name.clone());
+    }
+    None
+}
+
 fn declaration_name(line: &str, file: &str) -> Option<String> {
     let code = comment_bounds(line, file)
         .map(|(start, _, _)| &line[..start])
@@ -65,13 +129,24 @@ fn declaration_name(line: &str, file: &str) -> Option<String> {
             return Some(pair[1].2.clone());
         }
     }
+    if let Some(name) = variable_declaration(code, &identifiers) {
+        return Some(name);
+    }
     let open = code.find('(')?;
     let before = &code[..open];
-    let candidate = identifier_ranges(before).pop()?;
+    let candidates = identifier_ranges(before);
+    let candidate = candidates.last()?.clone();
     if matches!(
         candidate.2.as_str(),
         "if" | "for" | "while" | "switch" | "catch"
     ) {
+        return None;
+    }
+    // `if let Some(value) = ...` and friends are statements, not declarations.
+    if candidates[..candidates.len() - 1]
+        .iter()
+        .any(|(_, _, word)| FLOW_KEYWORDS.contains(&word.as_str()))
+    {
         return None;
     }
     let prefix = before[..before
@@ -85,6 +160,77 @@ fn declaration_name(line: &str, file: &str) -> Option<String> {
     } else {
         Some(candidate.2)
     }
+}
+
+/// Kind of a declaration, used by the relation graph hierarchy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SymbolKind {
+    Class,
+    Function,
+    Variable,
+    Other,
+}
+
+const CLASS_KEYWORDS: [&str; 13] = [
+    "class",
+    "struct",
+    "interface",
+    "enum",
+    "trait",
+    "impl",
+    "record",
+    "union",
+    "namespace",
+    "module",
+    "object",
+    "type",
+    "protocol",
+];
+const FUNCTION_KEYWORDS: [&str; 9] = [
+    "fn",
+    "def",
+    "func",
+    "function",
+    "sub",
+    "proc",
+    "method",
+    "constructor",
+    "lambda",
+];
+const VARIABLE_KEYWORDS: [&str; 7] = ["let", "const", "var", "static", "val", "auto", "final"];
+
+/// Classify a declaration line so the graph can nest members under their type.
+pub fn declaration_kind(line: &str, file: &str) -> SymbolKind {
+    let code = comment_bounds(line, file)
+        .map(|(start, _, _)| &line[..start])
+        .unwrap_or(line);
+    let words = identifier_ranges(code)
+        .into_iter()
+        .map(|(_, _, name)| name)
+        .collect::<Vec<_>>();
+    if words
+        .iter()
+        .any(|word| CLASS_KEYWORDS.contains(&word.as_str()))
+    {
+        return SymbolKind::Class;
+    }
+    if words
+        .iter()
+        .any(|word| FUNCTION_KEYWORDS.contains(&word.as_str()))
+    {
+        return SymbolKind::Function;
+    }
+    if words
+        .iter()
+        .any(|word| VARIABLE_KEYWORDS.contains(&word.as_str()))
+        || code.contains('=')
+    {
+        return SymbolKind::Variable;
+    }
+    if code.contains('(') {
+        return SymbolKind::Function;
+    }
+    SymbolKind::Other
 }
 
 pub fn symbol_occurrences(lines: &[String], file: &str) -> Vec<SymbolOccurrence> {
@@ -472,6 +618,51 @@ fn syntax_tokens_without_comment(value: &str, file: &str) -> Vec<SyntaxToken> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn variable_declarations_are_indexed_without_if_let_noise() {
+        assert_eq!(
+            declaration_name("const LIMIT: usize = 4;", "main.rs").as_deref(),
+            Some("LIMIT")
+        );
+        assert_eq!(
+            declaration_name("pub static mut COUNTER: u32 = 0;", "main.rs").as_deref(),
+            Some("COUNTER")
+        );
+        assert_eq!(
+            declaration_name("let mut total = 0;", "main.rs").as_deref(),
+            Some("total")
+        );
+        assert_eq!(
+            declaration_name("if let Some(value) = cache.get(key) {", "main.rs"),
+            None
+        );
+        assert_eq!(declaration_name("for name in names {", "main.rs"), None);
+    }
+
+    #[test]
+    fn declaration_kinds_separate_types_functions_and_variables() {
+        assert_eq!(
+            declaration_kind("pub struct Engine {", "engine.rs"),
+            SymbolKind::Class
+        );
+        assert_eq!(
+            declaration_kind("pub fn run() {", "engine.rs"),
+            SymbolKind::Function
+        );
+        assert_eq!(
+            declaration_kind("const LIMIT: usize = 4;", "engine.rs"),
+            SymbolKind::Variable
+        );
+        assert_eq!(
+            declaration_kind("class Engine:", "engine.py"),
+            SymbolKind::Class
+        );
+        assert_eq!(
+            declaration_kind("// fn hidden() {", "engine.rs"),
+            SymbolKind::Other
+        );
+    }
 
     #[test]
     fn c_preprocessor_is_not_a_comment() {
