@@ -192,7 +192,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 - [x] 产物报告：BUILD-RESULT.txt 记录每个目标的路径、大小、耗时与失败命令，状态栏给出摘要。
 - [x] 各自系统生成产物：Linux runner 生成 .tar.gz 与真实 .deb（并尝试 AppImage）、macOS runner 生成 .app 与 .dmg、Windows runner 生成 ZIP 与 MSIX，均从各自系统上传到同一个 Release。
 - [x] 打包进度绑定真实构建阶段：workspace_core::packaging_progress 按输出中的 Compiling/Finished/Compress-Archive/MakeAppx 等标记推进，绝不倒退。
-- [ ] 继续优化吸入拉伸、距离加速、白洞吐出和极简平台图标；避免白色方块和无意义连线。
+- [x] 继续优化吸入拉伸、距离加速、白洞吐出和极简平台图标；避免白色方块和无意义连线。（新增共享 `package_motion`：`absorb_seconds` 由项目行数与目标数决定吸入时长、`absorb_window` 实现"距离加速"（越远的源越早出发、速度越快，全部同时抵达）、`absorbed` 返回位置/拖尾/摆动（拖尾与摆动按行程比例缩放，窗口大小与 DPI 变化时观感一致）、`emitted`/`emission_slots` 负责白洞吐出的扇形落点。Linux 的吸入与吐出都改由共享模型驱动，四个产物分两列扇形落位；Windows 的吸入条同样改为共享模型，并且构建完成后不再把源"倒着射回去"当白色方块（改为已吸入即消失、拖尾只画细的 muted 拖痕），源方块也改用 text/muted 而非近白色 bright。新增 `--render-scene packaging|packaging-emit` 让包装动画可以本地渲染成 PNG 检查，CI 的 Linux job 现在会渲染编辑器帧与两个包装动画帧，并要求包装帧与编辑器帧逐字节不同（防止 `--render-scene` 静默失效）。Linux 的产物图标原本就是极简线框，无需修改）
 
 ### P1：视觉与交互
 
@@ -213,7 +213,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 ### P2：自动化与发布前门槛
 
 - [x] 可脚本化的状态层测试：tc-ide --self-check 覆盖共享内核断言，Windows CI 在发布构建后运行它。
-- [x] 单元测试覆盖：`graph_core`、`terminal_core`、`editor_core`、`workspace_core`（偏好设置/项目模板/打包命令与打包目标/打包报告）、`session_core`、`ai_core`、`extension_core`、`lsp_core`、`dap_core`、`text_buffer`、`index_core`、`syntax_core`、`motion_core`（含行位置弹簧）均已覆盖（本地 177 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试；Windows 侧另有编辑器与项目树行弹簧的测试）。
+- [x] 单元测试覆盖：`graph_core`、`terminal_core`、`editor_core`、`workspace_core`（偏好设置/项目模板/打包命令与打包目标/打包报告）、`session_core`、`ai_core`、`extension_core`、`lsp_core`、`dap_core`、`text_buffer`、`index_core`、`syntax_core`、`motion_core`（含行位置弹簧）均已覆盖（本地 182 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试；Windows 侧另有编辑器与项目树行弹簧的测试）。
 - [x] CI 加入 `cargo fmt --check`、Clippy（先清零现有警告）和产物结构检查。（`cargo fmt --check` 与 `windows-typecheck` 已加入；Clippy 仍待清零现有警告后接入，当前 Linux 侧仍有 18 条、Windows 侧 2 条 dead_code 类警告）
 - [x] 版本号（Cargo.toml 0.3.0）、CHANGELOG.md、docs/INSTALL.md、docs/KNOWN-ISSUES.md、docs/REAL-MACHINE-CHECKLIST.md 已就绪，均标注“未发布”。
 - [x] 未触发 release.yml、未创建标签或 Release；工作流已补齐三平台产物步骤，但仍然只能手动触发。
@@ -339,7 +339,8 @@ cargo run --release
 ```bash
 rustup run stable cargo fmt --check                          # 必须用 stable 的 rustfmt：本机 /usr/bin/rustfmt 1.7
                                                              # 与 CI 的 1.10 排版结果不同，用错版本会“本地通过、CI 失败”
-cargo test --all-targets                                   # 177 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试
+cargo test --all-targets                                   # 182 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试
+DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png --render-scene packaging   # 包装动画也可渲染成帧
 cargo clippy --all-targets -- -D warnings                   # 共享内核 + Linux 后端
 cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo check --all-targets --target x86_64-pc-windows-msvc    # Windows 类型检查

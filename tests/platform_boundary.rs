@@ -11,7 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Modules that must stay platform independent.
-const SHARED_CORES: [&str; 13] = [
+const SHARED_CORES: [&str; 14] = [
     "ai_core.rs",
     "dap_core.rs",
     "editor_core.rs",
@@ -20,6 +20,7 @@ const SHARED_CORES: [&str; 13] = [
     "index_core.rs",
     "lsp_core.rs",
     "motion_core.rs",
+    "package_motion.rs",
     "session_core.rs",
     "syntax_core.rs",
     "terminal_core.rs",

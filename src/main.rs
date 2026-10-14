@@ -10,6 +10,7 @@ mod lsp_core;
 #[cfg(target_os = "macos")]
 mod macos_app;
 mod motion_core;
+mod package_motion;
 mod session_core;
 mod syntax_core;
 mod terminal_core;

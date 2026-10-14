@@ -29,6 +29,7 @@ use windows::Win32::System::Com::{
 
 use crate::editor_core::{self, SymbolOccurrence, TokenKind};
 use crate::graph_core;
+use crate::package_motion;
 use crate::terminal_core;
 
 pub struct WindowsScene<'a> {
@@ -460,34 +461,65 @@ impl ScenePaint<'_, '_> {
                     )
                 };
             }
-            for index in 0..18 {
-                let source_x =
-                    self.tree_w + 35.0 * self.scale + (index % 6) as f32 * 74.0 * self.scale;
-                let source_y = self.code_top + (index / 6) as f32 * 68.0 * self.scale;
-                let travel = if complete {
-                    (self.scene.animation_seconds * 1.8).fract()
+            // The same absorb as the Linux backend: the sources furthest from
+            // the core leave first, so they all arrive together.
+            let centre = (center_x, center_y);
+            let sources = (0..18)
+                .map(|index| {
+                    (
+                        self.tree_w + 35.0 * self.scale + (index % 6) as f32 * 74.0 * self.scale,
+                        self.code_top + (index / 6) as f32 * 68.0 * self.scale,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let max_distance = sources
+                .iter()
+                .map(|(x, y)| ((x - centre.0).powi(2) + (y - centre.1).powi(2)).sqrt())
+                .fold(0.0_f32, f32::max);
+            let phase = if complete {
+                1.0
+            } else {
+                self.scene.package_progress.clamp(0.0, 1.0)
+            };
+            let half = 1.5 * self.scale;
+            for (index, source) in sources.iter().enumerate() {
+                let travel = package_motion::absorbed(
+                    *source,
+                    centre,
+                    index,
+                    sources.len(),
+                    max_distance,
+                    phase,
+                );
+                if complete || travel.progress >= 1.0 {
+                    // Once the build is done the sources have been absorbed;
+                    // sending them back out as white blocks only added noise.
+                    continue;
+                }
+                let head = if travel.progress > 0.85 {
+                    &self.muted
                 } else {
-                    self.scene.package_progress.clamp(0.0, 1.0).powf(1.8)
+                    &self.text
                 };
-                let x = if complete {
-                    center_x + (source_x - center_x) * travel
-                } else {
-                    source_x + (center_x - source_x) * travel
-                };
-                let y = if complete {
-                    center_y + (source_y - center_y) * travel
-                } else {
-                    source_y + (center_y - source_y) * travel
-                };
-                let stretch = 5.0 + 24.0 * travel;
                 unsafe {
+                    if travel.trail > package_motion::MIN_TRAIL * self.scale {
+                        let tail = travel.trail;
+                        DirectEditorRenderer::fill(
+                            self.target,
+                            &self.muted,
+                            travel.x - tail,
+                            travel.y - 0.5 * self.scale,
+                            travel.x,
+                            travel.y + 0.5 * self.scale,
+                        );
+                    }
                     DirectEditorRenderer::fill(
                         self.target,
-                        if complete { &self.bright } else { &self.text },
-                        x - stretch * self.scale,
-                        y - 1.5 * self.scale,
-                        x + 5.0 * self.scale,
-                        y + 1.5 * self.scale,
+                        head,
+                        travel.x - half,
+                        travel.y - half,
+                        travel.x + half,
+                        travel.y + half,
                     )
                 };
             }

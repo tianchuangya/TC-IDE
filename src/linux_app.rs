@@ -17,6 +17,7 @@ use crate::editor_core;
 use crate::extension_core;
 use crate::graph_core;
 use crate::motion_core;
+use crate::package_motion;
 use crate::session_core;
 use crate::workspace_core;
 
@@ -3877,6 +3878,34 @@ impl App {
         );
     }
 
+    /// Put the app into a known state so a rendered frame shows a scene that
+    /// otherwise needs a running build or a click to appear.
+    ///
+    /// Used by `--render-scene`, which lets the packaging animation be inspected
+    /// (and smoke tested in CI) without waiting for a real build.
+    fn prime_scene(&mut self, name: &str) -> bool {
+        let lines = self.files.iter().map(|file| file.lines.len()).sum();
+        let absorb = package_motion::absorb_seconds(lines, 3);
+        let ago = |seconds: f32| {
+            Instant::now()
+                .checked_sub(Duration::from_secs_f32(seconds))
+                .unwrap_or_else(Instant::now)
+        };
+        match name {
+            "packaging" => {
+                self.package_targets = [true, true, true, true];
+                self.build_started = Some(ago(absorb * 0.55));
+                true
+            }
+            "packaging-emit" => {
+                self.package_targets = [true, true, true, true];
+                self.build_started = Some(ago(absorb + 0.9));
+                true
+            }
+            _ => false,
+        }
+    }
+
     unsafe fn draw_build_animation(&self) {
         let s = |v| self.s(v);
         let elapsed = self.build_started.unwrap().elapsed().as_secs_f32();
@@ -3896,7 +3925,7 @@ impl App {
                     self.height - s(109),
                 );
             }
-            let sources = [
+            let sources: [(i32, i32, &str); 9] = [
                 (s(250), s(160), "fn build_graph()"),
                 (s(420), s(310), "resolve_symbols(files)"),
                 (self.width - s(460), s(220), "GraphController"),
@@ -3911,21 +3940,33 @@ impl App {
                 (s(360), self.height - s(190), "const BUILD_MODE"),
                 (self.width - s(390), self.height - s(235), "artifact_path"),
             ];
-            for (index, (sx, sy, label)) in sources.iter().enumerate() {
-                let delayed = ((t - index as f32 * 0.018) / 0.84).clamp(0.0, 1.0);
-                let local = delayed.powf(2.35);
-                let swirl = (local * std::f32::consts::PI * 2.6 + index as f32).sin();
-                let px = *sx + ((cx - *sx) as f32 * local) as i32;
-                let py = *sy
-                    + ((cy - *sy) as f32 * local) as i32
-                    + (swirl * s(18) as f32 * (1.0 - local)) as i32;
-                let color = if local > 0.9 {
+            let centre = (cx as f32, cy as f32);
+            let places = sources
+                .iter()
+                .map(|(sx, sy, _)| (*sx as f32, *sy as f32))
+                .collect::<Vec<_>>();
+            let max_distance = places
+                .iter()
+                .map(|(x, y)| ((x - centre.0).powi(2) + (y - centre.1).powi(2)).sqrt())
+                .fold(0.0_f32, f32::max);
+            for (index, (_, _, label)) in sources.iter().enumerate() {
+                let travel = package_motion::absorbed(
+                    places[index],
+                    centre,
+                    index,
+                    places.len(),
+                    max_distance,
+                    t,
+                );
+                let px = travel.x.round() as i32;
+                let py = travel.y.round() as i32;
+                let color = if travel.progress > 0.9 {
                     self.colors.line
                 } else {
                     self.colors.text
                 };
-                let stretch = (local.powf(3.0) * s(58) as f32) as i32;
-                if stretch > s(3) {
+                let stretch = (travel.trail * self.scale()).round() as i32;
+                if stretch > s(package_motion::MIN_TRAIL as i32) {
                     self.line(
                         self.colors.muted,
                         1,
@@ -3948,21 +3989,30 @@ impl App {
         } else {
             let t = ((elapsed - absorb_seconds) / 1.7).clamp(0.0, 1.0);
             self.abstract_vortex(cx, cy, elapsed, false);
-            let labels = [
-                (".exe", -190, -85),
-                (".deb", 180, -80),
-                (".AppImage", -210, 90),
-                (".dmg", 185, 95),
-            ];
-            for (index, (label, dx, dy)) in labels.iter().enumerate() {
-                if !self.package_targets[index] {
+            let labels = [".exe", ".deb", ".AppImage", ".dmg"];
+            let selected = self
+                .package_targets
+                .iter()
+                .take(labels.len())
+                .filter(|enabled| **enabled)
+                .count()
+                .max(1);
+            let slots = package_motion::emission_slots(selected, s(200) as f32, s(90) as f32);
+            let centre = (cx as f32, cy as f32);
+            let mut slot = 0usize;
+            for (index, label) in labels.iter().enumerate() {
+                if !self.package_targets.get(index).copied().unwrap_or(false) {
                     continue;
                 }
-                let spread = (t - 0.08 * index as f32).clamp(0.0, 1.0);
-                let eased = 1.0 - (1.0 - spread).powf(2.6);
-                let px = cx + (*dx as f32 * eased) as i32;
-                let py = cy + (*dy as f32 * eased) as i32;
-                self.package_icon(index, px, py, label);
+                let place = slots[slot.min(slots.len().saturating_sub(1))];
+                let emission = package_motion::emitted(centre, place, slot, selected, t);
+                self.package_icon(
+                    index,
+                    emission.x.round() as i32,
+                    emission.y.round() as i32,
+                    label,
+                );
+                slot += 1;
             }
             let state = if t < 0.85 {
                 self.tr("WHITE HOLE IS EMITTING PACKAGES", "白洞正在吐出安装包")
@@ -4192,17 +4242,13 @@ impl App {
     }
 
     fn build_absorb_seconds(&self) -> f32 {
-        let lines = self
-            .files
-            .iter()
-            .map(|file| file.lines.len())
-            .sum::<usize>() as f32;
+        let lines = self.files.iter().map(|file| file.lines.len()).sum();
         let targets = self
             .package_targets
             .iter()
             .filter(|enabled| **enabled)
-            .count() as f32;
-        (1.35 + lines * 0.006 + targets * 0.12).clamp(1.5, 5.5)
+            .count();
+        package_motion::absorb_seconds(lines, targets)
     }
 
     fn load_project_package_targets(&mut self) {
@@ -6848,6 +6894,21 @@ fn frame_export_path() -> Option<String> {
     None
 }
 
+/// `--render-scene <name>` picks the state a rendered frame shows, for example
+/// `packaging` or `packaging-emit`.
+fn frame_scene() -> Option<String> {
+    let mut arguments = std::env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        if argument == "--render-scene" {
+            return arguments.next();
+        }
+        if let Some(value) = argument.strip_prefix("--render-scene=") {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 /// Write the current pixmap frame to a PNG so CI and local runs can inspect it.
 unsafe fn export_frame(app: &App, path: &str) -> bool {
     const CAIRO_FORMAT_ARGB32: c_int = 0;
@@ -7120,6 +7181,11 @@ pub fn run() {
         app.runtime_cache = load_runtime_cache();
         let frame = Duration::from_micros(16_667);
         if let Some(path) = frame_export {
+            if let Some(scene) = frame_scene() {
+                if !app.prime_scene(&scene) {
+                    eprintln!("TC-IDE: unknown render scene {scene}, drawing the editor");
+                }
+            }
             app.update_background();
             app.draw();
             let written = export_frame(&app, &path);

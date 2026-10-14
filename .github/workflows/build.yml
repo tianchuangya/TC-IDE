@@ -40,13 +40,26 @@ jobs:
       - name: Render one native frame
         run: |
           xvfb-run -a cargo run -- --render-frame /tmp/tc-frame.png
+          # The packaging animation only appears while a build runs, so it is
+          # rendered through --render-scene instead of waiting for one.
+          xvfb-run -a cargo run -- --render-frame /tmp/tc-packaging.png --render-scene packaging
+          xvfb-run -a cargo run -- --render-frame /tmp/tc-emit.png --render-scene packaging-emit
           python3 - <<'PY'
           import os
           import sys
 
-          size = os.path.getsize("/tmp/tc-frame.png")
-          print("rendered frame bytes:", size)
-          sys.exit(0 if size > 20_000 else 1)
+          frames = ["/tmp/tc-frame.png", "/tmp/tc-packaging.png", "/tmp/tc-emit.png"]
+          sizes = {path: os.path.getsize(path) for path in frames}
+          for path, size in sizes.items():
+              print("rendered frame bytes:", path, size)
+          # Every frame has to carry real content, and the packaging scenes have
+          # to differ from the plain editor frame: identical bytes would mean
+          # --render-scene silently stopped priming the animation.
+          editor = sizes["/tmp/tc-frame.png"]
+          ok = all(size > 20_000 for size in sizes.values()) and all(
+              sizes[path] != editor for path in frames[1:]
+          )
+          sys.exit(0 if ok else 1)
           PY
 
   windows-typecheck:
