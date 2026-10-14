@@ -939,6 +939,7 @@ impl WindowsAppState {
                 self.create_error.clear();
                 if kind == CreateKind::Project {
                     self.open_project(target);
+                    self.start_project_environment_setup();
                 } else {
                     self.refresh_project();
                     self.status = format!("Created {}", target.display());
@@ -960,7 +961,10 @@ impl WindowsAppState {
                 fs::write(target.join("Cargo.toml"), "[package]\nname = \"tc-project\"\nversion = \"0.1.0\"\nedition = \"2024\"\n")?;
                 fs::write(target.join("src/main.rs"), "fn main() {\n    println!(\"Hello from TC-IDE\");\n}\n")?;
             }
-            "Python" => fs::write(target.join("main.py"), "print(\"Hello from TC-IDE\")\n")?,
+            "Python" => {
+                fs::write(target.join("main.py"), "print(\"Hello from TC-IDE\")\n")?;
+                fs::write(target.join(".gitignore"), ".venv/\n__pycache__/\n*.pyc\n")?;
+            }
             "C" => fs::write(target.join("main.c"), "#include <stdio.h>\n\nint main(void) {\n    puts(\"Hello from TC-IDE\");\n    return 0;\n}\n")?,
             "C++" => fs::write(target.join("main.cpp"), "#include <iostream>\n\nint main() {\n    std::cout << \"Hello from TC-IDE\\n\";\n}\n")?,
             "Java" => fs::write(target.join("Main.java"), "public class Main {\n    public static void main(String[] args) {\n        System.out.println(\"Hello from TC-IDE\");\n    }\n}\n")?,
@@ -979,6 +983,67 @@ impl WindowsAppState {
                     .min(self.project_environments().len() - 1)]
             ),
         )
+    }
+
+    fn start_project_environment_setup(&mut self) {
+        let language = self.project_language_name();
+        let environment = self.project_environments()[self
+            .project_environment
+            .min(self.project_environments().len() - 1)];
+        let version_index = self
+            .language_versions
+            .get(self.project_language)
+            .copied()
+            .unwrap_or(0);
+        let python_version = ["3.13", "3.12", "3.11"][version_index.min(2)];
+        let command = match (language, environment) {
+            (_, "None") => return,
+            ("Python", "venv") => format!(
+                "$py=(Get-Command py -ErrorAction SilentlyContinue); if($py){{py -{python_version} -m venv .venv}}else{{python -m venv .venv}}"
+            ),
+            ("Python", "uv") => format!("uv venv --python {python_version} .venv"),
+            ("Python", "conda") => {
+                format!("conda create -y -p .venv python={python_version}")
+            }
+            ("Python", "poetry") => format!("poetry env use {python_version}; poetry install"),
+            ("Rust", "cargo nightly") => "rustup override set nightly".into(),
+            ("Rust", "cargo stable") => "rustup override set stable".into(),
+            ("Go", "Go modules") => "if(!(Test-Path go.mod)){go mod init tc-project}".into(),
+            ("Web", manager) => format!("{manager} install"),
+            _ => {
+                self.status = format!(
+                    "Project created; {} uses the system toolchain ({environment})",
+                    language
+                );
+                return;
+            }
+        };
+        let cache_root = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.project_root.clone())
+            .join("TC-IDE")
+            .join("runtime-cache")
+            .join(language.to_ascii_lowercase())
+            .join(if language == "Python" {
+                python_version
+            } else {
+                environment
+            });
+        let _ = fs::create_dir_all(&cache_root);
+        let _ = fs::write(
+            cache_root.join("runtime.conf"),
+            format!("language={language}\nversion={python_version}\nenvironment={environment}\n"),
+        );
+        self.terminal_open = true;
+        self.ensure_terminal();
+        if let Some(tab) = self.terminals.first() {
+            let wrapped = format!(
+                "$ErrorActionPreference='Stop'; Write-Host 'TC-IDE: preparing {language} {environment}'; try{{{command}; Write-Host 'TC-IDE: environment ready'}}catch{{Write-Host ('TC-IDE: environment setup failed: '+$_.Exception.Message)}}\r"
+            );
+            let _ = tab.session.write(&wrapped);
+            self.active_terminal = 0;
+            self.status = format!("Preparing {language} {environment} in the Build terminal");
+        }
     }
 
     fn package_settings_path(root: &std::path::Path) -> PathBuf {
