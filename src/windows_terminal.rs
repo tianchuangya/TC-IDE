@@ -16,138 +16,10 @@ use windows::Win32::System::Threading::{
     PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
 };
 
+use crate::terminal_core::{TerminalParser, TerminalView};
+
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-#[derive(Default)]
-pub struct TerminalView {
-    pub lines: Vec<String>,
-    pub current: String,
-}
-
-enum EscapeState {
-    Text,
-    Escape,
-    Csi(String),
-    Osc,
-    OscEscape,
-}
-
-struct TerminalParser {
-    lines: Vec<String>,
-    current: Vec<char>,
-    cursor: usize,
-    state: EscapeState,
-}
-
-impl TerminalParser {
-    fn new() -> Self {
-        Self {
-            lines: vec![
-                "TianChuangYa  /  TC-IDE native ConPTY".into(),
-                "GitHub: https://github.com/tianchuangya/TC-IDE".into(),
-            ],
-            current: Vec::new(),
-            cursor: 0,
-            state: EscapeState::Text,
-        }
-    }
-
-    fn feed(&mut self, value: &str) {
-        for ch in value.chars() {
-            let state = std::mem::replace(&mut self.state, EscapeState::Text);
-            self.state = match state {
-                EscapeState::Text => self.feed_text(ch),
-                EscapeState::Escape if ch == '[' => EscapeState::Csi(String::new()),
-                EscapeState::Escape if ch == ']' => EscapeState::Osc,
-                EscapeState::Escape => EscapeState::Text,
-                EscapeState::Csi(mut sequence) => {
-                    if ('@'..='~').contains(&ch) {
-                        self.apply_csi(&sequence, ch);
-                        EscapeState::Text
-                    } else {
-                        sequence.push(ch);
-                        EscapeState::Csi(sequence)
-                    }
-                }
-                EscapeState::Osc if ch == '\u{7}' => EscapeState::Text,
-                EscapeState::Osc if ch == '\u{1b}' => EscapeState::OscEscape,
-                EscapeState::Osc => EscapeState::Osc,
-                EscapeState::OscEscape if ch == '\\' => EscapeState::Text,
-                EscapeState::OscEscape => EscapeState::Osc,
-            };
-        }
-    }
-
-    fn feed_text(&mut self, ch: char) -> EscapeState {
-        match ch {
-            '\u{1b}' => return EscapeState::Escape,
-            '\r' => self.cursor = 0,
-            '\n' => {
-                self.lines.push(self.current.iter().collect());
-                self.current.clear();
-                self.cursor = 0;
-                if self.lines.len() > 800 {
-                    let remove = self.lines.len() - 800;
-                    self.lines.drain(..remove);
-                }
-            }
-            '\u{8}' => self.cursor = self.cursor.saturating_sub(1),
-            value if !value.is_control() => {
-                while self.current.len() < self.cursor {
-                    self.current.push(' ');
-                }
-                if self.cursor < self.current.len() {
-                    self.current[self.cursor] = value;
-                } else {
-                    self.current.push(value);
-                }
-                self.cursor += 1;
-            }
-            _ => {}
-        }
-        EscapeState::Text
-    }
-
-    fn apply_csi(&mut self, sequence: &str, command: char) {
-        let params = sequence
-            .trim_start_matches('?')
-            .split(';')
-            .map(|value| value.parse::<usize>().unwrap_or(0))
-            .collect::<Vec<_>>();
-        let first = params.first().copied().unwrap_or(0);
-        match command {
-            'C' => self.cursor = self.cursor.saturating_add(first.max(1)),
-            'D' => self.cursor = self.cursor.saturating_sub(first.max(1)),
-            'G' => self.cursor = first.max(1) - 1,
-            'K' => match first {
-                1 => {
-                    for value in self.current.iter_mut().take(self.cursor.saturating_add(1)) {
-                        *value = ' ';
-                    }
-                }
-                2 => {
-                    self.current.clear();
-                    self.cursor = 0;
-                }
-                _ => self.current.truncate(self.cursor),
-            },
-            'J' if first == 2 || first == 3 => {
-                self.lines.clear();
-                self.current.clear();
-                self.cursor = 0;
-            }
-            _ => {}
-        }
-    }
-
-    fn publish(&self, target: &Arc<Mutex<TerminalView>>) {
-        if let Ok(mut view) = target.lock() {
-            view.lines.clone_from(&self.lines);
-            view.current = self.current.iter().collect();
-        }
-    }
 }
 
 pub struct ConPtySession {
@@ -292,25 +164,5 @@ impl Drop for ConPtySession {
         unsafe { ClosePseudoConsole(self.pseudo_console) };
         let _ = unsafe { CloseHandle(self.input) };
         let _ = unsafe { CloseHandle(self.process) };
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::TerminalParser;
-
-    #[test]
-    fn parses_virtual_terminal_sequences_and_live_prompt() {
-        let mut parser = TerminalParser::new();
-        parser.feed("\u{1b}[31mred\u{1b}[0m\r\nPS C:\\\\repo> ");
-        assert_eq!(parser.lines.last().map(String::as_str), Some("red"));
-        assert_eq!(parser.current.iter().collect::<String>(), "PS C:\\\\repo> ");
-    }
-
-    #[test]
-    fn carriage_return_overwrites_the_current_line() {
-        let mut parser = TerminalParser::new();
-        parser.feed("progress 10%\rprogress 90%\u{1b}[K");
-        assert_eq!(parser.current.iter().collect::<String>(), "progress 90%");
     }
 }

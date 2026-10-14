@@ -8,6 +8,8 @@
 //! a remote Windows build.
 #![allow(dead_code)] // The Linux and macOS backends adopt these helpers next.
 
+use std::sync::{Arc, Mutex};
+
 /// Smallest column count handed to a pseudo console.
 pub const MIN_COLUMNS: i16 = 20;
 /// Smallest row count handed to a pseudo console.
@@ -335,6 +337,141 @@ pub fn selected_text(lines: &[String], selection: &TerminalSelection) -> Option<
     }
 }
 
+/// Output lines a session keeps before dropping the oldest ones.
+pub const MAX_SCROLLBACK_LINES: usize = 800;
+
+/// Incremental terminal scrollback shared by every backend.
+#[derive(Default)]
+pub struct TerminalView {
+    pub lines: Vec<String>,
+    pub current: String,
+}
+
+enum EscapeState {
+    Text,
+    Escape,
+    Csi(String),
+    Osc,
+    OscEscape,
+}
+
+/// Incremental VT parser: text, CSI cursor/erase and OSC skipping.
+pub struct TerminalParser {
+    lines: Vec<String>,
+    current: Vec<char>,
+    cursor: usize,
+    state: EscapeState,
+}
+
+impl TerminalParser {
+    pub fn new() -> Self {
+        Self {
+            lines: vec![
+                "TianChuangYa  /  TC-IDE native ConPTY".into(),
+                "GitHub: https://github.com/tianchuangya/TC-IDE".into(),
+            ],
+            current: Vec::new(),
+            cursor: 0,
+            state: EscapeState::Text,
+        }
+    }
+
+    pub fn feed(&mut self, value: &str) {
+        for ch in value.chars() {
+            let state = std::mem::replace(&mut self.state, EscapeState::Text);
+            self.state = match state {
+                EscapeState::Text => self.feed_text(ch),
+                EscapeState::Escape if ch == '[' => EscapeState::Csi(String::new()),
+                EscapeState::Escape if ch == ']' => EscapeState::Osc,
+                EscapeState::Escape => EscapeState::Text,
+                EscapeState::Csi(mut sequence) => {
+                    if ('@'..='~').contains(&ch) {
+                        self.apply_csi(&sequence, ch);
+                        EscapeState::Text
+                    } else {
+                        sequence.push(ch);
+                        EscapeState::Csi(sequence)
+                    }
+                }
+                EscapeState::Osc if ch == '\u{7}' => EscapeState::Text,
+                EscapeState::Osc if ch == '\u{1b}' => EscapeState::OscEscape,
+                EscapeState::Osc => EscapeState::Osc,
+                EscapeState::OscEscape if ch == '\\' => EscapeState::Text,
+                EscapeState::OscEscape => EscapeState::Osc,
+            };
+        }
+    }
+
+    fn feed_text(&mut self, ch: char) -> EscapeState {
+        match ch {
+            '\u{1b}' => return EscapeState::Escape,
+            '\r' => self.cursor = 0,
+            '\n' => {
+                self.lines.push(self.current.iter().collect());
+                self.current.clear();
+                self.cursor = 0;
+                if self.lines.len() > MAX_SCROLLBACK_LINES {
+                    let remove = self.lines.len() - MAX_SCROLLBACK_LINES;
+                    self.lines.drain(..remove);
+                }
+            }
+            '\u{8}' => self.cursor = self.cursor.saturating_sub(1),
+            value if !value.is_control() => {
+                while self.current.len() < self.cursor {
+                    self.current.push(' ');
+                }
+                if self.cursor < self.current.len() {
+                    self.current[self.cursor] = value;
+                } else {
+                    self.current.push(value);
+                }
+                self.cursor += 1;
+            }
+            _ => {}
+        }
+        EscapeState::Text
+    }
+
+    fn apply_csi(&mut self, sequence: &str, command: char) {
+        let params = sequence
+            .trim_start_matches('?')
+            .split(';')
+            .map(|value| value.parse::<usize>().unwrap_or(0))
+            .collect::<Vec<_>>();
+        let first = params.first().copied().unwrap_or(0);
+        match command {
+            'C' => self.cursor = self.cursor.saturating_add(first.max(1)),
+            'D' => self.cursor = self.cursor.saturating_sub(first.max(1)),
+            'G' => self.cursor = first.max(1) - 1,
+            'K' => match first {
+                1 => {
+                    for value in self.current.iter_mut().take(self.cursor.saturating_add(1)) {
+                        *value = ' ';
+                    }
+                }
+                2 => {
+                    self.current.clear();
+                    self.cursor = 0;
+                }
+                _ => self.current.truncate(self.cursor),
+            },
+            'J' if first == 2 || first == 3 => {
+                self.lines.clear();
+                self.current.clear();
+                self.cursor = 0;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn publish(&self, target: &Arc<Mutex<TerminalView>>) {
+        if let Ok(mut view) = target.lock() {
+            view.lines.clone_from(&self.lines);
+            view.current = self.current.iter().collect();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,6 +692,100 @@ mod tests {
         assert_eq!(code_cell_width(0), 8.9);
         assert_eq!(code_cell_width(-5), code_cell_width(-2));
         assert_eq!(code_cell_width(20), code_cell_width(8));
+    }
+
+    #[test]
+    fn parses_virtual_terminal_sequences_and_live_prompt() {
+        let mut parser = TerminalParser::new();
+        parser.feed("\u{1b}[31mred\u{1b}[0m\r\nPS C:\\repo> ");
+        assert_eq!(parser.lines.last().map(String::as_str), Some("red"));
+        assert_eq!(parser.current.iter().collect::<String>(), "PS C:\\repo> ");
+    }
+
+    #[test]
+    fn carriage_return_overwrites_the_current_line() {
+        let mut parser = TerminalParser::new();
+        parser.feed("progress 10%\rprogress 90%\u{1b}[K");
+        assert_eq!(parser.current.iter().collect::<String>(), "progress 90%");
+    }
+
+    #[test]
+    fn osc_titles_never_reach_the_buffer() {
+        let mut parser = TerminalParser::new();
+        parser.feed("\u{1b}]0;window title\u{7}ready");
+        parser.feed("\u{1b}]0;second\u{1b}\\done");
+        assert_eq!(parser.current.iter().collect::<String>(), "readydone");
+        assert!(!parser
+            .lines
+            .iter()
+            .any(|line| line.contains("window title")));
+    }
+
+    #[test]
+    fn csi_cursor_and_erase_sequences_edit_the_line() {
+        let mut parser = TerminalParser::new();
+        parser.feed("abcdef\u{1b}[3DXY");
+        assert_eq!(parser.current.iter().collect::<String>(), "abcXYf");
+        parser.feed("\u{1b}[K");
+        assert_eq!(parser.current.iter().collect::<String>(), "abcXY");
+        // CSI G moves to a column, so the gap is padded like a real terminal.
+        parser.feed("\u{1b}[8Gz");
+        assert_eq!(parser.current.iter().collect::<String>(), "abcXY  z");
+        parser.feed("\u{1b}[2K");
+        assert!(parser.current.is_empty());
+    }
+
+    #[test]
+    fn backspace_rewrites_in_place_and_clear_screen_empties_the_buffer() {
+        let mut parser = TerminalParser::new();
+        let banner = parser.lines.len();
+        parser.feed("one\ntwo\nthree");
+        assert_eq!(parser.lines.len(), banner + 2);
+        assert_eq!(parser.current.iter().collect::<String>(), "three");
+        parser.feed("\u{8}\u{8}XY");
+        assert_eq!(parser.current.iter().collect::<String>(), "thrXY");
+        parser.feed("\u{1b}[2J");
+        assert!(parser.lines.is_empty());
+        assert!(parser.current.is_empty());
+    }
+
+    #[test]
+    fn scrollback_is_capped_and_published_to_views() {
+        let mut parser = TerminalParser::new();
+        let mut text = String::new();
+        for index in 0..(MAX_SCROLLBACK_LINES + 40) {
+            text.push_str(&format!("line {index}\n"));
+        }
+        parser.feed(&text);
+        assert_eq!(parser.lines.len(), MAX_SCROLLBACK_LINES);
+        assert!(parser.lines[0].starts_with("line 40"));
+
+        let view = Arc::new(Mutex::new(TerminalView::default()));
+        parser.feed("prompt> ");
+        parser.publish(&view);
+        let view = view.lock().expect("view lock");
+        assert_eq!(view.lines.len(), MAX_SCROLLBACK_LINES);
+        assert_eq!(view.current, "prompt> ");
+    }
+
+    #[test]
+    fn viewport_reads_the_published_scrollback() {
+        let mut parser = TerminalParser::new();
+        parser.feed("alpha\nbeta\ngamma\n");
+        let view = Arc::new(Mutex::new(TerminalView::default()));
+        parser.publish(&view);
+        let view = view.lock().expect("view lock");
+        let viewport = TerminalViewport {
+            total_lines: view.lines.len(),
+            visible_rows: 2,
+            scroll: 1,
+        };
+        assert_eq!(
+            visible_lines(&view.lines, &viewport)
+                .last()
+                .map(String::as_str),
+            Some("beta")
+        );
     }
 
     #[test]
