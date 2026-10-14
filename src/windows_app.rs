@@ -1039,7 +1039,8 @@ impl WindowsAppState {
         let value = self.selected_text()?;
         self.record_undo();
         self.delete_selection_raw();
-        self.last_edit = Some(Instant::now());
+        self.finish_edit();
+        self.notify_language_server();
         Some(value)
     }
 
