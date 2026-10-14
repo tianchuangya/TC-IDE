@@ -2012,6 +2012,61 @@ unsafe extern "system" fn window_proc(
             let mut area = unsafe { std::mem::zeroed::<Rect>() };
             unsafe { GetClientRect(window, &mut area) };
             let scale = platform::dpi_for_window(window) as f32 / 96.0;
+            let create_kind = APP.with(|cell| cell.borrow().create_kind);
+            if let Some(kind) = create_kind {
+                let dialog_w = (520.0 * scale).min(area.right as f32 - 40.0 * scale);
+                let dialog_h = if kind == CreateKind::Project {
+                    310.0
+                } else {
+                    230.0
+                } * scale;
+                let left = (area.right as f32 - dialog_w) * 0.5;
+                let top = (area.bottom as f32 - dialog_h) * 0.42;
+                if x as f32 >= left
+                    && x as f32 <= left + dialog_w
+                    && y as f32 >= top
+                    && y as f32 <= top + dialog_h
+                {
+                    let button_top = top + dialog_h - 56.0 * scale;
+                    if y as f32 >= button_top {
+                        APP.with(|cell| {
+                            let mut app = cell.borrow_mut();
+                            if (x as f32) < left + dialog_w * 0.5 {
+                                app.create_kind = None;
+                                app.create_error.clear();
+                            } else {
+                                app.create_requested_item();
+                            }
+                        });
+                    } else if kind == CreateKind::Project
+                        && y as f32 >= top + 162.0 * scale
+                        && (y as f32) < top + 202.0 * scale
+                    {
+                        APP.with(|cell| {
+                            let mut app = cell.borrow_mut();
+                            if (x as f32) < left + dialog_w * 0.5 {
+                                app.project_language = (app.project_language + 1)
+                                    % WindowsAppState::PROJECT_LANGUAGES.len();
+                                app.project_environment = 0;
+                            } else {
+                                app.project_environment = (app.project_environment + 1)
+                                    % app.project_environments().len();
+                            }
+                            app.save_preferences();
+                        });
+                    } else if kind == CreateKind::Project
+                        && y as f32 >= top + 202.0 * scale
+                        && (y as f32) < top + 244.0 * scale
+                    {
+                        if let Some(location) = platform::choose_folder(window) {
+                            APP.with(|cell| cell.borrow_mut().create_location = location);
+                        }
+                    }
+                    invalidate(window);
+                    return 0;
+                }
+                return 0;
+            }
             if y as f32 <= 48.0 * scale && x as f32 >= area.right as f32 - 155.0 * scale {
                 APP.with(|cell| {
                     let mut app = cell.borrow_mut();

@@ -1715,7 +1715,7 @@ impl DirectEditorRenderer {
         }
         if let Some(kind) = scene.create_kind {
             let dialog_w = (520.0 * scale).min(width - 40.0 * scale);
-            let dialog_h = 230.0 * scale;
+            let dialog_h = if kind == "New project" { 310.0 } else { 230.0 } * scale;
             let left = (width - dialog_w) * 0.5;
             let top = (height - dialog_h) * 0.42;
             unsafe {
@@ -1787,9 +1787,9 @@ impl DirectEditorRenderer {
                     },
                     if scene.create_error.is_empty() {
                         if scene.ui_chinese {
-                            "Enter 确定  ·  Esc 取消"
+                            "输入名称后点击确定，或使用 Enter / Esc"
                         } else {
-                            "Enter to create  ·  Esc to cancel"
+                            "Enter a name, then click Create or Cancel"
                         }
                     } else {
                         scene.create_error
@@ -1834,6 +1834,55 @@ impl DirectEditorRenderer {
                         },
                     )
                 };
+            }
+            let button_top = top + dialog_h - 56.0 * scale;
+            unsafe {
+                Self::rounded(
+                    &target_base,
+                    &raised,
+                    D2D_RECT_F {
+                        left: left + 24.0 * scale,
+                        top: button_top,
+                        right: left + dialog_w * 0.5 - 8.0 * scale,
+                        bottom: button_top + 36.0 * scale,
+                    },
+                    8.0 * scale,
+                );
+                Self::rounded(
+                    &target_base,
+                    &selection,
+                    D2D_RECT_F {
+                        left: left + dialog_w * 0.5 + 8.0 * scale,
+                        top: button_top,
+                        right: left + dialog_w - 24.0 * scale,
+                        bottom: button_top + 36.0 * scale,
+                    },
+                    8.0 * scale,
+                );
+                Self::text(
+                    &target_base,
+                    &self.small_format,
+                    &text,
+                    if scene.ui_chinese { "取消" } else { "Cancel" },
+                    D2D_RECT_F {
+                        left: left + 86.0 * scale,
+                        top: button_top + 9.0 * scale,
+                        right: left + dialog_w * 0.5,
+                        bottom: button_top + 34.0 * scale,
+                    },
+                );
+                Self::text(
+                    &target_base,
+                    &self.small_format,
+                    &bright,
+                    if scene.ui_chinese { "确定" } else { "Create" },
+                    D2D_RECT_F {
+                        left: left + dialog_w * 0.5 + 82.0 * scale,
+                        top: button_top + 9.0 * scale,
+                        right: left + dialog_w - 28.0 * scale,
+                        bottom: button_top + 34.0 * scale,
+                    },
+                );
             }
         }
         if let Err(error) = unsafe { target_base.EndDraw(None, None) } {
