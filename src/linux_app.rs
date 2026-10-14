@@ -583,6 +583,9 @@ struct App {
     runtime_cache: extension_core::RuntimeCache,
     /// Cached extensions the project catalog has a newer version of.
     extension_upgrades: usize,
+    /// Crop box drag in the background preview: the handle grabbed and where the
+    /// pointer was when it was grabbed.
+    background_drag: Option<(background_core::Handle, i32, i32)>,
     graph_relation: graph_core::GraphRelation,
     graph_scope: usize,
     graph_scroll: usize,
@@ -918,6 +921,184 @@ impl App {
                 self.status_message = format!("Could not open folder picker: {error}");
             }
         }
+    }
+
+    /// Origin of the settings overlay.
+    fn settings_origin(&self) -> (i32, i32) {
+        (
+            self.width - self.s(410),
+            self.s(43) + self.overlay_offset(self.settings_motion),
+        )
+    }
+
+    /// Rectangle of the background preview inside the settings panel.
+    fn background_preview_rect(&self) -> (i32, i32, i32, i32) {
+        let (x, y) = self.settings_origin();
+        (x + self.s(16), y + self.s(664), self.s(356), self.s(150))
+    }
+
+    /// Size of the region the background is drawn into behind the editor.
+    fn background_view_size(&self) -> (f64, f64) {
+        let left = (self.width as f32 * 0.17) as i32;
+        let right = (self.width as f32 * 0.61) as i32;
+        (
+            (right - left - 1).max(1) as f64,
+            (self.height - self.s(154)).max(1) as f64,
+        )
+    }
+
+    /// Size of the loaded background image.
+    fn background_image_size(&self) -> Option<(f64, f64)> {
+        if self.background_surface.is_null() {
+            return None;
+        }
+        let width = unsafe { cairo_image_surface_get_width(self.background_surface) }.max(1);
+        let height = unsafe { cairo_image_surface_get_height(self.background_surface) }.max(1);
+        Some((width as f64, height as f64))
+    }
+
+    /// The visible part of the image, and the placement that shows the whole
+    /// picture inside the preview.
+    fn background_crop_box(
+        &self,
+        image: (f64, f64),
+    ) -> Option<(background_core::Rect, background_core::Placement)> {
+        self.background_image_size()?;
+        let (_, _, width, height) = self.background_preview_rect();
+        let preview =
+            background_core::placement(image, (width as f64, height as f64), 1.0, (0.0, 0.0));
+        let view = self.background_view_size();
+        let placed = background_core::placement(
+            image,
+            view,
+            self.background_zoom,
+            (self.background_offset_x, self.background_offset_y),
+        );
+        let crop = placed.crop(view, image);
+        let _ = image;
+        Some((crop, preview))
+    }
+
+    /// The crop box as it appears in the preview, in screen coordinates.
+    fn background_crop_on_screen(&self, image: (f64, f64)) -> Option<background_core::Rect> {
+        let (crop, preview) = self.background_crop_box(image)?;
+        let (px, py, _, _) = self.background_preview_rect();
+        let drawn = preview.project(&crop);
+        Some(background_core::Rect::new(
+            px as f64 + drawn.x,
+            py as f64 + drawn.y,
+            drawn.width,
+            drawn.height,
+        ))
+    }
+
+    /// Which part of the crop box a pointer grabbed.
+    fn background_handle_at(
+        &self,
+        x: i32,
+        y: i32,
+        image: (f64, f64),
+    ) -> Option<background_core::Handle> {
+        let box_on_screen = self.background_crop_on_screen(image)?;
+        background_core::handle_at(&box_on_screen, (x as f64, y as f64), self.s(12) as f64)
+    }
+
+    /// Move or resize the crop box while it is being dragged.
+    fn update_background_drag(&mut self, x: i32, y: i32, state: c_uint) {
+        let Some((handle, last_x, last_y)) = self.background_drag else {
+            return;
+        };
+        if state & BUTTON1_MASK == 0 {
+            self.background_drag = None;
+            return;
+        }
+        let Some(image) = self.background_image_size() else {
+            self.background_drag = None;
+            return;
+        };
+        let (_, _, width, height) = self.background_preview_rect();
+        let preview =
+            background_core::placement(image, (width as f64, height as f64), 1.0, (0.0, 0.0));
+        let Some((crop, _)) = self.background_crop_box(image) else {
+            return;
+        };
+        // The pointer moves in preview pixels, the crop lives in image pixels.
+        let delta = (
+            (x - last_x) as f64 / preview.scale,
+            (y - last_y) as f64 / preview.scale,
+        );
+        let minimum = (image.0.min(image.1) * 0.05).max(8.0);
+        let edit = background_core::drag_crop(
+            &crop,
+            handle,
+            delta,
+            image,
+            self.background_view_size(),
+            minimum,
+        );
+        self.background_zoom = edit.zoom;
+        self.background_offset_x = edit.offset.0;
+        self.background_offset_y = edit.offset.1;
+        self.background_drag = Some((handle, x, y));
+        self.status_message = format!(
+            "Crop {:.0}x{:.0} at {:.0},{:.0} · zoom {:.1}x",
+            edit.crop.width, edit.crop.height, edit.crop.x, edit.crop.y, edit.zoom
+        );
+    }
+
+    /// Paint the background preview with the crop box and its handles.
+    unsafe fn draw_background_preview(&self, image: (f64, f64)) {
+        let s = |v| self.s(v);
+        let (px, py, width, height) = self.background_preview_rect();
+        self.rect(self.colors.bg, px, py, width, height);
+        let preview =
+            background_core::placement(image, (width as f64, height as f64), 1.0, (0.0, 0.0));
+        unsafe {
+            cairo_save(self.cairo);
+            cairo_rectangle(
+                self.cairo,
+                px as f64,
+                py as f64,
+                width as f64,
+                height as f64,
+            );
+            cairo_clip(self.cairo);
+            cairo_translate(
+                self.cairo,
+                px as f64 + preview.origin.0,
+                py as f64 + preview.origin.1,
+            );
+            cairo_scale(self.cairo, preview.scale, preview.scale);
+            cairo_set_source_surface(self.cairo, self.background_surface, 0.0, 0.0);
+            cairo_paint_with_alpha(self.cairo, 0.85);
+            cairo_restore(self.cairo);
+        }
+        if let Some(crop) = self.background_crop_on_screen(image) {
+            let (left, top) = (crop.x.round() as i32, crop.y.round() as i32);
+            let (right, bottom) = (crop.right().round() as i32, crop.bottom().round() as i32);
+            for (from, to) in [
+                ((left, top), (right, top)),
+                ((right, top), (right, bottom)),
+                ((right, bottom), (left, bottom)),
+                ((left, bottom), (left, top)),
+            ] {
+                self.line(self.colors.accent, 2, from, to);
+            }
+            // Four handles, so a corner reads as something to grab.
+            for (hx, hy) in [(left, top), (right, top), (right, bottom), (left, bottom)] {
+                self.rect(self.colors.accent, hx - s(3), hy - s(3), s(7), s(7));
+            }
+            self.text(
+                self.colors.muted,
+                px,
+                py - s(10),
+                self.tr(
+                    "Drag the frame to crop, corners to zoom",
+                    "拖动取景框裁剪，拖角缩放",
+                ),
+            );
+        }
+        self.outline(self.colors.line, px, py, width, height);
     }
 
     unsafe fn draw_background_region(&self, x: i32, y: i32, width: i32, height: i32) {
@@ -2192,7 +2373,7 @@ impl App {
         let x = self.width - s(410);
         let y = s(43) + self.overlay_offset(self.settings_motion);
         let w = s(390);
-        let h = s(690);
+        let h = s(830);
         self.floating_panel(x, y, w, h);
         self.text(
             self.colors.bright,
@@ -2421,7 +2602,19 @@ impl App {
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.tr("No image selected", "未选择图片").to_string());
-        self.text(self.colors.muted, x + s(16), y + s(650), &background_name);
+        self.text(self.colors.muted, x + s(16), y + s(648), &background_name);
+        if let Some(image) = self.background_image_size() {
+            unsafe { self.draw_background_preview(image) };
+        } else {
+            let (px, py, width, height) = self.background_preview_rect();
+            self.outline(self.colors.line, px, py, width, height);
+            self.text(
+                self.colors.muted,
+                px + s(12),
+                py + s(24),
+                self.tr("Choose a PNG to crop it here", "选择 PNG 后可在这里取景"),
+            );
+        }
     }
 
     unsafe fn draw_new_menu(&self) {
@@ -3970,6 +4163,22 @@ impl App {
                 self.graph_relation = graph_core::GraphRelation::Callees;
                 true
             }
+            "background-crop" => {
+                // The preview with the crop box, as if the settings panel were
+                // open on a picture.
+                self.settings_motion = UiMotion::new(1.0);
+                self.background_surface = unsafe {
+                    bundled_asset_path("assets/tc-ide-icon.png")
+                        .and_then(|path| CString::new(path.to_string_lossy().as_bytes()).ok())
+                        .map(|path| cairo_image_surface_create_from_png(path.as_ptr()))
+                        .unwrap_or(ptr::null_mut())
+                };
+                self.background_opacity = 0.55;
+                self.background_zoom = 1.6;
+                self.background_offset_x = 0.35;
+                self.background_offset_y = -0.25;
+                true
+            }
             "edit" => {
                 // A paste highlight halfway through its fade, so the edit
                 // animation can be inspected without typing.
@@ -4778,6 +4987,14 @@ impl App {
             }
             if button != 3 {
                 self.workspace_context_menu = None;
+            }
+        }
+        if self.settings_open {
+            if let Some(image) = self.background_image_size() {
+                if let Some(handle) = self.background_handle_at(x, y, image) {
+                    self.background_drag = Some((handle, x, y));
+                    return;
+                }
             }
         }
         if let Some(kind) = self.create_kind {
@@ -7261,6 +7478,7 @@ pub fn run() {
             session: session_core::Session::default(),
             runtime_cache: extension_core::RuntimeCache::default(),
             extension_upgrades: 0,
+            background_drag: None,
             graph_relation: graph_core::GraphRelation::Follow,
             graph_scope: 0,
             graph_scroll: 0,
@@ -7365,6 +7583,7 @@ pub fn run() {
                         app.mouse_x = motion.x;
                         app.mouse_y = motion.y;
                         app.update_drag_selection(motion.x, motion.y, motion.state);
+                        app.update_background_drag(motion.x, motion.y, motion.state);
                         app.update_hover();
                     }
                     CONFIGURE_NOTIFY => {
