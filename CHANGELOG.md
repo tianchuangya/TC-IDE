@@ -88,6 +88,12 @@
 
 ### 工程与 CI
 
+- 打包命令与打包目标下沉为共享纯函数：`workspace_core::PackageRequest` / `package_command`
+  负责 Rust、Go、C、C++、Python、Java 的构建步骤以及 ZIP、`MakeAppx`、`signtool` 签名与结束/失败标记，
+  `parse_package_targets` / `serialize_package_targets` 统一了两个后端写入 `.tc-ide-package-targets`
+  的格式，`msix_identity` / `msix_display_name` / `msix_manifest` / `MSIX_ASSET_FILES`
+  负责 MSIX 清单与图标槽位，清单版本随 `CARGO_PKG_VERSION` 变化（此前写死 0.2.0.0），
+  设置与会话文件名也改为共享常量。两个后端都改为调用共享实现。
 - Windows 后端按区域拆分为模块：`windows_app.rs` 从 7131 行的单文件降为 1359 行的模块根
   （Win32 声明、常量、应用状态与生命周期），其余拆到 `src/windows_app/` 下的 14 个模块——
   窗口过程与命令分发（`events`）、键盘（`keys`）、鼠标（`pointer`）、编辑器（`editor`）、

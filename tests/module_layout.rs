@@ -20,9 +20,15 @@ const WINDOWS_MODULES: [(&str, &str); 14] = [
     ("events", "the window procedure and command dispatch"),
     ("extensions", "extension catalog, installation and probes"),
     ("keys", "keyboard handling"),
-    ("language", "LSP session, diagnostics and the problems panel"),
+    (
+        "language",
+        "LSP session, diagnostics and the problems panel",
+    ),
     ("motion", "spring stepping shared by both backends"),
-    ("packaging", "package targets, commands, progress and reports"),
+    (
+        "packaging",
+        "package targets, commands, progress and reports",
+    ),
     ("panel", "the bottom terminal panel"),
     ("pointer", "mouse handling per region"),
     ("scene", "scene assembly and graph geometry"),

@@ -4185,13 +4185,10 @@ impl App {
         let Some(root) = &self.project_path else {
             return;
         };
-        let value = self
-            .package_targets
-            .iter()
-            .map(|enabled| if *enabled { "1" } else { "0" })
-            .collect::<Vec<_>>()
-            .join(",");
-        let _ = fs::write(root.join(".tc-ide-package-targets"), value);
+        let _ = fs::write(
+            root.join(workspace_core::PACKAGE_TARGETS_FILE),
+            workspace_core::serialize_package_targets(&self.package_targets),
+        );
     }
 
     fn build_absorb_seconds(&self) -> f32 {
@@ -4213,12 +4210,11 @@ impl App {
         let Some(root) = &self.project_path else {
             return;
         };
-        let Ok(value) = fs::read_to_string(root.join(".tc-ide-package-targets")) else {
+        let Ok(value) = fs::read_to_string(root.join(workspace_core::PACKAGE_TARGETS_FILE)) else {
             return;
         };
-        for (index, item) in value.trim().split(',').take(4).enumerate() {
-            self.package_targets[index] = item == "1";
-        }
+        self.package_targets
+            .copy_from_slice(&workspace_core::parse_package_targets(&value, 4));
     }
 
     fn run_terminal_command(&mut self) {
@@ -6102,7 +6098,7 @@ fn background_settings_path() -> PathBuf {
 }
 
 fn session_settings_path() -> PathBuf {
-    ui_settings_path().with_file_name("session.conf")
+    ui_settings_path().with_file_name(workspace_core::SESSION_FILE)
 }
 
 /// Runtime cache manifest of the user level extension cache.

@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Icon written into every MSIX logo slot.
+const MSIX_ICON: &[u8] = include_bytes!("../../assets/tc-ide-icon.png");
+
 impl WindowsAppState {
     pub(super) fn start_project_environment_setup(&mut self) {
         let language = self.project_language_name();
@@ -65,27 +68,20 @@ impl WindowsAppState {
     }
 
     pub(super) fn package_settings_path(root: &std::path::Path) -> PathBuf {
-        root.join(".tc-ide-package-targets")
+        root.join(workspace_core::PACKAGE_TARGETS_FILE)
     }
 
     pub(super) fn load_package_targets(root: &std::path::Path) -> [bool; 3] {
-        let mut targets = [false; 3];
-        if let Ok(value) = fs::read_to_string(Self::package_settings_path(root)) {
-            for (index, item) in value.trim().split(',').take(3).enumerate() {
-                targets[index] = item == "1";
-            }
-        }
-        targets
+        let text = fs::read_to_string(Self::package_settings_path(root)).unwrap_or_default();
+        let stored = workspace_core::parse_package_targets(&text, 3);
+        [stored[0], stored[1], stored[2]]
     }
 
     pub(super) fn save_package_targets(&self) {
-        let value = self
-            .package_targets
-            .iter()
-            .map(|selected| if *selected { "1" } else { "0" })
-            .collect::<Vec<_>>()
-            .join(",");
-        let _ = fs::write(Self::package_settings_path(&self.project_root), value);
+        let _ = fs::write(
+            Self::package_settings_path(&self.project_root),
+            workspace_core::serialize_package_targets(&self.package_targets),
+        );
     }
 
     pub(super) fn start_package(&mut self) {
@@ -124,96 +120,47 @@ impl WindowsAppState {
         if self.package_targets[2] {
             let stage_path = self.project_root.join(".tc-ide-packages").join(&project);
             let assets = stage_path.join("Assets");
-            let identity = project
-                .chars()
-                .map(|value| {
-                    if value.is_ascii_alphanumeric() {
-                        value
-                    } else {
-                        '.'
-                    }
-                })
-                .collect::<String>();
-            let identity = format!("TianChuangYa.{}", identity.trim_matches('.'));
-            let display = project.replace(['&', '<', '>'], "");
-            let manifest = format!(
-                r#"<?xml version="1.0" encoding="utf-8"?>
-<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities" IgnorableNamespaces="uap rescap">
-  <Identity Name="{identity}" Publisher="CN=TianChuangYa" Version="0.2.0.0" />
-  <Properties><DisplayName>{display}</DisplayName><PublisherDisplayName>TianChuangYa</PublisherDisplayName><Logo>Assets\StoreLogo.png</Logo></Properties>
-  <Resources><Resource Language="en-us" /></Resources>
-  <Dependencies><TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" /></Dependencies>
-  <Applications><Application Id="TCIDE" Executable="{project}.exe" EntryPoint="Windows.FullTrustApplication"><uap:VisualElements DisplayName="{display}" Description="TC-IDE packaged project" BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" /></Application></Applications>
-  <Capabilities><rescap:Capability Name="runFullTrust" /></Capabilities>
-</Package>
-"#
-            );
-            let prepared = fs::create_dir_all(&assets)
-                .and_then(|()| fs::write(stage_path.join("AppxManifest.xml"), manifest))
-                .and_then(|()| {
-                    fs::write(
-                        assets.join("StoreLogo.png"),
-                        include_bytes!("../../assets/tc-ide-icon.png"),
-                    )
-                })
-                .and_then(|()| {
-                    fs::write(
-                        assets.join("Square150x150Logo.png"),
-                        include_bytes!("../../assets/tc-ide-icon.png"),
-                    )
-                })
-                .and_then(|()| {
-                    fs::write(
-                        assets.join("Square44x44Logo.png"),
-                        include_bytes!("../../assets/tc-ide-icon.png"),
-                    )
-                });
+            let manifest = workspace_core::msix_manifest(&workspace_core::MsixPackage {
+                project: project.clone(),
+                identity: workspace_core::msix_identity(&project),
+                display_name: workspace_core::msix_display_name(&project),
+                version: concat!(env!("CARGO_PKG_VERSION"), ".0").to_string(),
+            });
+            let mut prepared = fs::create_dir_all(&assets)
+                .and_then(|()| fs::write(stage_path.join("AppxManifest.xml"), manifest));
+            for asset in workspace_core::MSIX_ASSET_FILES {
+                if prepared.is_err() {
+                    break;
+                }
+                prepared = fs::write(assets.join(asset), MSIX_ICON);
+            }
             if let Err(error) = prepared {
                 self.status = format!("Could not prepare MSIX layout: {error}");
                 return;
             }
         }
-        let build = if is_rust {
-            format!(
-                "cargo build --release; $a=Get-ChildItem .\\target\\release\\*.exe | Where-Object {{$_.DirectoryName -notmatch 'deps'}} | Select-Object -First 1; if($a){{Copy-Item $a.FullName '{stage}\\{project}.exe' -Force}}"
-            )
-        } else if is_go {
-            format!("go build -o '{stage}\\{project}.exe' .")
-        } else {
-            match language {
-                "C" => format!("gcc \"{file}\" -o '{stage}\\{project}.exe'"),
-                "C++" => format!("g++ \"{file}\" -o '{stage}\\{project}.exe'"),
-                "Python" => format!("python -m PyInstaller --noconfirm --onefile --name \"{project}\" \"{file}\" --distpath '{stage}' --workpath .tc-ide-packages\\work --specpath .tc-ide-packages\\spec"),
-                "Java" => format!("javac \"{file}\"; jar --create --file '{stage}\\{project}.jar' *.class"),
-                _ => self.task_command(true),
-            }
-        };
-        let zip = if self.package_targets[1] {
-            format!("; Compress-Archive -Path '{stage}\\*' -DestinationPath '.tc-ide-packages\\{project}.zip' -Force")
-        } else {
-            String::new()
-        };
-        let msix = if self.package_targets[2] {
-            format!("; $makeappx=(Get-Command MakeAppx.exe -ErrorAction SilentlyContinue).Source; if(!$makeappx){{$makeappx=Get-ChildItem \"${{env:ProgramFiles(x86)}}\\Windows Kits\\10\\bin\\*\\x64\\makeappx.exe\" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName}}; if(!$makeappx){{throw 'Windows SDK MakeAppx.exe is not installed'}}; & $makeappx pack /d '{stage}' /p '.tc-ide-packages\\{project}.msix' /o")
-        } else {
-            String::new()
-        };
-        let signing = match (&self.signing_certificate, self.package_targets[2]) {
-            (Some(certificate), true) => format!(
-                "; $signtool=(Get-Command signtool.exe -ErrorAction SilentlyContinue).Source; if(!$signtool){{$signtool=Get-ChildItem \"${{env:ProgramFiles(x86)}}\\Windows Kits\\10\\bin\\*\\x64\\signtool.exe\" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName}}; if(!$signtool){{throw 'Windows SDK signtool.exe is not installed'}}; & $signtool sign /fd SHA256 /f '{}' '.tc-ide-packages\\{project}.msix'",
-                certificate.to_string_lossy()
-            ),
-            _ => String::new(),
-        };
         self.package_marker = format!("__TC_PACKAGE_DONE_{}__", self.started.elapsed().as_nanos());
         self.package_failure_marker = format!(
             "__TC_PACKAGE_FAILED_{}__",
             self.started.elapsed().as_nanos()
         );
-        let command = format!(
-            "$ErrorActionPreference='Stop'; try{{New-Item -ItemType Directory -Force '{stage}' | Out-Null; {build}{zip}{msix}{signing}; Write-Output '{}'}}catch{{Write-Host $_.Exception.Message; Write-Output '{}'}}",
-            self.package_marker, self.package_failure_marker
-        );
+        let fallback = self.task_command(true);
+        let command = workspace_core::package_command(&workspace_core::PackageRequest {
+            project,
+            file,
+            language: language.to_string(),
+            stage,
+            has_cargo: is_rust,
+            has_go_mod: is_go,
+            targets: self.package_targets,
+            certificate: self
+                .signing_certificate
+                .as_ref()
+                .map(|certificate| certificate.to_string_lossy().into_owned()),
+            marker: self.package_marker.clone(),
+            failure_marker: self.package_failure_marker.clone(),
+            fallback,
+        });
         if let Some(tab) = self.terminals.first() {
             let _ = tab.session.write(&format!("{command}\r"));
             self.active_terminal = 0;
@@ -225,7 +172,7 @@ impl WindowsAppState {
         }
     }
 
-    /// Progress the packaging output has actually reached.    /// Progress the packaging output has actually reached.
+    /// Progress the packaging output has actually reached.
     pub(super) fn package_output_progress(&self) -> Option<f32> {
         let index = self.terminals.iter().position(|tab| tab.name == "Build")?;
         let output = self.terminals.get(index).and_then(|tab| {

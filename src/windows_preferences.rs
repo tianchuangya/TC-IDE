@@ -12,7 +12,7 @@ fn path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join("TC-IDE")
-        .join("settings.conf")
+        .join(workspace_core::SETTINGS_FILE)
 }
 
 pub fn load() -> WindowsPreferences {

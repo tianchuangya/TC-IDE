@@ -405,7 +405,7 @@ pub(super) fn session_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join("TC-IDE")
-        .join("session.conf")
+        .join(workspace_core::SESSION_FILE)
 }
 
 /// Read the previous session, if any.

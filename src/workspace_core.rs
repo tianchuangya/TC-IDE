@@ -588,6 +588,219 @@ pub fn format_bytes(bytes: u64) -> String {
 /// Report file written into the package directory.
 pub const PACKAGE_REPORT_FILE: &str = "BUILD-RESULT.txt";
 
+/// File inside a project that remembers which package targets are selected.
+pub const PACKAGE_TARGETS_FILE: &str = ".tc-ide-package-targets";
+
+/// File name of the shared settings document.
+pub const SETTINGS_FILE: &str = "settings.conf";
+
+/// File name of the shared session document.
+pub const SESSION_FILE: &str = "session.conf";
+
+/// Read a `1,0,1` target selection, padded or trimmed to `count` entries.
+///
+/// Both backends store the selection in the same project file, so the parser
+/// accepts a missing file, a short line and trailing whitespace alike.
+pub fn parse_package_targets(text: &str, count: usize) -> Vec<bool> {
+    let mut targets = vec![false; count];
+    for (index, item) in text.trim().split(',').take(count).enumerate() {
+        targets[index] = item.trim() == "1";
+    }
+    targets
+}
+
+/// Render a target selection as the project file is written.
+pub fn serialize_package_targets(targets: &[bool]) -> String {
+    targets
+        .iter()
+        .map(|selected| if *selected { "1" } else { "0" })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Identity of an MSIX package, derived from the project folder name.
+///
+/// The manifest requires a dotted identity of ASCII letters, digits and dots,
+/// so every other character becomes a dot and the result is prefixed with the
+/// publisher.
+pub fn msix_identity(project: &str) -> String {
+    let tail = project
+        .chars()
+        .map(|value| {
+            if value.is_ascii_alphanumeric() {
+                value
+            } else {
+                '.'
+            }
+        })
+        .collect::<String>();
+    let tail = tail.trim_matches('.');
+    if tail.is_empty() {
+        "TianChuangYa.TCIDE".to_string()
+    } else {
+        format!("TianChuangYa.{tail}")
+    }
+}
+
+/// Display name of an MSIX package: the project name without XML markup.
+pub fn msix_display_name(project: &str) -> String {
+    let name = project.replace(['&', '<', '>'], "");
+    if name.trim().is_empty() {
+        "TC-IDE project".to_string()
+    } else {
+        name
+    }
+}
+
+/// Logo files a package layout needs, written from the IDE icon.
+pub const MSIX_ASSET_FILES: [&str; 3] = [
+    "StoreLogo.png",
+    "Square150x150Logo.png",
+    "Square44x44Logo.png",
+];
+
+/// Everything the MSIX manifest is assembled from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MsixPackage {
+    pub project: String,
+    pub identity: String,
+    pub display_name: String,
+    /// Four part version the manifest requires, for example `0.3.0.0`.
+    pub version: String,
+}
+
+/// App manifest written into the package layout before `MakeAppx` runs.
+pub fn msix_manifest(package: &MsixPackage) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities" IgnorableNamespaces="uap rescap">
+  <Identity Name="{}" Publisher="CN=TianChuangYa" Version="{}" />
+  <Properties><DisplayName>{}</DisplayName><PublisherDisplayName>TianChuangYa</PublisherDisplayName><Logo>Assets\StoreLogo.png</Logo></Properties>
+  <Resources><Resource Language="en-us" /></Resources>
+  <Dependencies><TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" /></Dependencies>
+  <Applications><Application Id="TCIDE" Executable="{}.exe" EntryPoint="Windows.FullTrustApplication"><uap:VisualElements DisplayName="{}" Description="TC-IDE packaged project" BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" /></Application></Applications>
+  <Capabilities><rescap:Capability Name="runFullTrust" /></Capabilities>
+</Package>
+"#,
+        package.identity,
+        package.version,
+        package.display_name,
+        package.project,
+        package.display_name
+    )
+}
+
+/// Everything the packaging command line is assembled from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackageRequest {
+    /// Project folder name, used for the executable and artifact names.
+    pub project: String,
+    /// Active file name, used by the single file compilers.
+    pub file: String,
+    /// Language of the active file, as `editor_core` reports it.
+    pub language: String,
+    /// Staging directory in Windows path form.
+    pub stage: String,
+    pub has_cargo: bool,
+    pub has_go_mod: bool,
+    /// Windows executable, portable ZIP, MSIX.
+    pub targets: [bool; 3],
+    /// Certificate the user selected in the packaging panel, when any.
+    pub certificate: Option<String>,
+    /// Markers that tell the panel the run finished or failed.
+    pub marker: String,
+    pub failure_marker: String,
+    /// Command used for a language without a packaging rule of its own.
+    pub fallback: String,
+}
+
+impl PackageRequest {
+    fn quoted_file(&self) -> String {
+        format!("\"{}\"", self.file.replace('"', ""))
+    }
+
+    /// Command that builds the Windows executable of the active project.
+    fn build_step(&self) -> String {
+        let project = &self.project;
+        let stage = &self.stage;
+        if self.has_cargo {
+            return format!(
+                "cargo build --release; $a=Get-ChildItem .\\target\\release\\*.exe | Where-Object {{$_.DirectoryName -notmatch 'deps'}} | Select-Object -First 1; if($a){{Copy-Item $a.FullName '{stage}\\{project}.exe' -Force}}"
+            );
+        }
+        if self.has_go_mod {
+            return format!("go build -o '{stage}\\{project}.exe' .");
+        }
+        match self.language.as_str() {
+            "C" => format!("gcc {} -o '{stage}\\{project}.exe'", self.quoted_file()),
+            "C++" => format!("g++ {} -o '{stage}\\{project}.exe'", self.quoted_file()),
+            "Python" => format!(
+                "python -m PyInstaller --noconfirm --onefile --name \"{project}\" {} --distpath '{stage}' --workpath .tc-ide-packages\\work --specpath .tc-ide-packages\\spec",
+                self.quoted_file()
+            ),
+            "Java" => format!(
+                "javac {}; jar --create --file '{stage}\\{project}.jar' *.class",
+                self.quoted_file()
+            ),
+            _ => self.fallback.clone(),
+        }
+    }
+
+    /// Portable archive of the staging directory.
+    fn zip_step(&self) -> String {
+        if !self.targets[1] {
+            return String::new();
+        }
+        format!(
+            "; Compress-Archive -Path '{}\\*' -DestinationPath '.tc-ide-packages\\{}.zip' -Force",
+            self.stage, self.project
+        )
+    }
+
+    /// `MakeAppx` step, which needs the Windows SDK.
+    fn msix_step(&self) -> String {
+        if !self.targets[2] {
+            return String::new();
+        }
+        format!(
+            "; $makeappx=(Get-Command MakeAppx.exe -ErrorAction SilentlyContinue).Source; if(!$makeappx){{$makeappx=Get-ChildItem \"${{env:ProgramFiles(x86)}}\\Windows Kits\\10\\bin\\*\\x64\\makeappx.exe\" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName}}; if(!$makeappx){{throw 'Windows SDK MakeAppx.exe is not installed'}}; & $makeappx pack /d '{}' /p '.tc-ide-packages\\{}.msix' /o",
+            self.stage, self.project
+        )
+    }
+
+    /// `signtool` step, only when a certificate was selected and an MSIX is built.
+    fn signing_step(&self) -> String {
+        let Some(certificate) = &self.certificate else {
+            return String::new();
+        };
+        if !self.targets[2] {
+            return String::new();
+        }
+        format!(
+            "; $signtool=(Get-Command signtool.exe -ErrorAction SilentlyContinue).Source; if(!$signtool){{$signtool=Get-ChildItem \"${{env:ProgramFiles(x86)}}\\Windows Kits\\10\\bin\\*\\x64\\signtool.exe\" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName}}; if(!$signtool){{throw 'Windows SDK signtool.exe is not installed'}}; & $signtool sign /fd SHA256 /f '{}' '.tc-ide-packages\\{}.msix'",
+            certificate.replace('\'', ""),
+            self.project
+        )
+    }
+}
+
+/// PowerShell line that builds every selected target in the Build terminal.
+///
+/// The markers are printed last so the panel knows the run really ended, and a
+/// failure prints the exception before the failure marker.
+pub fn package_command(request: &PackageRequest) -> String {
+    format!(
+        "$ErrorActionPreference='Stop'; try{{New-Item -ItemType Directory -Force '{}' | Out-Null; {}{}{}{}; Write-Output '{}'}}catch{{Write-Host $_.Exception.Message; Write-Output '{}'}}",
+        request.stage,
+        request.build_step(),
+        request.zip_step(),
+        request.msix_step(),
+        request.signing_step(),
+        request.marker,
+        request.failure_marker
+    )
+}
+
 /// Full report of one packaging run.
 pub fn packaging_report(reports: &[ArtifactReport], project: &str) -> String {
     let mut text = format!("TC-IDE packaging report for {project}\n");
@@ -874,5 +1087,163 @@ mod tests {
             ..ProjectFacts::default()
         };
         assert_eq!(task_command(&facts, false), "python \"my \\\"app\\\".py\"");
+    }
+
+    #[test]
+    fn package_targets_round_trip_through_the_project_file() {
+        assert_eq!(
+            serialize_package_targets(&[true, false, true]),
+            "1,0,1".to_string()
+        );
+        assert_eq!(
+            parse_package_targets("1,0,1", 3),
+            vec![true, false, true],
+            "a stored selection is read back exactly"
+        );
+        // Both backends share the file, and one of them stores four targets.
+        assert_eq!(
+            parse_package_targets("1,1", 4),
+            vec![true, true, false, false]
+        );
+        assert_eq!(parse_package_targets("0,0,0,0,1", 4), vec![false; 4]);
+        assert_eq!(parse_package_targets("", 4), vec![false; 4]);
+        assert_eq!(
+            parse_package_targets(" 1 , 0 , 1 \n", 3),
+            vec![true, false, true],
+            "whitespace and a trailing newline are tolerated"
+        );
+        assert_eq!(
+            parse_package_targets("yes,no", 2),
+            vec![false, false],
+            "anything that is not 1 counts as unselected"
+        );
+        assert_eq!(
+            parse_package_targets(&serialize_package_targets(&[false, true, true]), 3),
+            vec![false, true, true]
+        );
+    }
+
+    fn request(language: &str, targets: [bool; 3]) -> PackageRequest {
+        PackageRequest {
+            project: "demo-app".into(),
+            file: "main.rs".into(),
+            language: language.into(),
+            stage: ".tc-ide-packages\\demo-app".into(),
+            has_cargo: false,
+            has_go_mod: false,
+            targets,
+            certificate: None,
+            marker: "__DONE__".into(),
+            failure_marker: "__FAILED__".into(),
+            fallback: "echo 'no packaging rule'".into(),
+        }
+    }
+
+    #[test]
+    fn the_packaging_command_builds_the_selected_targets() {
+        let executable_only = package_command(&request("C", [true, false, false]));
+        assert!(executable_only.starts_with("$ErrorActionPreference='Stop'; try{"));
+        assert!(executable_only.contains("New-Item -ItemType Directory -Force"));
+        assert!(executable_only
+            .contains("gcc \"main.rs\" -o '.tc-ide-packages\\demo-app\\demo-app.exe'"));
+        assert!(!executable_only.contains("Compress-Archive"));
+        assert!(!executable_only.contains("MakeAppx"));
+        assert!(executable_only.contains("Write-Output '__DONE__'"));
+        assert!(executable_only.contains("Write-Output '__FAILED__'"));
+
+        let with_archive = package_command(&request("C++", [true, true, false]));
+        assert!(with_archive.contains("g++ \"main.rs\""));
+        assert!(with_archive.contains("Compress-Archive -Path '.tc-ide-packages\\demo-app\\*'"));
+        assert!(with_archive.contains("-DestinationPath '.tc-ide-packages\\demo-app.zip' -Force"));
+        assert!(!with_archive.contains("MakeAppx"));
+
+        let with_msix = package_command(&request("Java", [true, false, true]));
+        assert!(with_msix.contains("javac \"main.rs\""));
+        assert!(
+            with_msix.contains("jar --create --file '.tc-ide-packages\\demo-app\\demo-app.jar'")
+        );
+        assert!(with_msix.contains("makeappx.exe"));
+        assert!(with_msix.contains(
+            "pack /d '.tc-ide-packages\\demo-app' /p '.tc-ide-packages\\demo-app.msix' /o"
+        ));
+        assert!(
+            !with_msix.contains("signtool"),
+            "signing needs a certificate"
+        );
+    }
+
+    #[test]
+    fn the_cargo_and_go_projects_build_with_their_own_tool() {
+        let mut cargo = request("Rust", [true, false, false]);
+        cargo.has_cargo = true;
+        let command = package_command(&cargo);
+        assert!(command.contains("cargo build --release"));
+        assert!(command.contains("target\\release\\*.exe"));
+        assert!(command
+            .contains("Copy-Item $a.FullName '.tc-ide-packages\\demo-app\\demo-app.exe' -Force"));
+
+        let mut go = request("Go", [true, false, false]);
+        go.has_go_mod = true;
+        assert!(package_command(&go)
+            .contains("go build -o '.tc-ide-packages\\demo-app\\demo-app.exe' ."));
+
+        let python = package_command(&request("Python", [true, false, false]));
+        assert!(python.contains(
+            "python -m PyInstaller --noconfirm --onefile --name \"demo-app\" \"main.rs\""
+        ));
+        assert!(python.contains("--workpath .tc-ide-packages\\work"));
+
+        let unknown = package_command(&request("Markdown", [true, false, false]));
+        assert!(unknown.contains("echo 'no packaging rule'"));
+    }
+
+    #[test]
+    fn signing_only_runs_for_a_selected_certificate_and_an_msix() {
+        let mut signed = request("C", [true, false, true]);
+        signed.certificate = Some("C:\\keys\\demo.pfx".into());
+        let command = package_command(&signed);
+        assert!(command.contains("signtool sign /fd SHA256 /f 'C:\\keys\\demo.pfx'"));
+        assert!(command.contains("'.tc-ide-packages\\demo-app.msix'"));
+
+        // The private key never becomes part of a persisted file: only the
+        // selected path is quoted into the command line the user sees.
+        let mut no_msix = request("C", [true, true, false]);
+        no_msix.certificate = Some("C:\\keys\\demo.pfx".into());
+        assert!(!package_command(&no_msix).contains("signtool"));
+
+        let mut quoted = request("C", [true, false, true]);
+        quoted.certificate = Some("C:\\it's here\\demo.pfx".into());
+        assert!(
+            !package_command(&quoted).contains("it's here"),
+            "quotes are dropped from the path"
+        );
+    }
+
+    #[test]
+    fn the_msix_manifest_carries_identity_version_and_display_name() {
+        assert_eq!(msix_identity("demo-app"), "TianChuangYa.demo.app");
+        assert_eq!(msix_identity("日本語"), "TianChuangYa.TCIDE");
+        assert_eq!(msix_display_name("demo-app"), "demo-app");
+        assert_eq!(msix_display_name("a & <b>"), "a  b");
+        let manifest = msix_manifest(&MsixPackage {
+            project: "demo-app".into(),
+            identity: msix_identity("demo-app"),
+            display_name: msix_display_name("demo & app"),
+            version: "0.3.0.0".into(),
+        });
+        assert!(manifest.starts_with("<?xml version=\"1.0\" encoding=\"utf-8\"?>"));
+        assert!(manifest.contains("Name=\"TianChuangYa.demo.app\""));
+        assert!(manifest.contains("Version=\"0.3.0.0\""));
+        assert!(manifest.contains("Executable=\"demo-app.exe\""));
+        assert!(manifest.contains("<DisplayName>demo  app</DisplayName>"));
+        assert!(
+            !manifest.contains("demo & app"),
+            "XML markup characters are removed"
+        );
+        assert!(manifest.contains("runFullTrust"));
+        assert_eq!(MSIX_ASSET_FILES.len(), 3);
+        for asset in MSIX_ASSET_FILES {
+            assert!(manifest.contains(asset), "the manifest should list {asset}");
+        }
     }
 }
