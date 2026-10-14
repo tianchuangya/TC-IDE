@@ -120,6 +120,9 @@ struct TextPosition {
 }
 
 /// Buffer of a document that is open but not active.
+/// One row of the problems panel: its text and where it jumps to.
+type ProblemRow = (String, Option<(PathBuf, usize, usize)>);
+
 /// Language server request the UI is waiting for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LspRequest {
@@ -278,6 +281,8 @@ struct WindowsAppState {
     ai_prompt_focused: bool,
     ai_terminal: Option<usize>,
     ai_last_report: String,
+    problems_open: bool,
+    problems_selection: usize,
     chat_open: bool,
     chat_input: String,
     chat_input_focused: bool,
@@ -574,6 +579,8 @@ impl WindowsAppState {
             ai_prompt_focused: false,
             ai_terminal: None,
             ai_last_report: String::new(),
+            problems_open: false,
+            problems_selection: 0,
             chat_open: false,
             chat_input: String::new(),
             chat_input_focused: false,
@@ -1797,6 +1804,114 @@ impl WindowsAppState {
             self.package_started = Some(Instant::now());
             self.package_open = false;
             self.status = "Packaging started in the Build terminal".into();
+        }
+    }
+
+    /// Rows of the problems panel: diagnostics, then debug state.
+    ///
+    /// Each row carries where it should take the caret when it is opened.
+    fn problem_rows(&self) -> Vec<ProblemRow> {
+        let mut rows = Vec::new();
+        for diagnostic in &self.lsp_diagnostics {
+            let target = self
+                .file_path
+                .clone()
+                .map(|path| (path, diagnostic.line as usize, diagnostic.column as usize));
+            rows.push((diagnostic.line_text(), target));
+        }
+        if let Some(stopped) = self.debug_state.stopped.as_ref() {
+            rows.push((stopped.describe(), None));
+        }
+        for (index, frame) in self.debug_state.frames.iter().enumerate() {
+            let target = frame
+                .file
+                .as_ref()
+                .map(|file| (PathBuf::from(file), frame.line, frame.column));
+            rows.push((
+                format!("#{index}  {}  :{}", frame.name, frame.line + 1),
+                target,
+            ));
+        }
+        for variable in self.debug_state.variables.iter().take(20) {
+            rows.push((
+                format!(
+                    "{} = {}{}",
+                    variable.name,
+                    variable.value,
+                    if variable.kind.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  ({})", variable.kind)
+                    }
+                ),
+                None,
+            ));
+        }
+        for (path, lines) in &self.breakpoints {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            for line in lines {
+                rows.push((
+                    format!("breakpoint  {name}:{}", line + 1),
+                    Some((path.clone(), *line, 0)),
+                ));
+            }
+        }
+        rows
+    }
+
+    /// Open or close the problems panel.
+    fn toggle_problems(&mut self) {
+        self.problems_open = !self.problems_open;
+        self.problems_selection = 0;
+        if self.problems_open {
+            let count = self.problem_rows().len();
+            self.status = if count == 0 {
+                "Problems: nothing reported by the language server or the debugger".into()
+            } else {
+                format!("Problems: {count} row(s); Enter jumps, Esc closes")
+            };
+        }
+    }
+
+    /// Move the panel selection.
+    fn move_problem_selection(&mut self, delta: i32) {
+        let count = self.problem_rows().len();
+        if count == 0 {
+            self.problems_selection = 0;
+            return;
+        }
+        let current = self.problems_selection.min(count - 1) as i32;
+        let next = (current + delta).clamp(0, count as i32 - 1) as usize;
+        self.problems_selection = next;
+        if let Some((text, _)) = self.problem_rows().get(next) {
+            self.status = text.clone();
+        }
+    }
+
+    /// Jump to the selected problems panel row.
+    fn activate_problem_row(&mut self) {
+        let rows = self.problem_rows();
+        let Some((text, target)) =
+            rows.get(self.problems_selection.min(rows.len().saturating_sub(1)))
+        else {
+            return;
+        };
+        let text = text.clone();
+        match target.clone() {
+            Some((path, line, column)) => {
+                if path.is_file() && self.file_path.as_deref() != Some(path.as_path()) {
+                    self.open_file(path);
+                }
+                self.caret_line = line.min(self.lines.len().saturating_sub(1));
+                self.caret_column = column;
+                self.clamp_caret();
+                self.reveal_caret();
+                self.status = format!("Jumped to {text}");
+            }
+            None => self.status = text,
         }
     }
 
@@ -3641,6 +3756,11 @@ fn render_window(window: Hwnd) {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let chat_messages = app.chat_lines();
+            let problem_rows = app
+                .problem_rows()
+                .into_iter()
+                .map(|(text, _)| text)
+                .collect::<Vec<_>>();
             let ai_cache_summary = format!(
                 "runtime cache: {} entries · {}",
                 app.runtime_cache.entries().len(),
@@ -3759,6 +3879,14 @@ fn render_window(window: Hwnd) {
                 ai_prompt: &app.ai_prompt,
                 ai_prompt_focused: app.ai_prompt_focused,
                 ai_cache_summary: &ai_cache_summary,
+                problems_open: app.problems_open,
+                problems: &problem_rows,
+                problems_selected: app.problems_selection,
+                problems_hint: if app.debug_session.is_some() {
+                    "debugging · Enter jumps · Esc closes"
+                } else {
+                    "Ctrl+Shift+D closes · Enter jumps"
+                },
                 chat_open: app.chat_open,
                 chat_messages: &chat_messages,
                 chat_input: &app.chat_input,
@@ -5060,6 +5188,12 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_KEYDOWN => {
+            if platform::control_pressed() && w_param as u32 == 0x44 && platform::shift_pressed() {
+                // Ctrl+Shift+D opens the problems and debug panel.
+                APP.with(|cell| cell.borrow_mut().toggle_problems());
+                invalidate(window);
+                return 0;
+            }
             if platform::control_pressed() && w_param as u32 == 0x41 && platform::shift_pressed() {
                 APP.with(|cell| {
                     let mut app = cell.borrow_mut();
@@ -5349,6 +5483,16 @@ unsafe extern "system" fn window_proc(
                         _ => return,
                     }
                     app.save_preferences();
+                    return;
+                }
+                if app.problems_open {
+                    match w_param as u32 {
+                        0x1b => app.problems_open = false,
+                        VK_UP => app.move_problem_selection(-1),
+                        VK_DOWN => app.move_problem_selection(1),
+                        0x0d => app.activate_problem_row(),
+                        _ => return,
+                    }
                     return;
                 }
                 if app.chat_input_focused {
@@ -6687,6 +6831,20 @@ pub fn self_check() -> i32 {
     report(
         "rename edits apply to a document",
         applied == "let answer = 1;\n",
+        &mut failures,
+    );
+    let mut panel_state = WindowsAppState::new();
+    panel_state.lsp_diagnostics = vec![lsp_core::Diagnostic {
+        path: "src/main.rs".into(),
+        line: 3,
+        column: 2,
+        severity: lsp_core::DiagnosticSeverity::Error,
+        message: "cannot find value `x`".into(),
+    }];
+    let rows = panel_state.problem_rows();
+    report(
+        "problems panel lists diagnostics with a jump target",
+        rows.len() == 1 && rows[0].0.contains("cannot find value") && rows[0].1.is_some(),
         &mut failures,
     );
     let scan = syntax_core::scan(

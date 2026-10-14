@@ -78,6 +78,11 @@ pub struct WindowsScene<'a> {
     pub ai_prompt: &'a str,
     pub ai_prompt_focused: bool,
     pub ai_cache_summary: &'a str,
+    /// Problems panel: diagnostics, debug state and breakpoints.
+    pub problems_open: bool,
+    pub problems: &'a [String],
+    pub problems_selected: usize,
+    pub problems_hint: &'a str,
     /// AI panel: conversation, input line, run state and the last error.
     pub chat_open: bool,
     pub chat_messages: &'a [(bool, String)],
@@ -2720,6 +2725,113 @@ impl DirectEditorRenderer {
                     }
                 }
             }
+        }
+        if scene.problems_open {
+            let panel_w = (560.0 * scale).min(width - 60.0 * scale);
+            let panel_h = (420.0 * scale).min(height - 120.0 * scale);
+            let left = (width - panel_w) * 0.5;
+            let top = 60.0 * scale;
+            unsafe {
+                Self::rounded(
+                    &target_base,
+                    &panel,
+                    D2D_RECT_F {
+                        left,
+                        top,
+                        right: left + panel_w,
+                        bottom: top + panel_h,
+                    },
+                    16.0 * scale,
+                );
+                Self::text(
+                    &target_base,
+                    &self.ui_format,
+                    &bright,
+                    if scene.ui_chinese {
+                        "问题与调试"
+                    } else {
+                        "PROBLEMS & DEBUG"
+                    },
+                    D2D_RECT_F {
+                        left: left + 20.0 * scale,
+                        top: top + 14.0 * scale,
+                        right: left + panel_w - 20.0 * scale,
+                        bottom: top + 42.0 * scale,
+                    },
+                );
+            }
+            let visible = ((panel_h - 96.0 * scale) / (24.0 * scale)) as usize;
+            let first = scene
+                .problems_selected
+                .saturating_sub(visible.saturating_sub(1));
+            for (row, line) in scene.problems.iter().skip(first).take(visible).enumerate() {
+                let index = first + row;
+                let row_top = top + (52.0 + row as f32 * 24.0) * scale;
+                let selected = index == scene.problems_selected;
+                if selected {
+                    unsafe {
+                        Self::rounded(
+                            &target_base,
+                            &selection,
+                            D2D_RECT_F {
+                                left: left + 12.0 * scale,
+                                top: row_top - 3.0 * scale,
+                                right: left + panel_w - 12.0 * scale,
+                                bottom: row_top + 21.0 * scale,
+                            },
+                            5.0 * scale,
+                        )
+                    };
+                }
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        if selected { &bright } else { &text },
+                        line,
+                        D2D_RECT_F {
+                            left: left + 24.0 * scale,
+                            top: row_top,
+                            right: left + panel_w - 20.0 * scale,
+                            bottom: row_top + 22.0 * scale,
+                        },
+                    )
+                };
+            }
+            if scene.problems.is_empty() {
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        &muted,
+                        if scene.ui_chinese {
+                            "没有诊断或调试信息"
+                        } else {
+                            "Nothing reported yet"
+                        },
+                        D2D_RECT_F {
+                            left: left + 24.0 * scale,
+                            top: top + 60.0 * scale,
+                            right: left + panel_w - 20.0 * scale,
+                            bottom: top + 90.0 * scale,
+                        },
+                    )
+                };
+            }
+            unsafe {
+                Self::text(
+                    &target_base,
+                    &self.small_format,
+                    &muted,
+                    scene.problems_hint,
+                    D2D_RECT_F {
+                        left: left + 20.0 * scale,
+                        top: top + panel_h - 32.0 * scale,
+                        right: left + panel_w - 20.0 * scale,
+                        bottom: top + panel_h - 8.0 * scale,
+                    },
+                )
+            };
         }
         if scene.chat_open {
             let panel_w = (520.0 * scale).min(width - 40.0 * scale);
