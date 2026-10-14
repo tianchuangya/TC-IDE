@@ -13,7 +13,11 @@ TC-IDE 不是网页套壳。界面状态、布局、动画和绘制都由 Rust �
 3. `tc_editor`：文本缓冲、选择区、光标和字形级插入/删除动画（`src/editor_core.rs` 已承载后缀识别、注释、关键字、补全、符号与声明分类）。
 4. `tc_ui`：原生窗口、GPU 场景、输入与统一动画时钟。
 5. `tc_packager`：Windows、Debian、macOS、AppImage、RPM 构建任务和黑洞/白洞状态动画。
-6. 终端模型（`src/terminal_core.rs`）：网格换算、滚动历史、选区与文本提取，平台层只负责 ConPTY 会话和绘制。
+6. 终端模型（`src/terminal_core.rs`）：网格换算、滚动历史、选区、文本提取与 VT 解析器，平台层只负责 ConPTY 会话和绘制。
+7. `src/session_core.rs`：打开文档、当前标签、脏状态、最近项目与会话恢复文件。
+8. `src/workspace_core.rs`：偏好设置解析、项目模板、Build/Run 与格式化/调试命令、打包目标与产物报告。
+9. `src/ai_core.rs` 与 `src/extension_core.rs`：AI 请求/响应与错误说明；扩展目录、下载校验解包卸载命令与运行时缓存清单。
+10. `src/lsp_core.rs`：LSP 分帧、请求构造与诊断/补全/悬停/位置/重命名解析（传输层尚未接入）。
 
 共享模块不引入任何平台 API：`graph_core`、`terminal_core`、`editor_core` 在三个平台上都参与编译，并由 Linux 上的 `cargo test` 覆盖；Win32 后端另外在 Linux runner 上通过 `cargo check --target x86_64-pc-windows-msvc` 做不链接的类型检查，避免 Windows 特有逻辑只能依赖远程实机编译。
 

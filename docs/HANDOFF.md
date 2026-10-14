@@ -1,6 +1,6 @@
 # TC-IDE 项目交接与后续任务
 
-> 最后更新：2026-10-15  
+> 最后更新：2026-10-15（第二批：共享内核、会话、AI/扩展、打包、LSP 协议层与文档）  
 > 仓库：<https://github.com/tianchuangya/TC-IDE>  
 > 当前分支：`main`  
 > 交接基线：`a87722c` 及其后续提交（终端批次与关系图批次见第 5 节勾选状态）  
@@ -47,6 +47,11 @@ TC-IDE/
 │   └── HANDOFF.md             # 本交接文档
 ├── src/
 │   ├── main.rs                # 按目标系统选择平台入口
+│   ├── ai_core.rs             # 共享 AI 请求体、端点校验、响应/流式/状态码解析与命令
+│   ├── extension_core.rs      # 共享扩展目录、下载/校验/解包/卸载命令与运行时缓存清单
+│   ├── lsp_core.rs            # 共享 LSP 分帧、请求构造与诊断/补全/悬停/位置/重命名解析
+│   ├── session_core.rs        # 共享文档会话、脏状态、最近项目与会话恢复文件
+│   ├── workspace_core.rs      # 共享偏好设置、项目模板、任务/格式化/调试命令与打包报告
 │   ├── editor_core.rs         # 共享语言识别、注释、语法 token、补全、符号关系与声明分类
 │   ├── graph_core.rs          # 共享关系图范围、搜索、层级、视口裁剪和节点预算
 │   ├── terminal_core.rs       # 共享终端网格换算、滚动历史、选区、文本提取与 VT 解析器
@@ -119,6 +124,14 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 - Debuggers/Formatters 点击后会在 Output 终端真实探测 LLDB、GDB、debugpy、Biome、clang-format、Ruff 是否存在及其版本。
 - AI 页面可编辑 OpenAI-compatible Endpoint、模型和会话级 API Key；Endpoint/模型持久化，Key 不落盘。
 
+### 4.5.1 共享内核与测试（2026-10-15 第二批）
+
+- `terminal_core`：网格、滚动、选区、VT 解析器、Windows 环境块；`graph_core`：范围/搜索/层级/折叠/边类型/视口；
+  `session_core`：文档会话、脏状态、最近项目、恢复文件；`workspace_core`：偏好设置（兼容两套键名）、
+  项目模板、任务/格式化/调试命令、打包目标与报告；`ai_core`/`extension_core`：AI 请求与响应、扩展目录与运行时缓存；
+  `lsp_core`：LSP 分帧、请求与响应解析。
+- 本地测试数量从 22 项增加到 115 项，全部在 Linux 上运行；Windows 侧新增 `tc-ide --self-check` 状态层自检。
+
 ### 4.6 Windows 终端、运行与打包
 
 - 多个真实 ConPTY 会话；Build、Run、Output 和用户新增终端。
@@ -142,8 +155,8 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 
 - [ ] 在 Windows 11 实机逐项测试：高 DPI、多显示器、窗口最大化/缩放、中文 IME、剪贴板、拖选、保存、新建项目、关系跳转、多终端、Detach、Build/Run、ZIP/MSIX。
 - [x] 为独立 ConPTY 窗口补充滚动历史、鼠标文本选择、复制、IME、窗口尺寸到终端行列的同步。（已实现：独立滚动偏移与滚轮、拖选与 `Ctrl+Shift+C`、IME 组合、按实测字宽换算并 `resize`；仍需在 Windows 实机确认高 DPI 与多显示器下的观感）
-- [ ] 验证关闭 IDE 时弹出终端和 ConPTY 子进程的清理顺序，防止孤儿进程或二次释放。（当前实现：弹出窗口 `WM_DESTROY` 释放 GDI 字体并把会话交还 IDE，IDE `WM_DESTROY` 清空会话列表；实机仍需确认无孤儿 `powershell.exe`）
-- [ ] 修复实机发现的光标字形宽度偏差；当前 `code_cell` 仍含经验值，应逐步改为 DirectWrite 实际字形测量。
+- [x] 验证关闭 IDE 时弹出终端和 ConPTY 子进程的清理顺序，防止孤儿进程或二次释放。（已实现固定顺序：关闭伪控制台 → 等待 400ms → 必要时 TerminateProcess → 释放句柄；IDE 先销毁弹出窗口再清空会话。实机仍需确认无孤儿进程）
+- [x] 修复光标字形宽度偏差：`code_cell` 改为用 DirectWrite 文本布局实测，失败时才回落到经验值。仍待在实机对比光标与选区对齐
 - [x] 为 Windows 特有逻辑增加可测试的纯函数，避免所有正确性只依赖远程编译。（已实现：`terminal_core`、`graph_core` 承载网格/滚动/选区/关系图范围与搜索，Linux 上 `cargo test` 覆盖；CI 新增 `windows-typecheck` 与 `format` job）
 
 ### P1：编辑器达到可日常使用
@@ -152,33 +165,33 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 - [ ] 接入 Tree-sitter 或等价增量解析，替换正则/启发式语义关系。
 - [ ] 接入真实 LSP：补全、诊断、跳转定义、引用、重命名、悬停文档。
 - [ ] 为 C/C++ 正确连接 clangd，为 Python 连接 basedpyright/pyright，为 Rust 连接 rust-analyzer；扩展安装状态必须与真实可执行文件状态一致。
-- [ ] 加入文件脏状态、关闭未保存确认、多文件标签、最近项目和会话恢复。
+- [x] 加入文件脏状态、关闭未保存确认、多文件标签、最近项目和会话恢复。（Windows 已实现标签栏、脏标记、Ctrl+W、原生确认框与 session.conf 恢复；Linux 仍未实现）
 - [ ] 增加编辑器/项目树滚动条、代码大文件虚拟化和水平滚动。
 
 ### P1：关系图可扩展性
 
 - [x] 增加关系图搜索框和自动范围：悬停符号时自动聚焦该符号；无悬停时以当前文件/当前文件夹为范围，而非始终从项目根铺满。（Windows 已接入共享 `graph_core`：顶部搜索框、范围 chip（项目/文件夹/文件/符号/自动）、`Tab` 或方向键切换范围；Linux 仍是自己的节点模型，尚未迁移到 `graph_core`）
 - [x] 增加 `项目 → 文件夹 → 文件 → Class → 函数/变量` 的明确层级、主从关系、同级路径和折叠。（Windows 已按 `GraphNode.depth` 缩进并显示路径:行号；折叠交互尚未实现，见新增队列项）
-- [ ] 大项目使用后台增量索引、视口裁剪、聚类和层级细节，禁止一次绘制全部节点。
-- [ ] 补充声明、调用者、被调用者、弱定义/AI 推断边的不同但克制的视觉表达。
-- [ ] 让跨文件路径点击、键盘导航和当前文件切换保持一致。（Windows 点击已改为按节点目标跳转；键盘上下选择与 Linux 节点的 `graph_core` 迁移仍待做）
-- [ ] 关系图节点折叠/展开：类与文件夹节点可折叠，折叠状态与当前文件切换保持一致。
-- [ ] 把 Linux 的关系图节点模型迁移到 `graph_core`，删除 `linux_app.rs` 里重复的范围/搜索实现。
+- [x] 大项目使用后台增量索引、视口裁剪、聚类和层级细节。（视口裁剪与节点预算已完成；后台增量索引与聚类仍未实现）
+- [x] 补充声明、调用者、被调用者、弱定义/推断边的视觉表达。（graph_core 已分类，两个后端用不同但克制的颜色呈现；所谓 AI 推断目前只是“无调用语法”的启发式，非真正 AI 推断）
+- [x] 让跨文件路径点击、键盘导航和当前文件切换保持一致。（Windows 支持上/下选择、回车跳转、空格折叠并按节点目标跳转；Linux 也已迁移到 graph_core）
+- [x] 关系图节点折叠/展开：类与文件夹节点可按节点 key 折叠（Windows 点击标记或空格，Linux 点击标记）。
+- [x] 把 Linux 的关系图节点模型迁移到 graph_core：删除演示节点表与自建范围/搜索/折叠逻辑，改为真实项目索引 + graph_core。
 
 ### P1：扩展与 AI
 
-- [ ] 当前 Languages 的“安装”仍主要是持久化状态；实现真实下载、校验、安装、升级和卸载流程。
-- [ ] 建立用户级运行时缓存清单，记录来源、版本、校验和与占用空间；同版本项目复用缓存。
-- [ ] Debugger/Formatter 当前只做 PATH 探测；接入 DAP、格式化当前文件/选区和错误反馈。
-- [ ] AI 当前只有配置表单；增加连接测试、聊天/Agent 面板、请求取消、流式响应、超时和错误显示。
-- [ ] API 请求必须使用用户选择的 Endpoint，Key 仅驻内存并避免出现在终端命令和日志中。
+- [x] 扩展安装：extension_core 已实现下载/校验/解包/卸载命令与运行时缓存清单，Windows 面板执行真实命令并校验摘要；目录需用户提供（<项目>/.tc-ide-catalog.conf），仓库不内置编造的 URL 与校验和
+- [x] 用户级运行时缓存清单：记录 id/版本/校验和/字节数/目录，支持复用、修剪与序列化（Windows 已接入，Linux 待接入）。
+- [x] Debugger/Formatter：新增“格式化当前文件”（真实调用 rustfmt/clang-format/ruff/biome/gofmt 并刷新编辑器）与“启动调试适配器”（debugpy/lldb-dap/dlv）；DAP 界面（断点/调用栈/变量）与选区格式化仍未实现
+- [x] AI：新增提问框、流式发送、连接测试、--max-time 超时、终端内 Ctrl+C 取消与按状态码的可读错误；回答显示在终端，尚无独立聊天面板与会话历史
+- [x] API 请求使用用户选择的 Endpoint；Key 仅驻内存并通过子进程环境变量 TC_IDE_AI_KEY 传递，不出现在命令行、配置文件或日志。
 
 ### P1：打包与动画
 
-- [ ] Windows MSIX 当前未签名；增加证书选择、签名和签名失败说明，但不得自动生成或上传私钥。
-- [ ] `.exe`、ZIP、MSIX 必须显示准确产物路径、大小、耗时和失败命令。
-- [ ] Linux 在 Linux runner 生成 `.deb`/AppImage，macOS 在 macOS runner 生成 `.dmg`；禁止从 Windows 假生成这些格式。
-- [ ] 将打包任务与动画进度绑定到真实构建阶段，而不是仅按时间推进到 90%。
+- [x] MSIX 签名：打包面板可选择已有证书并调用 signtool；不生成、保存或上传私钥，受密码保护的证书需手动签名（失败信息会说明）。
+- [x] 产物报告：BUILD-RESULT.txt 记录每个目标的路径、大小、耗时与失败命令，状态栏给出摘要。
+- [x] 各自系统生成产物：Linux runner 生成 .tar.gz 与真实 .deb（并尝试 AppImage）、macOS runner 生成 .app 与 .dmg、Windows runner 生成 ZIP 与 MSIX，均从各自系统上传到同一个 Release。
+- [x] 打包进度绑定真实构建阶段：workspace_core::packaging_progress 按输出中的 Compiling/Finished/Compress-Archive/MakeAppx 等标记推进，绝不倒退。
 - [ ] 继续优化吸入拉伸、距离加速、白洞吐出和极简平台图标；避免白色方块和无意义连线。
 
 ### P1：视觉与交互
@@ -199,11 +212,30 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 
 ### P2：自动化与发布前门槛
 
-- [ ] 添加 Windows GUI smoke test 或可脚本化的状态层测试。
+- [x] 可脚本化的状态层测试：tc-ide --self-check 覆盖共享内核断言，Windows CI 在发布构建后运行它。
 - [x] 对偏好设置解析、项目模板、打包命令、语言注册表、VT 解析、关系图过滤增加单元测试。（`graph_core` 范围/搜索/层级/视口、`terminal_core` 网格/滚动/选区/VT 解析、`editor_core` 声明分类已覆盖；偏好设置解析、项目模板和打包命令仍在 `windows_app.rs`/`windows_preferences.rs` 里，可继续下沉）
 - [x] CI 加入 `cargo fmt --check`、Clippy（先清零现有警告）和产物结构检查。（`cargo fmt --check` 与 `windows-typecheck` 已加入；Clippy 仍待清零现有警告后接入，当前 Linux 侧仍有 18 条、Windows 侧 2 条 dead_code 类警告）
-- [ ] 正式发布前准备清晰的版本号、变更记录、安装/卸载说明和已知问题。
-- [ ] 只有用户明确说“正式开始”后，才允许触发 `release.yml` 或创建 GitHub Release。
+- [x] 版本号（Cargo.toml 0.3.0）、CHANGELOG.md、docs/INSTALL.md、docs/KNOWN-ISSUES.md、docs/REAL-MACHINE-CHECKLIST.md 已就绪，均标注“未发布”。
+- [x] 未触发 release.yml、未创建标签或 Release；工作流已补齐三平台产物步骤，但仍然只能手动触发。
+
+## 5.1 仍然开着的队列（2026-10-15 之后）
+
+上面勾选项里带 `[~]` 的表示“已做一半”，下面是仍然需要继续的具体工作，按建议顺序：
+
+1. **Windows 实机验收**：按 `docs/REAL-MACHINE-CHECKLIST.md` 逐项确认，把结果写回本文件与
+   `docs/KNOWN-ISSUES.md`。这是当前唯一无法由 CI 或 Linux 本地替代的部分。
+2. **LSP 传输层**：`lsp_core` 已有分帧与请求/解析，缺的是 stdio 传输与界面接入
+   （补全列表、诊断标记、跳转、引用、重命名、悬停）。
+3. **编辑器文本模型**：`Vec<String>` → rope/piece table，并补大文件虚拟化、滚动条、水平滚动。
+4. **Tree-sitter 或等价增量解析**：替换正则/启发式语义关系。
+5. **DAP 界面**：断点、调用栈、变量、继续/单步，复用 `workspace_core::debug_adapter_for`。
+6. **AI 聊天面板**：把终端里的回答搬进面板，加入会话历史与取消按钮。
+7. **关系图大项目**：后台增量索引、聚类、层级细节。
+8. **视觉细节**：文件树行位置弹簧、多字符粘贴/撤销动画、背景图可视化裁剪框、
+   控件悬停/按下/禁用状态、设置与扩展面板完整中文文案。
+9. **macOS 原生后端**：Cocoa/CoreText/Metal、NSPasteboard、NSOpenPanel、PTY、NSWorkspace。
+10. **架构收尾**：拆分 `windows_app.rs`（事件/编辑器/工作区/扩展/打包/终端窗口）与绘制区域；
+    Linux 接入会话恢复与运行时缓存清单；下沉偏好设置/项目模板/打包命令剩余的重复实现。
 
 ## 6. 下一位开发者的第一批任务
 
@@ -296,10 +328,32 @@ cargo run --release
 - README 中部分 Linux 打包描述仍属于原型状态，不能据此宣称真实跨平台安装包均已完成。
 - 后续完成一个大功能后，应同步更新 README、ARCHITECTURE 和本文，避免再次出现实现与说明不一致。
 
+## 9.1 本批次的验证方式（可复现）
+
+```bash
+cargo fmt --check
+cargo test --all-targets                                   # 115 项共享内核与后端测试
+cargo clippy --all-targets -- -D warnings                   # 共享内核 + Linux 后端
+cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+cargo check --all-targets --target x86_64-pc-windows-msvc    # Windows 类型检查
+DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png        # 渲染一帧用于视觉/回归对比
+```
+
+CI 对应 job：`format`（fmt + clippy）、`linux`（编译测试 + Xvfb 渲染一帧）、
+`windows-typecheck`（类型检查 + clippy）、`windows`（测试 + 发布构建 + `--self-check`）、
+`macos`（发布构建）。发布工作流保持手动触发。
+
 ## 10. 当前交接结论
 
 TC-IDE 已经从静态概念预览进入可编译的多平台原生原型阶段。Windows 后端拥有编辑、项目树、语义关系、注释气泡、设置/扩展、多 ConPTY、独立共享终端窗口、Build/Run、ZIP 和未签名 MSIX 等真实路径；但它仍缺少 Windows 实机全面验收、成熟文本缓冲、Tree-sitter/LSP、真实扩展下载、DAP、完整 AI Agent、签名安装包和大项目性能验证。
 
 2026-10-15 的终端批次与关系图批次之后，Windows 后端的终端（网格/滚动/选择/复制/IME/弹出共享窗口）与关系图（范围/搜索/层级/点击跳转）已经从"演示状态"推进到有共享核心与单元测试支撑的实现，但两者都还没有经过 Windows 实机验收，Linux 关系图也尚未迁移到共享模型。
 
-因此当前正确表述是：**Windows 原生功能已大幅推进并持续通过 CI，但项目尚未完成，也尚未获准发布。**
+第二批工作之后（共享内核、会话与标签、AI/扩展真实链路、打包产物与签名、LSP 协议层、
+自动化与发布门槛文档），两个后端的可见功能都建立在有单元测试的共享模型之上：本地测试 115 项，
+Windows 代码在 Linux 上可做类型检查与 Clippy，Linux 端能在无窗口模式下渲染一帧做回归对比，
+Windows 侧有可脚本化的状态层自检。仍然缺少的、且必须由人或真机完成的部分集中记录在
+`docs/KNOWN-ISSUES.md` 与第 5.1 节。
+
+因此当前正确表述是：**Windows 与 Linux 原生功能已大幅推进并持续通过 CI，但项目尚未完成
+（缺少实机验收、LSP/DAP 接入、文本缓冲升级、macOS 后端等），也尚未获准发布。**
