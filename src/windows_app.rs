@@ -3762,6 +3762,16 @@ fn render_window(window: Hwnd) {
                     .filter(|line| *line >= first_line)
                     .map(|line| line - first_line),
                 pointer_x: app.pointer_x,
+                pointer_y: app.pointer_y,
+                project_total: app
+                    .project_entries
+                    .iter()
+                    .filter(|entry| {
+                        let query = app.workspace_search.to_ascii_lowercase();
+                        query.is_empty() || entry.to_ascii_lowercase().contains(&query)
+                    })
+                    .count(),
+                project_scroll: app.project_scroll,
                 package_motion: app.package_motion,
                 package_targets: app.package_targets,
                 signing_certificate: &signing_certificate,

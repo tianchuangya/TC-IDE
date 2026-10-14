@@ -107,6 +107,10 @@ pub struct WindowsScene<'a> {
     pub expanded_comments: &'a [usize],
     pub editing_comment: Option<usize>,
     pub pointer_x: i32,
+    pub pointer_y: i32,
+    /// Project tree totals, for its scrollbar.
+    pub project_total: usize,
+    pub project_scroll: usize,
     pub package_motion: f32,
     pub package_targets: [bool; 3],
     /// File name of the configured MSIX signing certificate, if any.
@@ -179,6 +183,60 @@ unsafe fn measure_code_cell(
         return fallback;
     }
     cell
+}
+
+/// Settings row label in the interface language.
+fn settings_row_text(scene: &WindowsScene<'_>, index: usize, fallback: &str) -> String {
+    if !scene.ui_chinese {
+        return fallback.to_string();
+    }
+    match index {
+        0 => "设置".to_string(),
+        1 => format!(
+            "L   界面语言：{}",
+            if scene.ui_chinese {
+                "简体中文"
+            } else {
+                "English"
+            }
+        ),
+        2 => format!(
+            "T   主题：{}",
+            if scene.light_theme {
+                "浅色"
+            } else {
+                "深色"
+            }
+        ),
+        3 => format!("←→  代码字号：{}", 15 + scene.code_zoom),
+        4 => format!(
+            "字体搜索：{}{}",
+            if scene.font_search.is_empty() {
+                "输入以筛选"
+            } else {
+                scene.font_search
+            },
+            if scene.font_search_focused { "  |" } else { "" }
+        ),
+        5 => format!("B   背景图：{}", scene.background_path.unwrap_or("未选择")),
+        6 => format!(
+            "O/P 不透明度 {:.0}%   Z/X 缩放 {:.1}x",
+            scene.background_opacity * 100.0,
+            scene.background_zoom
+        ),
+        7 => "C   清除背景".to_string(),
+        8 => "H   导入背景图".to_string(),
+        9 => "Esc  关闭设置".to_string(),
+        _ => fallback.to_string(),
+    }
+}
+
+/// Whether the pointer is inside a rectangle, for hover feedback.
+fn hovering(pointer_x: i32, pointer_y: i32, left: f32, top: f32, right: f32, bottom: f32) -> bool {
+    (pointer_x as f32) >= left
+        && (pointer_x as f32) <= right
+        && (pointer_y as f32) >= top
+        && (pointer_y as f32) <= bottom
 }
 
 impl DirectEditorRenderer {
@@ -968,6 +1026,46 @@ impl DirectEditorRenderer {
                 token_x += token_cells * self.code_cell * scale;
             }
         }
+        // Project tree scrollbar, when the tree is longer than the column.
+        {
+            let visible_rows = (((body_bottom - (header_h + 58.0 * scale)) / (35.0 * scale))
+                .floor()
+                .max(1.0)) as usize;
+            let total = scene.project_total.max(scene.project_entries.len());
+            if total > visible_rows {
+                let track_top = header_h + 58.0 * scale;
+                let track_bottom = body_bottom - 12.0 * scale;
+                let track = (track_bottom - track_top).max(24.0 * scale);
+                let thumb = (track * visible_rows as f32 / total as f32).clamp(16.0 * scale, track);
+                let max_scroll = total.saturating_sub(visible_rows).max(1);
+                let offset = scene.project_scroll.min(max_scroll) as f32 / max_scroll as f32;
+                let top = track_top + (track - thumb) * offset.clamp(0.0, 1.0);
+                unsafe {
+                    Self::rounded(
+                        &target_base,
+                        &line,
+                        D2D_RECT_F {
+                            left: tree_w - 7.0 * scale,
+                            top: track_top,
+                            right: tree_w - 3.0 * scale,
+                            bottom: track_bottom,
+                        },
+                        2.0 * scale,
+                    );
+                    Self::rounded(
+                        &target_base,
+                        &muted,
+                        D2D_RECT_F {
+                            left: tree_w - 8.0 * scale,
+                            top,
+                            right: tree_w - 2.0 * scale,
+                            bottom: top + thumb,
+                        },
+                        3.0 * scale,
+                    );
+                }
+            }
+        }
         if scene.pointer_x as f32 >= tree_w {
             for (line_index, value) in scene.lines.iter().take(max_lines).enumerate() {
                 let Some((marker_start, content_start, content_end)) =
@@ -1747,18 +1845,49 @@ impl DirectEditorRenderer {
                     14.0 * scale,
                 )
             };
-            let labels = [
-                "1  Portable native artifact",
-                "2  Portable ZIP",
-                "3  MSIX (Windows SDK)",
-            ];
+            let labels = if scene.ui_chinese {
+                [
+                    "1  原生可执行文件",
+                    "2  Portable ZIP",
+                    "3  MSIX（Windows SDK）",
+                ]
+            } else {
+                [
+                    "1  Portable native artifact",
+                    "2  Portable ZIP",
+                    "3  MSIX (Windows SDK)",
+                ]
+            };
             for (index, label) in labels.iter().enumerate() {
                 let y = top + (48.0 + index as f32 * 42.0) * scale;
+                let hovered = hovering(
+                    scene.pointer_x,
+                    scene.pointer_y,
+                    left + 10.0 * scale,
+                    y - 6.0 * scale,
+                    width - 20.0 * scale,
+                    y + 30.0 * scale,
+                );
+                if hovered {
+                    unsafe {
+                        Self::rounded(
+                            &target_base,
+                            &raised,
+                            D2D_RECT_F {
+                                left: left + 10.0 * scale,
+                                top: y - 6.0 * scale,
+                                right: width - 20.0 * scale,
+                                bottom: y + 30.0 * scale,
+                            },
+                            6.0 * scale,
+                        )
+                    };
+                }
                 unsafe {
                     Self::text(
                         &target_base,
                         &self.ui_format,
-                        if scene.package_targets[index] {
+                        if scene.package_targets[index] || hovered {
                             &accent
                         } else {
                             &text
@@ -1781,7 +1910,13 @@ impl DirectEditorRenderer {
                 };
             }
             let certificate = if scene.signing_certificate.is_empty() {
-                "4  Signing certificate: none (click to choose)".to_string()
+                if scene.ui_chinese {
+                    "4  签名证书：未选择（点击选择）".to_string()
+                } else {
+                    "4  Signing certificate: none (click to choose)".to_string()
+                }
+            } else if scene.ui_chinese {
+                format!("4  签名证书：{}", scene.signing_certificate)
             } else {
                 format!("4  Signing certificate: {}", scene.signing_certificate)
             };
@@ -1806,7 +1941,11 @@ impl DirectEditorRenderer {
                     &target_base,
                     &self.small_format,
                     &bright,
-                    "Enter  Start packaging     Esc  Close",
+                    if scene.ui_chinese {
+                        "Enter  开始打包     Esc  关闭"
+                    } else {
+                        "Enter  Start packaging     Esc  Close"
+                    },
                     D2D_RECT_F {
                         left: left + 18.0 * scale,
                         top: top + 194.0 * scale,
@@ -1895,6 +2034,35 @@ impl DirectEditorRenderer {
                 (626.0, "Esc  Close settings".into()),
             ];
             for (index, (row_y, value)) in settings.iter().enumerate() {
+                // Rows 1..4 are clickable, so they light up under the pointer.
+                let row_top = top + row_y * scale;
+                let row_bottom = row_top + (if index == 5 { 34.0 } else { 54.0 }) * scale;
+                let clickable = (1..=9).contains(&index);
+                let hovered = clickable
+                    && hovering(
+                        scene.pointer_x,
+                        scene.pointer_y,
+                        left + 16.0 * scale,
+                        row_top - 6.0 * scale,
+                        width - 30.0 * scale,
+                        row_bottom - 6.0 * scale,
+                    );
+                if hovered {
+                    unsafe {
+                        Self::rounded(
+                            &target_base,
+                            &raised,
+                            D2D_RECT_F {
+                                left: left + 16.0 * scale,
+                                top: row_top - 6.0 * scale,
+                                right: width - 30.0 * scale,
+                                bottom: row_bottom - 6.0 * scale,
+                            },
+                            6.0 * scale,
+                        )
+                    };
+                }
+                let (row_y, value) = (*row_y, settings_row_text(scene, index, value));
                 unsafe {
                     Self::text(
                         &target_base,
@@ -1903,14 +2071,14 @@ impl DirectEditorRenderer {
                         } else {
                             &self.small_format
                         },
-                        if index == 0 {
+                        if index == 0 || hovered {
                             &bright
                         } else if index < 4 {
                             &text
                         } else {
                             &muted
                         },
-                        value,
+                        &value,
                         D2D_RECT_F {
                             left: left + 22.0 * scale,
                             top: top + row_y * scale,
@@ -1993,13 +2161,17 @@ impl DirectEditorRenderer {
                     16.0 * scale,
                 )
             };
-            let categories = [
-                "Languages",
-                "Themes",
-                "Debuggers",
-                "Formatters",
-                "AI / Agents",
-            ];
+            let categories = if scene.ui_chinese {
+                ["语言", "主题", "调试器", "格式化器", "AI / 代理"]
+            } else {
+                [
+                    "Languages",
+                    "Themes",
+                    "Debuggers",
+                    "Formatters",
+                    "AI / Agents",
+                ]
+            };
             unsafe {
                 Self::text(
                     &target_base,
@@ -2252,7 +2424,19 @@ impl DirectEditorRenderer {
                                 &target_base,
                                 &self.small_format,
                                 if active { &bright } else { &text },
-                                &format!("{}{}", label, if active { "    ACTIVE" } else { "" }),
+                                &format!(
+                                    "{}{}",
+                                    label,
+                                    if active {
+                                        if scene.ui_chinese {
+                                            "    已启用"
+                                        } else {
+                                            "    ACTIVE"
+                                        }
+                                    } else {
+                                        ""
+                                    }
+                                ),
                                 D2D_RECT_F {
                                     left: content_left + 16.0 * scale,
                                     top: row_top + 10.0 * scale,
@@ -2287,7 +2471,14 @@ impl DirectEditorRenderer {
                                 &target_base,
                                 &self.small_format,
                                 &text,
-                                &format!("{label}    CHECK"),
+                                &format!(
+                                    "{label}{}",
+                                    if scene.ui_chinese {
+                                        "    检测"
+                                    } else {
+                                        "    CHECK"
+                                    }
+                                ),
                                 D2D_RECT_F {
                                     left: content_left + 16.0 * scale,
                                     top: row_top + 10.0 * scale,
