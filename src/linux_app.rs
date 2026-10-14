@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::background_core;
 use crate::editor_core;
 use crate::extension_core;
 use crate::graph_core;
@@ -938,14 +939,16 @@ impl App {
         }
         let image_w = cairo_image_surface_get_width(self.background_surface).max(1) as f64;
         let image_h = cairo_image_surface_get_height(self.background_surface).max(1) as f64;
-        let scale = (width as f64 / image_w).max(height as f64 / image_h)
-            * self.background_zoom.clamp(1.0, 3.0);
-        let drawn_w = image_w * scale;
-        let drawn_h = image_h * scale;
-        let excess_x = (drawn_w - width as f64).max(0.0);
-        let excess_y = (drawn_h - height as f64).max(0.0);
-        let offset_x = -excess_x * (self.background_offset_x + 1.0) * 0.5;
-        let offset_y = -excess_y * (self.background_offset_y + 1.0) * 0.5;
+        // Cover, zoom and offset are the shared background model, which the crop
+        // box uses as well.
+        let placed = background_core::placement(
+            (image_w, image_h),
+            (width as f64, height as f64),
+            self.background_zoom,
+            (self.background_offset_x, self.background_offset_y),
+        );
+        let scale = placed.scale;
+        let (offset_x, offset_y) = placed.origin;
         cairo_save(self.cairo);
         cairo_rectangle(self.cairo, x as f64, y as f64, width as f64, height as f64);
         cairo_clip(self.cairo);
@@ -3905,6 +3908,24 @@ impl App {
             "packaging-emit" => {
                 self.package_targets = [true, true, true, true];
                 self.build_started = Some(ago(absorb + 0.9));
+                true
+            }
+            "background" => {
+                // Show the bundled icon as the background picture so the
+                // placement can be inspected, and its crop box later on.
+                if self.background_surface.is_null() {
+                    // Loading a PNG goes through the Cairo FFI.
+                    self.background_surface = unsafe {
+                        bundled_asset_path("assets/tc-ide-icon.png")
+                            .and_then(|path| CString::new(path.to_string_lossy().as_bytes()).ok())
+                            .map(|path| cairo_image_surface_create_from_png(path.as_ptr()))
+                            .unwrap_or(ptr::null_mut())
+                    };
+                }
+                self.background_opacity = 0.55;
+                self.background_zoom = 1.6;
+                self.background_offset_x = 0.35;
+                self.background_offset_y = -0.25;
                 true
             }
             "edit" => {

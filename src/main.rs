@@ -1,4 +1,5 @@
 mod ai_core;
+mod background_core;
 mod dap_core;
 mod editor_core;
 mod extension_core;
