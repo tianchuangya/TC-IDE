@@ -172,7 +172,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 
 - [x] 增加关系图搜索框和自动范围：悬停符号时自动聚焦该符号；无悬停时以当前文件/当前文件夹为范围，而非始终从项目根铺满。（Windows 已接入共享 `graph_core`：顶部搜索框、范围 chip（项目/文件夹/文件/符号/自动）、`Tab` 或方向键切换范围；Linux 仍是自己的节点模型，尚未迁移到 `graph_core`）
 - [x] 增加 `项目 → 文件夹 → 文件 → Class → 函数/变量` 的明确层级、主从关系、同级路径和折叠。（Windows 已按 `GraphNode.depth` 缩进并显示路径:行号；折叠交互尚未实现，见新增队列项）
-- [x] 大项目使用后台增量索引、视口裁剪、聚类和层级细节。（视口裁剪与节点预算已完成；后台增量索引与聚类仍未实现）
+- [x] 大项目使用后台增量索引、视口裁剪、聚类和层级细节。（`index_core` 按文件指纹只重解析变化的文件并在编辑时原地更新；视口裁剪、节点预算与超出预算的文件夹聚类均已完成。仍缺按缩放切换的层级细节。）
 - [x] 补充声明、调用者、被调用者、弱定义/推断边的视觉表达。（graph_core 已分类，两个后端用不同但克制的颜色呈现；所谓 AI 推断目前只是“无调用语法”的启发式，非真正 AI 推断）
 - [x] 让跨文件路径点击、键盘导航和当前文件切换保持一致。（Windows 支持上/下选择、回车跳转、空格折叠并按节点目标跳转；Linux 也已迁移到 graph_core）
 - [x] 关系图节点折叠/展开：类与文件夹节点可按节点 key 折叠（Windows 点击标记或空格，Linux 点击标记）。
@@ -213,7 +213,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 ### P2：自动化与发布前门槛
 
 - [x] 可脚本化的状态层测试：tc-ide --self-check 覆盖共享内核断言，Windows CI 在发布构建后运行它。
-- [x] 对偏好设置解析、项目模板、打包命令、语言注册表、VT 解析、关系图过滤增加单元测试。（`graph_core` 范围/搜索/层级/视口、`terminal_core` 网格/滚动/选区/VT 解析、`editor_core` 声明分类已覆盖；偏好设置解析、项目模板和打包命令仍在 `windows_app.rs`/`windows_preferences.rs` 里，可继续下沉）
+- [~] 单元测试覆盖：`graph_core`、`terminal_core`、`editor_core`、`workspace_core`（偏好设置/项目模板/打包报告）、`session_core`、`ai_core`、`extension_core`、`lsp_core`、`dap_core`、`text_buffer`、`index_core` 均已覆盖（本地 148 项）；仍待下沉的是 `windows_app.rs` 中剩余的打包命令拼装与偏好设置持久化细节。
 - [x] CI 加入 `cargo fmt --check`、Clippy（先清零现有警告）和产物结构检查。（`cargo fmt --check` 与 `windows-typecheck` 已加入；Clippy 仍待清零现有警告后接入，当前 Linux 侧仍有 18 条、Windows 侧 2 条 dead_code 类警告）
 - [x] 版本号（Cargo.toml 0.3.0）、CHANGELOG.md、docs/INSTALL.md、docs/KNOWN-ISSUES.md、docs/REAL-MACHINE-CHECKLIST.md 已就绪，均标注“未发布”。
 - [x] 未触发 release.yml、未创建标签或 Release；工作流已补齐三平台产物步骤，但仍然只能手动触发。
