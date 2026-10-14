@@ -231,7 +231,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 4. **Tree-sitter 或等价增量解析**：替换正则/启发式语义关系。
 5. **DAP 界面**：断点、调用栈、变量、继续/单步，复用 `workspace_core::debug_adapter_for`。
 6. **AI 聊天面板**：把终端里的回答搬进面板，加入会话历史与取消按钮。
-7. **关系图大项目**：后台增量索引、聚类、层级细节。
+7. **关系图真正的增量索引**：现在是整项目重扫（在后台线程），可以按文件变更增量更新。
 8. **视觉细节**：文件树行位置弹簧、多字符粘贴/撤销动画、背景图可视化裁剪框、
    控件悬停/按下/禁用状态、设置与扩展面板完整中文文案。
 9. **macOS 原生后端**：Cocoa/CoreText/Metal、NSPasteboard、NSOpenPanel、PTY、NSWorkspace。
