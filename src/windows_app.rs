@@ -136,7 +136,11 @@ struct WindowsAppState {
     font_search: String,
     font_search_focused: bool,
     settings_open: bool,
+    settings_motion: f32,
+    settings_velocity: f32,
     extensions_open: bool,
+    extensions_motion: f32,
+    extensions_velocity: f32,
     extension_category: usize,
     selected_language: usize,
     language_installed: Vec<bool>,
@@ -156,6 +160,8 @@ struct WindowsAppState {
     background_offset_y: f32,
     background_zoom: f32,
     package_open: bool,
+    package_motion: f32,
+    package_velocity: f32,
     package_targets: [bool; 3],
     package_running: bool,
     package_progress: f32,
@@ -172,6 +178,8 @@ struct WindowsAppState {
     started: Instant,
     last_frame: Instant,
     last_edit: Option<Instant>,
+    create_motion: f32,
+    create_velocity: f32,
 }
 
 impl WindowsAppState {
@@ -271,7 +279,11 @@ impl WindowsAppState {
             font_search: String::new(),
             font_search_focused: false,
             settings_open: false,
+            settings_motion: 0.0,
+            settings_velocity: 0.0,
             extensions_open: false,
+            extensions_motion: 0.0,
+            extensions_velocity: 0.0,
             extension_category: 0,
             selected_language: 0,
             language_installed: (0..7)
@@ -308,6 +320,8 @@ impl WindowsAppState {
             background_offset_y: preferences.background_offset_y,
             background_zoom: preferences.background_zoom,
             package_open: false,
+            package_motion: 0.0,
+            package_velocity: 0.0,
             package_targets,
             package_running: false,
             package_progress: 0.0,
@@ -324,6 +338,8 @@ impl WindowsAppState {
             started: Instant::now(),
             last_frame: Instant::now(),
             last_edit: None,
+            create_motion: 0.0,
+            create_velocity: 0.0,
         }
     }
 
@@ -1244,6 +1260,30 @@ impl WindowsAppState {
             self.terminal_motion = target;
             self.terminal_velocity = 0.0;
         }
+        Self::step_overlay_motion(
+            &mut self.settings_motion,
+            &mut self.settings_velocity,
+            self.settings_open,
+            dt,
+        );
+        Self::step_overlay_motion(
+            &mut self.extensions_motion,
+            &mut self.extensions_velocity,
+            self.extensions_open,
+            dt,
+        );
+        Self::step_overlay_motion(
+            &mut self.package_motion,
+            &mut self.package_velocity,
+            self.package_open,
+            dt,
+        );
+        Self::step_overlay_motion(
+            &mut self.create_motion,
+            &mut self.create_velocity,
+            self.create_kind.is_some(),
+            dt,
+        );
         if self.package_running {
             self.package_progress = self
                 .package_started
@@ -1284,6 +1324,18 @@ impl WindowsAppState {
         {
             self.package_progress = 0.0;
             self.package_started = None;
+        }
+    }
+
+    fn step_overlay_motion(value: &mut f32, velocity: &mut f32, open: bool, dt: f32) {
+        let target = if open { 1.0 } else { 0.0 };
+        *velocity += (target - *value) * 300.0 * dt;
+        *velocity *= (-19.0 * dt).exp();
+        *value += *velocity * dt;
+        *value = value.clamp(-0.04, 1.04);
+        if (target - *value).abs() < 0.0008 && velocity.abs() < 0.0008 {
+            *value = target;
+            *velocity = 0.0;
         }
     }
 }
@@ -1725,7 +1777,9 @@ fn render_window(window: Hwnd) {
                 font_search_focused: app.font_search_focused,
                 font_options: &WindowsAppState::CODE_FONTS,
                 settings_open: app.settings_open,
+                settings_motion: app.settings_motion,
                 extensions_open: app.extensions_open,
+                extensions_motion: app.extensions_motion,
                 extension_category: app.extension_category,
                 selected_language: app.selected_language,
                 language_installed: &app.language_installed,
@@ -1742,6 +1796,7 @@ fn render_window(window: Hwnd) {
                 editing_comment: app.editing_comment,
                 pointer_x: app.pointer_x,
                 package_open: app.package_open,
+                package_motion: app.package_motion,
                 package_targets: app.package_targets,
                 package_running: app.package_running,
                 package_progress: app.package_progress,
@@ -1759,6 +1814,7 @@ fn render_window(window: Hwnd) {
                 terminal_progress: app.terminal_motion,
                 animation_seconds: app.started.elapsed().as_secs_f32(),
                 edit_age: app.last_edit.map(|started| started.elapsed().as_secs_f32()),
+                create_motion: app.create_motion,
             };
             let mut renderer = renderer_cell.borrow_mut();
             if renderer.is_none() {

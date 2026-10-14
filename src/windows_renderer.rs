@@ -55,7 +55,9 @@ pub struct WindowsScene<'a> {
     pub font_search_focused: bool,
     pub font_options: &'a [&'a str],
     pub settings_open: bool,
+    pub settings_motion: f32,
     pub extensions_open: bool,
+    pub extensions_motion: f32,
     pub extension_category: usize,
     pub selected_language: usize,
     pub language_installed: &'a [bool],
@@ -72,6 +74,7 @@ pub struct WindowsScene<'a> {
     pub editing_comment: Option<usize>,
     pub pointer_x: i32,
     pub package_open: bool,
+    pub package_motion: f32,
     pub package_targets: [bool; 3],
     pub package_running: bool,
     pub package_progress: f32,
@@ -89,6 +92,7 @@ pub struct WindowsScene<'a> {
     pub terminal_progress: f32,
     pub animation_seconds: f32,
     pub edit_age: Option<f32>,
+    pub create_motion: f32,
 }
 
 pub struct DirectEditorRenderer {
@@ -1368,9 +1372,9 @@ impl DirectEditorRenderer {
                 };
             }
         }
-        if scene.package_open {
+        if scene.package_motion > 0.001 {
             let left = width - 326.0 * scale;
-            let top = header_h + 8.0 * scale;
+            let top = header_h + 8.0 * scale - (1.0 - scene.package_motion.min(1.0)) * 30.0 * scale;
             unsafe {
                 Self::rounded(
                     &target_base,
@@ -1432,10 +1436,10 @@ impl DirectEditorRenderer {
                 )
             };
         }
-        if scene.settings_open {
+        if scene.settings_motion > 0.001 {
             let panel_w = 390.0 * scale;
             let left = width - panel_w - 20.0 * scale;
-            let top = 58.0 * scale;
+            let top = (58.0 - (1.0 - scene.settings_motion.min(1.0)) * 34.0) * scale;
             unsafe {
                 Self::rounded(
                     &target_base,
@@ -1591,11 +1595,11 @@ impl DirectEditorRenderer {
                 };
             }
         }
-        if scene.extensions_open {
+        if scene.extensions_motion > 0.001 {
             let panel_w = (920.0 * scale).min(width - 50.0 * scale);
             let panel_h = (610.0 * scale).min(height - 80.0 * scale);
             let left = (width - panel_w) * 0.5;
-            let top = 58.0 * scale;
+            let top = (58.0 - (1.0 - scene.extensions_motion.min(1.0)) * 34.0) * scale;
             unsafe {
                 Self::rounded(
                     &target_base,
@@ -1899,7 +1903,8 @@ impl DirectEditorRenderer {
             let dialog_w = (520.0 * scale).min(width - 40.0 * scale);
             let dialog_h = if kind == "New project" { 310.0 } else { 230.0 } * scale;
             let left = (width - dialog_w) * 0.5;
-            let top = (height - dialog_h) * 0.42;
+            let top =
+                (height - dialog_h) * 0.42 - (1.0 - scene.create_motion.min(1.0)) * 28.0 * scale;
             unsafe {
                 Self::rounded(
                     &target_base,
