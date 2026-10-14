@@ -275,6 +275,12 @@ struct WindowsAppState {
     ai_prompt_focused: bool,
     ai_terminal: Option<usize>,
     ai_last_report: String,
+    chat_open: bool,
+    chat_input: String,
+    chat_input_focused: bool,
+    chat_messages: Vec<(bool, String)>,
+    chat_session: Option<ai_core::ChatSession>,
+    chat_error: Option<String>,
     debug_session: Option<dap_core::DebugSession>,
     debug_state: dap_core::DebugState,
     breakpoints: Vec<(PathBuf, Vec<usize>)>,
@@ -550,6 +556,12 @@ impl WindowsAppState {
             ai_prompt_focused: false,
             ai_terminal: None,
             ai_last_report: String::new(),
+            chat_open: false,
+            chat_input: String::new(),
+            chat_input_focused: false,
+            chat_messages: Vec::new(),
+            chat_session: None,
+            chat_error: None,
             debug_session: None,
             debug_state: dap_core::DebugState::default(),
             breakpoints: Vec::new(),
@@ -1726,6 +1738,107 @@ impl WindowsAppState {
             self.package_open = false;
             self.status = "Packaging started in the Build terminal".into();
         }
+    }
+
+    /// Send the prompt in the chat panel to the configured endpoint.
+    fn send_chat_prompt(&mut self) {
+        let prompt = self.chat_input.trim().to_string();
+        if prompt.is_empty() {
+            return;
+        }
+        if self.ai_key.is_empty() {
+            self.chat_error = Some("An API key is required for this session".into());
+            return;
+        }
+        let settings = self.ai_settings();
+        match ai_core::chat_url(&settings.endpoint) {
+            Ok(_) => {}
+            Err(error) => {
+                self.chat_error = Some(error.message());
+                return;
+            }
+        }
+        let Some(body_path) =
+            self.write_ai_body(&ai_core::chat_body(&settings.model, &prompt, true))
+        else {
+            self.chat_error = Some("Could not write the request body".into());
+            return;
+        };
+        match ai_core::ChatSession::start(
+            &settings,
+            &self.ai_key,
+            &prompt,
+            &body_path,
+            ai_core::DEFAULT_TIMEOUT_SECONDS,
+        ) {
+            Ok(session) => {
+                self.chat_messages.push((true, prompt));
+                self.chat_messages.push((false, String::new()));
+                self.chat_input.clear();
+                self.chat_error = None;
+                self.chat_session = Some(session);
+                self.status = "AI request running; Esc cancels it".into();
+            }
+            Err(error) => self.chat_error = Some(error.message()),
+        }
+    }
+
+    /// Collect streamed chat events.
+    fn poll_chat_session(&mut self) {
+        let Some(mut session) = self.chat_session.take() else {
+            return;
+        };
+        let prompt = session.prompt().to_string();
+        let events = session.poll();
+        let mut finished = false;
+        let mut failure = None;
+        for event in events {
+            match event {
+                ai_core::ChatEvent::Delta(text) => {
+                    if let Some((_, answer)) =
+                        self.chat_messages.iter_mut().rev().find(|(user, _)| !*user)
+                    {
+                        answer.push_str(&text);
+                    }
+                }
+                ai_core::ChatEvent::Done(status) => {
+                    finished = true;
+                    if let Some(status) = status {
+                        if status >= 400 {
+                            failure = Some(ai_core::describe_status(status, &prompt));
+                        }
+                    }
+                }
+                ai_core::ChatEvent::Error(error) => {
+                    finished = true;
+                    failure = Some(error);
+                }
+            }
+        }
+        let running = session.is_running();
+        if finished || !running {
+            if let Some(error) = failure {
+                self.chat_error = Some(error.clone());
+                self.status = error;
+            } else {
+                self.status = "AI answer received".into();
+            }
+        } else {
+            self.chat_session = Some(session);
+        }
+    }
+
+    /// Cancel a running chat request.
+    fn cancel_chat(&mut self) {
+        if let Some(mut session) = self.chat_session.take() {
+            session.cancel();
+            self.status = "AI request cancelled; the partial answer is kept".into();
+        }
+    }
+
+    /// Conversation as `(is_user, text)` pairs, newest last.
+    fn chat_lines(&self) -> Vec<(bool, String)> {
+        self.chat_messages.clone()
     }
 
     /// Breakpoint lines of the active file.
@@ -3436,6 +3549,7 @@ fn render_window(window: Hwnd) {
                 .and_then(|path| path.file_name())
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let chat_messages = app.chat_lines();
             let ai_cache_summary = format!(
                 "runtime cache: {} entries · {}",
                 app.runtime_cache.entries().len(),
@@ -3554,6 +3668,11 @@ fn render_window(window: Hwnd) {
                 ai_prompt: &app.ai_prompt,
                 ai_prompt_focused: app.ai_prompt_focused,
                 ai_cache_summary: &ai_cache_summary,
+                chat_open: app.chat_open,
+                chat_messages: &chat_messages,
+                chat_input: &app.chat_input,
+                chat_running: app.chat_session.is_some(),
+                chat_error: app.chat_error.as_deref().unwrap_or_default(),
                 ai_field_focused: app.ai_field_focused,
                 symbols: &symbols,
                 hovered_symbol: hovered_symbol.as_ref(),
@@ -3642,6 +3761,10 @@ fn handle_character(window: Hwnd, value: char) {
         } else if app.font_search_focused {
             if !value.is_control() {
                 app.font_search.push(value);
+            }
+        } else if app.chat_input_focused {
+            if !value.is_control() {
+                app.chat_input.push(value);
             }
         } else if app.rename_prompt.is_some() {
             if !value.is_control() {
@@ -4836,6 +4959,21 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_KEYDOWN => {
+            if platform::control_pressed() && w_param as u32 == 0x41 && platform::shift_pressed() {
+                APP.with(|cell| {
+                    let mut app = cell.borrow_mut();
+                    app.chat_open = !app.chat_open;
+                    app.chat_input_focused = app.chat_open;
+                    app.status = if app.chat_open {
+                        "AI panel: type a prompt and press Enter, Esc cancels a running request"
+                            .into()
+                    } else {
+                        "AI panel closed".into()
+                    };
+                });
+                invalidate(window);
+                return 0;
+            }
             if platform::control_pressed() {
                 let terminal_open = APP.with(|cell| cell.borrow().terminal_open);
                 if terminal_open
@@ -5110,6 +5248,31 @@ unsafe extern "system" fn window_proc(
                         _ => return,
                     }
                     app.save_preferences();
+                    return;
+                }
+                if app.chat_input_focused {
+                    // The AI panel owns the keyboard while it is open.
+                    match w_param as u32 {
+                        0x1b => {
+                            if app.chat_session.is_some() {
+                                app.cancel_chat();
+                            } else {
+                                app.chat_input_focused = false;
+                                app.chat_open = false;
+                            }
+                        }
+                        0x0d => {
+                            if app.chat_session.is_none() {
+                                app.send_chat_prompt();
+                            } else {
+                                app.status = "An AI request is already running".into();
+                            }
+                        }
+                        VK_BACK => {
+                            app.chat_input.pop();
+                        }
+                        _ => return,
+                    }
                     return;
                 }
                 if app.graph_search_focused {
@@ -6152,6 +6315,7 @@ unsafe extern "system" fn window_proc(
                 app.poll_project_index();
                 app.poll_language_server();
                 app.poll_debug_session();
+                app.poll_chat_session();
                 // Coalesce edits: tell the server after typing pauses.
                 if app.lsp_dirty
                     && app
@@ -6416,6 +6580,13 @@ pub fn self_check() -> i32 {
     report(
         "rename edits apply to a document",
         applied == "let answer = 1;\n",
+        &mut failures,
+    );
+    report(
+        "chat stream parsing",
+        ai_core::parse_stream_line("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}")
+            == ai_core::StreamEvent::Delta("hi".into())
+            && ai_core::parse_stream_line("data: [DONE]") == ai_core::StreamEvent::Done,
         &mut failures,
     );
     report(

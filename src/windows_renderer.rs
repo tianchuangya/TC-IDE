@@ -78,6 +78,12 @@ pub struct WindowsScene<'a> {
     pub ai_prompt: &'a str,
     pub ai_prompt_focused: bool,
     pub ai_cache_summary: &'a str,
+    /// AI panel: conversation, input line, run state and the last error.
+    pub chat_open: bool,
+    pub chat_messages: &'a [(bool, String)],
+    pub chat_input: &'a str,
+    pub chat_running: bool,
+    pub chat_error: &'a str,
     pub ai_field_focused: Option<usize>,
     pub symbols: &'a [SymbolOccurrence],
     pub hovered_symbol: Option<&'a SymbolOccurrence>,
@@ -2522,6 +2528,139 @@ impl DirectEditorRenderer {
                         );
                     }
                 }
+            }
+        }
+        if scene.chat_open {
+            let panel_w = (520.0 * scale).min(width - 40.0 * scale);
+            let panel_h = (560.0 * scale).min(height - 90.0 * scale);
+            let left = (width - panel_w) * 0.5;
+            let top = 54.0 * scale;
+            unsafe {
+                Self::rounded(
+                    &target_base,
+                    &panel,
+                    D2D_RECT_F {
+                        left,
+                        top,
+                        right: left + panel_w,
+                        bottom: top + panel_h,
+                    },
+                    16.0 * scale,
+                );
+                Self::text(
+                    &target_base,
+                    &self.ui_format,
+                    &bright,
+                    if scene.ui_chinese {
+                        "AI 面板"
+                    } else {
+                        "AI PANEL"
+                    },
+                    D2D_RECT_F {
+                        left: left + 20.0 * scale,
+                        top: top + 14.0 * scale,
+                        right: left + panel_w - 20.0 * scale,
+                        bottom: top + 42.0 * scale,
+                    },
+                );
+            }
+            // Newest turns first, so the answer stays visible while it streams.
+            let mut message_y = top + 50.0 * scale;
+            let line_limit = ((panel_h - 130.0 * scale) / (18.0 * scale)) as usize;
+            let mut drawn = 0usize;
+            for (is_user, message) in scene
+                .chat_messages
+                .iter()
+                .rev()
+                .filter(|(_, message)| !message.is_empty())
+            {
+                for line in message.lines().rev().take(4) {
+                    if drawn >= line_limit {
+                        break;
+                    }
+                    let prefix = if *is_user { "you  " } else { "ai   " };
+                    unsafe {
+                        Self::text(
+                            &target_base,
+                            &self.small_format,
+                            if *is_user { &muted } else { &text },
+                            &format!("{prefix}{line}"),
+                            D2D_RECT_F {
+                                left: left + 20.0 * scale,
+                                top: message_y,
+                                right: left + panel_w - 20.0 * scale,
+                                bottom: message_y + 20.0 * scale,
+                            },
+                        )
+                    };
+                    message_y += 18.0 * scale;
+                    drawn += 1;
+                }
+                if drawn >= line_limit {
+                    break;
+                }
+            }
+            unsafe {
+                Self::rounded(
+                    &target_base,
+                    &raised,
+                    D2D_RECT_F {
+                        left: left + 16.0 * scale,
+                        top: top + panel_h - 92.0 * scale,
+                        right: left + panel_w - 16.0 * scale,
+                        bottom: top + panel_h - 46.0 * scale,
+                    },
+                    8.0 * scale,
+                );
+                Self::text(
+                    &target_base,
+                    &self.small_format,
+                    &bright,
+                    if scene.chat_input.is_empty() {
+                        if scene.ui_chinese {
+                            "输入问题，回车发送，Esc 取消"
+                        } else {
+                            "Ask something, Enter sends, Esc cancels"
+                        }
+                    } else {
+                        scene.chat_input
+                    },
+                    D2D_RECT_F {
+                        left: left + 28.0 * scale,
+                        top: top + panel_h - 82.0 * scale,
+                        right: left + panel_w - 28.0 * scale,
+                        bottom: top + panel_h - 52.0 * scale,
+                    },
+                );
+                let footer = if !scene.chat_error.is_empty() {
+                    scene.chat_error
+                } else if scene.chat_running {
+                    if scene.ui_chinese {
+                        "正在接收回答…（Esc 取消）"
+                    } else {
+                        "Receiving the answer… (Esc cancels)"
+                    }
+                } else if scene.ui_chinese {
+                    "Ctrl+Shift+A 关闭面板"
+                } else {
+                    "Ctrl+Shift+A closes this panel"
+                };
+                Self::text(
+                    &target_base,
+                    &self.small_format,
+                    if scene.chat_error.is_empty() {
+                        &muted
+                    } else {
+                        &literal
+                    },
+                    footer,
+                    D2D_RECT_F {
+                        left: left + 20.0 * scale,
+                        top: top + panel_h - 38.0 * scale,
+                        right: left + panel_w - 20.0 * scale,
+                        bottom: top + panel_h - 10.0 * scale,
+                    },
+                );
             }
         }
         if let Some(kind) = scene.create_kind {

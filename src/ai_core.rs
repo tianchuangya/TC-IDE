@@ -309,6 +309,175 @@ pub fn describe_status(status: u16, body: &str) -> String {
     }
 }
 
+/// One event of a streamed reply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChatEvent {
+    /// Text to append to the answer.
+    Delta(String),
+    /// The request finished, with the HTTP status when it could be read.
+    Done(Option<u16>),
+    /// Something went wrong, already phrased for the user.
+    Error(String),
+}
+
+/// A running chat request.
+///
+/// The request runs in a child process so the interface never blocks, the key
+/// is passed through the environment rather than a command line, and the reply
+/// can be streamed into the panel chunk by chunk.
+pub struct ChatSession {
+    child: std::process::Child,
+    events: std::sync::mpsc::Receiver<ChatEvent>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    settings: AiSettings,
+    prompt: String,
+}
+
+impl ChatSession {
+    /// Start a streamed request; `body_path` must already hold the request body.
+    pub fn start(
+        settings: &AiSettings,
+        api_key: &str,
+        prompt: &str,
+        body_path: &std::path::Path,
+        timeout_seconds: u32,
+    ) -> Result<Self, AiError> {
+        use std::process::{Command, Stdio};
+        let url = chat_url(&settings.endpoint)?;
+        if settings.model.trim().is_empty() {
+            return Err(AiError::Configuration("AI model is required".into()));
+        }
+        let mut command = Command::new("curl");
+        command
+            .arg("-sS")
+            .arg("--no-buffer")
+            .arg("-N")
+            .arg("--max-time")
+            .arg(timeout_seconds.to_string())
+            .arg("-X")
+            .arg("POST")
+            .arg(&url)
+            .arg("-H")
+            .arg("Content-Type: application/json")
+            .arg("-H")
+            .arg(format!("Authorization: Bearer {api_key}"))
+            .arg("--data")
+            .arg(format!("@{}", body_path.display()))
+            .arg("-w")
+            .arg("\n%{http_code}")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|error| AiError::Configuration(format!("curl could not start: {error}")))?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (sender, events) = std::sync::mpsc::channel();
+        if let Some(stdout) = stdout {
+            let cancelled = std::sync::Arc::clone(&cancelled);
+            let sender = sender.clone();
+            std::thread::spawn(move || {
+                use std::io::{BufRead, BufReader};
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let Ok(line) = line else {
+                        break;
+                    };
+                    match parse_stream_line(&line) {
+                        StreamEvent::Delta(text) => {
+                            if sender.send(ChatEvent::Delta(text)).is_err() {
+                                return;
+                            }
+                        }
+                        StreamEvent::Done => {}
+                        StreamEvent::Other(value) => {
+                            // The status code arrives as the last plain line.
+                            let (_, status) = split_status(&format!("x\n{value}"));
+                            if let Some(status) = status {
+                                if sender.send(ChatEvent::Done(Some(status))).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        if let Some(stderr) = stderr {
+            let sender = sender.clone();
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut buffer = String::new();
+                let mut stderr = stderr;
+                let _ = stderr.read_to_string(&mut buffer);
+                let trimmed = buffer.trim();
+                if !trimmed.is_empty() {
+                    let _ = sender.send(ChatEvent::Error(trimmed.chars().take(300).collect()));
+                }
+            });
+        }
+        Ok(Self {
+            child,
+            events,
+            cancelled,
+            settings: settings.clone(),
+            prompt: prompt.to_string(),
+        })
+    }
+
+    pub fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    pub fn settings(&self) -> &AiSettings {
+        &self.settings
+    }
+
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Take the events that arrived since the last poll.
+    pub fn poll(&mut self) -> Vec<ChatEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = self.events.try_recv() {
+            events.push(event);
+        }
+        if events.is_empty() && !self.is_running() {
+            match self.child.try_wait() {
+                Ok(Some(status)) if !status.success() => {
+                    events.push(ChatEvent::Error(format!(
+                        "the AI request exited with {status}"
+                    )));
+                }
+                _ => {}
+            }
+        }
+        events
+    }
+
+    /// Stop the request; the panel keeps whatever text already arrived.
+    pub fn cancel(&mut self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for ChatSession {
+    fn drop(&mut self) {
+        if self.is_running() {
+            self.cancel();
+        }
+    }
+}
+
 /// Environment entries a child process needs for an AI request.
 pub fn child_environment() -> [&'static str; 1] {
     [API_KEY_ENV]
@@ -317,6 +486,7 @@ pub fn child_environment() -> [&'static str; 1] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lsp_core::executable_available;
 
     #[test]
     fn endpoints_are_validated_and_normalized() {
@@ -451,6 +621,106 @@ mod tests {
             json_string("{\"empty\":\"\"}", "empty").as_deref(),
             Some("")
         );
+    }
+
+    #[test]
+    fn a_streaming_request_is_driven_against_a_local_server() {
+        // A tiny HTTP server that answers with server sent events, so the client
+        // can be checked without any network access.
+        let script = r#"
+import http.server, json, sys, threading
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8")
+        assert "ping" in body or "hello" in body, body
+        assert self.headers.get("Authorization", "").startswith("Bearer "), "missing key"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        for chunk in ["Hel", "lo ", "there"]:
+            payload = json.dumps({"choices": [{"delta": {"content": chunk}}]})
+            self.wfile.write(("data: " + payload + "
+
+").encode("utf-8"))
+            self.wfile.flush()
+        self.wfile.write(b"data: [DONE]
+
+")
+        self.wfile.flush()
+
+    def log_message(self, *args):
+        pass
+
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+port = server.server_address[1]
+print(port, flush=True)
+server.serve_forever()
+"#;
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        if !executable_available(python) || !executable_available("curl") {
+            return;
+        }
+        let directory = std::env::temp_dir().join("tc-ide-ai-test");
+        let _ = std::fs::create_dir_all(&directory);
+        let script_path = directory.join("fake_server.py");
+        std::fs::write(&script_path, script).expect("write fake server");
+        let mut server = std::process::Command::new(python)
+            .arg(&script_path)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("start fake server");
+        let port = {
+            use std::io::{BufRead, BufReader};
+            let stdout = server.stdout.take().expect("stdout");
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            line.trim().to_string()
+        };
+        if port.is_empty() {
+            let _ = server.kill();
+            let _ = server.wait();
+            return;
+        }
+
+        let settings = AiSettings {
+            endpoint: format!("http://127.0.0.1:{port}/v1"),
+            model: "demo".into(),
+        };
+        let body_path = directory.join("body.json");
+        std::fs::write(&body_path, chat_body("demo", "ping", true)).expect("body");
+
+        let mut session =
+            ChatSession::start(&settings, "test-key", "ping", &body_path, 20).expect("start");
+        let mut answer = String::new();
+        let mut done = false;
+        for _ in 0..600 {
+            for event in session.poll() {
+                match event {
+                    ChatEvent::Delta(text) => answer.push_str(&text),
+                    ChatEvent::Done(_) => done = true,
+                    ChatEvent::Error(error) => panic!("unexpected error: {error}"),
+                }
+            }
+            if done && !answer.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(answer, "Hello there");
+        assert!(done, "the stream never reported completion");
+
+        // A cancelled request stops without hanging.
+        let mut cancelled =
+            ChatSession::start(&settings, "test-key", "hello", &body_path, 20).expect("start");
+        cancelled.cancel();
+        assert!(!cancelled.is_running());
+
+        let _ = server.kill();
+        let _ = server.wait();
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
