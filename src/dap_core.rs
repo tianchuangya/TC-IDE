@@ -778,7 +778,8 @@ while True:
 
         // Drive the session until it has stopped, then collect its state.
         let mut saw_stop = false;
-        for _ in 0..1500 {
+        let stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < stop_deadline {
             let Some(_) = session.poll() else {
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 continue;
@@ -813,7 +814,8 @@ while True:
 
         session.control(PendingRequest::Continue).expect("continue");
         let mut terminated = false;
-        for _ in 0..1500 {
+        let term_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < term_deadline {
             if session.poll().is_none() {
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 continue;

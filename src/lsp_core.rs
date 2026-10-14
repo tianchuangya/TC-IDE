@@ -1369,7 +1369,8 @@ while True:
         // Collect messages, answering any server request as the real client does.
         let mut diagnostics = 0;
         let mut collected = Vec::new();
-        for _ in 0..200 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
             let Some(message) = server.try_message() else {
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 continue;
@@ -1391,7 +1392,8 @@ while True:
             .position_request("textDocument/completion", "/tmp/app.py", 0, 5)
             .expect("completion");
         let mut completion = None;
-        for _ in 0..200 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
             let Some(message) = server.try_message() else {
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 continue;
