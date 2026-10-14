@@ -1256,7 +1256,7 @@ impl DirectEditorRenderer {
                     &target_base,
                     &self.ui_format,
                     &accent,
-                    "+  New        ↗  External",
+                    "+  New        ↗  Detach",
                     D2D_RECT_F {
                         left: terminal_right + 15.0 * scale,
                         top: output_top,

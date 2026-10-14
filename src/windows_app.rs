@@ -42,6 +42,7 @@ const CW_USEDEFAULT: i32 = i32::MIN;
 const IDC_ARROW: *const u16 = 32512_usize as *const u16;
 const SW_SHOW: i32 = 5;
 const WM_CHAR: Uint = 0x0102;
+const WM_CLOSE: Uint = 0x0010;
 const WM_COMMAND: Uint = 0x0111;
 const WM_DESTROY: Uint = 0x0002;
 const WM_DPICHANGED: Uint = 0x02e0;
@@ -177,6 +178,7 @@ struct WindowsAppState {
     terminal_velocity: f32,
     terminals: Vec<TerminalTab>,
     active_terminal: usize,
+    detached_terminal: Hwnd,
     status: String,
     started: Instant,
     last_frame: Instant,
@@ -378,6 +380,7 @@ impl WindowsAppState {
             terminal_velocity: 0.0,
             terminals: Vec::new(),
             active_terminal: 0,
+            detached_terminal: ptr::null_mut(),
             status: "DirectWrite / Direct2D editor ready".into(),
             started: Instant::now(),
             last_frame: Instant::now(),
@@ -1552,7 +1555,10 @@ extern "system" {
     ) -> Hwnd;
     fn DefWindowProcW(window: Hwnd, message: Uint, w_param: Wparam, l_param: Lparam) -> Lresult;
     fn DispatchMessageW(message: *const Msg) -> Lresult;
+    fn DestroyWindow(window: Hwnd) -> Bool;
+    fn DrawTextW(dc: Hdc, text: *const u16, count: i32, rect: *mut Rect, format: Uint) -> i32;
     fn EndPaint(window: Hwnd, paint: *const PaintStruct) -> Bool;
+    fn FillRect(dc: Hdc, rect: *const Rect, brush: Hbrush) -> i32;
     fn GetClientRect(window: Hwnd, area: *mut Rect) -> Bool;
     fn GetMessageW(message: *mut Msg, window: Hwnd, minimum: Uint, maximum: Uint) -> Bool;
     fn InvalidateRect(window: Hwnd, area: *const Rect, erase: Bool) -> Bool;
@@ -1561,10 +1567,21 @@ extern "system" {
     fn RegisterClassW(class: *const WindowClass) -> u16;
     fn ReleaseCapture() -> Bool;
     fn SetCapture(window: Hwnd) -> Hwnd;
+    fn SetForegroundWindow(window: Hwnd) -> Bool;
     fn SetTimer(window: Hwnd, event: usize, milliseconds: Uint, callback: *const c_void) -> usize;
     fn ShowWindow(window: Hwnd, command: i32) -> Bool;
     fn TranslateMessage(message: *const Msg) -> Bool;
     fn UpdateWindow(window: Hwnd) -> Bool;
+}
+
+#[link(name = "gdi32")]
+extern "system" {
+    fn CreateSolidBrush(color: Dword) -> Hbrush;
+    fn DeleteObject(object: *mut c_void) -> Bool;
+    fn GetStockObject(index: i32) -> *mut c_void;
+    fn SelectObject(dc: Hdc, object: *mut c_void) -> *mut c_void;
+    fn SetBkMode(dc: Hdc, mode: i32) -> i32;
+    fn SetTextColor(dc: Hdc, color: Dword) -> Dword;
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -2027,6 +2044,215 @@ fn handle_character(window: Hwnd, value: char) {
         }
     });
     invalidate(window);
+}
+
+unsafe fn draw_terminal_text(dc: Hdc, value: &str, x: i32, y: i32, right: i32, color: Dword) {
+    let wide = value.encode_utf16().collect::<Vec<_>>();
+    let mut area = Rect {
+        left: x,
+        top: y,
+        right,
+        bottom: y + 24,
+    };
+    unsafe {
+        SetTextColor(dc, color);
+        DrawTextW(dc, wide.as_ptr(), wide.len() as i32, &mut area, 0x00000100);
+    }
+}
+
+unsafe extern "system" fn detached_terminal_proc(
+    window: Hwnd,
+    message: Uint,
+    w_param: Wparam,
+    _l_param: Lparam,
+) -> Lresult {
+    match message {
+        WM_PAINT => {
+            let mut paint: PaintStruct = unsafe { std::mem::zeroed() };
+            let dc = unsafe { BeginPaint(window, &mut paint) };
+            let mut area: Rect = unsafe { std::mem::zeroed() };
+            unsafe { GetClientRect(window, &mut area) };
+            let brush = unsafe { CreateSolidBrush(0x001b1917) };
+            unsafe {
+                FillRect(dc, &area, brush);
+                DeleteObject(brush.cast());
+                SetBkMode(dc, 1);
+            }
+            let font = unsafe { GetStockObject(16) };
+            let previous = unsafe { SelectObject(dc, font) };
+            let (name, mut lines, input) = APP.with(|cell| {
+                let app = cell.borrow();
+                let Some(tab) = app.terminals.get(app.active_terminal) else {
+                    return ("Terminal".to_string(), Vec::new(), String::new());
+                };
+                let lines = tab
+                    .session
+                    .view
+                    .lock()
+                    .ok()
+                    .map(|view| {
+                        let mut values = view.lines.clone();
+                        if !view.current.is_empty() {
+                            values.push(view.current.clone());
+                        }
+                        values
+                    })
+                    .unwrap_or_default();
+                (tab.name.clone(), lines, tab.input.clone())
+            });
+            let visible = ((area.bottom - 94) / 22).max(1) as usize;
+            if lines.len() > visible {
+                lines.drain(..lines.len() - visible);
+            }
+            unsafe {
+                draw_terminal_text(dc, "TianChuangYa", 24, 16, area.right - 20, 0x00e6bc71);
+                draw_terminal_text(
+                    dc,
+                    &format!("TC-IDE · {name} · shared ConPTY session"),
+                    24,
+                    42,
+                    area.right - 20,
+                    0x009d9690,
+                );
+            }
+            for (index, line) in lines.iter().enumerate() {
+                unsafe {
+                    draw_terminal_text(
+                        dc,
+                        line,
+                        24,
+                        76 + index as i32 * 22,
+                        area.right - 20,
+                        0x00e8e8e8,
+                    )
+                };
+            }
+            unsafe {
+                draw_terminal_text(
+                    dc,
+                    &format!("> {input}▌"),
+                    24,
+                    area.bottom - 32,
+                    area.right - 20,
+                    0x00dfb56b,
+                );
+                SelectObject(dc, previous);
+                EndPaint(window, &paint);
+            }
+            0
+        }
+        WM_CHAR => {
+            if let Some(value) = char::from_u32(w_param as u32) {
+                APP.with(|cell| {
+                    let mut app = cell.borrow_mut();
+                    let active = app.active_terminal;
+                    if let Some(tab) = app.terminals.get_mut(active) {
+                        match value {
+                            '\r' | '\n' => {
+                                let _ = tab.session.write("\r");
+                                tab.input.clear();
+                            }
+                            '\u{8}' => {
+                                tab.input.pop();
+                                let _ = tab.session.write("\u{7f}");
+                            }
+                            ch if !ch.is_control() => {
+                                tab.input.push(ch);
+                                let _ = tab.session.write(&ch.to_string());
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+            }
+            invalidate(window);
+            0
+        }
+        WM_KEYDOWN => {
+            let sequence = match w_param as u32 {
+                VK_UP => Some("\u{1b}[A"),
+                VK_DOWN => Some("\u{1b}[B"),
+                VK_RIGHT => Some("\u{1b}[C"),
+                VK_LEFT => Some("\u{1b}[D"),
+                VK_HOME => Some("\u{1b}[H"),
+                VK_END => Some("\u{1b}[F"),
+                VK_DELETE => Some("\u{1b}[3~"),
+                VK_TAB => Some("\t"),
+                _ => None,
+            };
+            if let Some(sequence) = sequence {
+                APP.with(|cell| {
+                    let app = cell.borrow();
+                    if let Some(tab) = app.terminals.get(app.active_terminal) {
+                        let _ = tab.session.write(sequence);
+                    }
+                });
+            }
+            0
+        }
+        WM_TIMER | WM_SIZE => {
+            invalidate(window);
+            0
+        }
+        WM_CLOSE => {
+            unsafe { DestroyWindow(window) };
+            0
+        }
+        WM_DESTROY => {
+            APP.with(|cell| cell.borrow_mut().detached_terminal = ptr::null_mut());
+            0
+        }
+        _ => unsafe { DefWindowProcW(window, message, w_param, _l_param) },
+    }
+}
+
+fn open_detached_terminal() -> bool {
+    unsafe {
+        let existing = APP.with(|cell| cell.borrow().detached_terminal);
+        if !existing.is_null() {
+            SetForegroundWindow(existing);
+            return true;
+        }
+        APP.with(|cell| cell.borrow_mut().ensure_terminal());
+        let instance = GetModuleHandleW(ptr::null());
+        let class_name = wide("TC_IDE_DETACHED_TERMINAL");
+        let class = WindowClass {
+            style: CS_HREDRAW | CS_VREDRAW,
+            window_proc: Some(detached_terminal_proc),
+            class_extra: 0,
+            window_extra: 0,
+            instance,
+            icon: ptr::null_mut(),
+            cursor: LoadCursorW(ptr::null_mut(), IDC_ARROW),
+            background: ptr::null_mut(),
+            menu_name: ptr::null(),
+            class_name: class_name.as_ptr(),
+        };
+        RegisterClassW(&class);
+        let title = wide("TC-IDE — Detached ConPTY Terminal");
+        let window = CreateWindowExW(
+            0,
+            class_name.as_ptr(),
+            title.as_ptr(),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            1080,
+            680,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            instance,
+            ptr::null_mut(),
+        );
+        if window.is_null() {
+            return false;
+        }
+        APP.with(|cell| cell.borrow_mut().detached_terminal = window);
+        SetTimer(window, 2, 33, ptr::null());
+        ShowWindow(window, SW_SHOW);
+        UpdateWindow(window);
+        true
+    }
 }
 
 unsafe extern "system" fn window_proc(
@@ -2672,13 +2898,16 @@ unsafe extern "system" fn window_proc(
                     if local_y <= 30.0 * scale {
                         if x as f32 <= area.right as f32 - 82.0 * scale {
                             app.add_terminal();
-                        } else if platform::open_external_terminal(window, &app.project_root) {
-                            app.status = format!(
-                                "External Windows terminal opened at {}",
-                                app.project_root.display()
-                            );
                         } else {
-                            app.status = "Could not open Windows Terminal or PowerShell".into();
+                            drop(app);
+                            let opened = open_detached_terminal();
+                            APP.with(|cell| {
+                                cell.borrow_mut().status = if opened {
+                                    "Current ConPTY terminal detached into a native window".into()
+                                } else {
+                                    "Could not create the detached terminal window".into()
+                                };
+                            });
                         }
                     } else {
                         let index = ((local_y / scale - 34.0) / 30.0).floor() as usize;
