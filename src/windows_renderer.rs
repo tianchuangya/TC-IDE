@@ -1843,7 +1843,7 @@ impl DirectEditorRenderer {
                                 if scene.ai_field_focused == Some(index) {
                                     &selection
                                 } else {
-                                    &background
+                                    &bg
                                 },
                                 D2D_RECT_F {
                                     left: content_left,
@@ -1882,7 +1882,7 @@ impl DirectEditorRenderer {
                         Self::text(
                             &target_base,
                             &self.small_format,
-                            &background,
+                            &bg,
                             if scene.ui_chinese {
                                 "保存 API 配置"
                             } else {
