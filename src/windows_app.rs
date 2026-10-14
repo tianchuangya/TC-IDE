@@ -263,7 +263,6 @@ struct WindowsAppState {
         Option<std::sync::mpsc::Sender<(PathBuf, Vec<editor_core::ProjectSymbolOccurrence>)>>,
     index_result:
         Option<std::sync::mpsc::Receiver<(PathBuf, Vec<editor_core::ProjectSymbolOccurrence>)>>,
-    index_pending: Option<PathBuf>,
     runtime_cache: extension_core::RuntimeCache,
     pending_extension: Option<extension_core::ExtensionSource>,
     hovered_symbol: Option<editor_core::SymbolOccurrence>,
@@ -518,7 +517,6 @@ impl WindowsAppState {
             ai_last_report: String::new(),
             index_request: None,
             index_result: None,
-            index_pending: None,
             runtime_cache: load_runtime_cache(),
             pending_extension: None,
             hovered_symbol: None,
@@ -1595,7 +1593,6 @@ impl WindowsAppState {
         });
         self.index_request = Some(request);
         self.index_result = Some(receive);
-        self.index_pending = Some(root);
         self.status = "Indexing the project in the background".into();
     }
 
@@ -1611,7 +1608,6 @@ impl WindowsAppState {
         self.index_request = None;
         if root != self.project_root {
             // The project changed while the scan was running; drop the result.
-            self.index_pending = None;
             return;
         }
         let files = symbols
@@ -1620,7 +1616,6 @@ impl WindowsAppState {
             .collect::<HashSet<_>>()
             .len();
         self.project_symbols = symbols;
-        self.index_pending = None;
         self.status = format!("Indexed {files} files in the background");
     }
 
