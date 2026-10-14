@@ -1357,6 +1357,21 @@ impl WindowsAppState {
         }
     }
 
+    fn probe_extension_tool(&mut self, label: &str, command: &str) {
+        self.terminal_open = true;
+        self.ensure_terminal();
+        let index = 2.min(self.terminals.len().saturating_sub(1));
+        let executable = command.split_whitespace().next().unwrap_or(command);
+        let script = format!(
+            "if(Get-Command '{executable}' -ErrorAction SilentlyContinue){{Write-Host 'TC-IDE: {label} detected'; {command}}}else{{Write-Host 'TC-IDE: {label} is not installed or not on PATH'}}\r"
+        );
+        if let Some(tab) = self.terminals.get(index) {
+            let _ = tab.session.write(&script);
+            self.active_terminal = index;
+            self.status = format!("Checking {label} in the Output terminal");
+        }
+    }
+
     fn update_motion(&mut self) {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.04);
@@ -2512,6 +2527,25 @@ unsafe extern "system" fn window_proc(
                             } else if (240.0..290.0).contains(&local_y) {
                                 app.light_theme = true;
                                 app.status = "Light theme applied".into();
+                            }
+                        } else if matches!(app.extension_category, 2 | 3) {
+                            let local_y = (y as f32 - top) / scale;
+                            if (190.0..340.0).contains(&local_y) {
+                                let item = ((local_y - 190.0) / 50.0).floor() as usize;
+                                let (label, command) = if app.extension_category == 2 {
+                                    [
+                                        ("LLDB", "lldb --version"),
+                                        ("GDB", "gdb --version"),
+                                        ("debugpy", "python -m debugpy --version"),
+                                    ][item.min(2)]
+                                } else {
+                                    [
+                                        ("Biome", "biome --version"),
+                                        ("clang-format", "clang-format --version"),
+                                        ("Ruff", "ruff --version"),
+                                    ][item.min(2)]
+                                };
+                                app.probe_extension_tool(label, command);
                             }
                         } else if app.extension_category == 4 {
                             let content_left = left + 205.0 * scale;

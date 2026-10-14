@@ -1844,8 +1844,8 @@ impl DirectEditorRenderer {
             } else {
                 let detail = match scene.extension_category {
                     1 => "Dark and light semantic themes apply immediately.",
-                    2 => "Native LLDB / GDB / DAP adapters: not connected.",
-                    3 => "Biome / clang-format / Black / Ruff: not connected.",
+                    2 => "Native debugger adapters · click a tool to check the Windows runtime.",
+                    3 => "Native formatter adapters · click a tool to check the Windows runtime.",
                     _ => {
                         "OpenAI-compatible endpoint, model and session-only API key configuration."
                     }
@@ -1904,6 +1904,41 @@ impl DirectEditorRenderer {
                                     left: content_left + 16.0 * scale,
                                     top: row_top + 10.0 * scale,
                                     right: content_left + 300.0 * scale,
+                                    bottom: row_top + 36.0 * scale,
+                                },
+                            );
+                        }
+                    }
+                }
+                if matches!(scene.extension_category, 2 | 3) {
+                    let items = if scene.extension_category == 2 {
+                        ["LLDB", "GDB", "debugpy"]
+                    } else {
+                        ["Biome", "clang-format", "Ruff"]
+                    };
+                    for (index, label) in items.iter().enumerate() {
+                        let row_top = top + (190.0 + index as f32 * 50.0) * scale;
+                        unsafe {
+                            Self::rounded(
+                                &target_base,
+                                &raised,
+                                D2D_RECT_F {
+                                    left: content_left,
+                                    top: row_top,
+                                    right: content_left + 360.0 * scale,
+                                    bottom: row_top + 40.0 * scale,
+                                },
+                                8.0 * scale,
+                            );
+                            Self::text(
+                                &target_base,
+                                &self.small_format,
+                                &text,
+                                &format!("{label}    CHECK"),
+                                D2D_RECT_F {
+                                    left: content_left + 16.0 * scale,
+                                    top: row_top + 10.0 * scale,
+                                    right: content_left + 340.0 * scale,
                                     bottom: row_top + 36.0 * scale,
                                 },
                             );
