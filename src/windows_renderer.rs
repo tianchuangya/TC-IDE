@@ -55,6 +55,10 @@ pub struct WindowsScene<'a> {
     pub selected_language: usize,
     pub language_installed: &'a [bool],
     pub language_versions: &'a [usize],
+    pub ai_endpoint: &'a str,
+    pub ai_model: &'a str,
+    pub ai_key_present: bool,
+    pub ai_field_focused: Option<usize>,
     pub symbols: &'a [SymbolOccurrence],
     pub project_symbols: &'a [ProjectSymbolOccurrence],
     pub hovered_symbol: Option<&'a SymbolOccurrence>,
@@ -1711,6 +1715,95 @@ impl DirectEditorRenderer {
                         },
                     )
                 };
+                if scene.extension_category == 4 {
+                    for (index, (label, value)) in [
+                        ("ENDPOINT", scene.ai_endpoint),
+                        ("MODEL", scene.ai_model),
+                        (
+                            "API KEY (session only)",
+                            if scene.ai_key_present {
+                                "****************"
+                            } else {
+                                ""
+                            },
+                        ),
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        let label_top = top + (116.0 + index as f32 * 92.0) * scale;
+                        unsafe {
+                            Self::text(
+                                &target_base,
+                                &self.small_format,
+                                &muted,
+                                label,
+                                D2D_RECT_F {
+                                    left: content_left,
+                                    top: label_top,
+                                    right: content_left + 600.0 * scale,
+                                    bottom: label_top + 24.0 * scale,
+                                },
+                            );
+                            Self::rounded(
+                                &target_base,
+                                if scene.ai_field_focused == Some(index) {
+                                    &selection
+                                } else {
+                                    &background
+                                },
+                                D2D_RECT_F {
+                                    left: content_left,
+                                    top: label_top + 26.0 * scale,
+                                    right: content_left + 600.0 * scale,
+                                    bottom: label_top + 68.0 * scale,
+                                },
+                                7.0 * scale,
+                            );
+                            Self::text(
+                                &target_base,
+                                &self.small_format,
+                                &text,
+                                value,
+                                D2D_RECT_F {
+                                    left: content_left + 12.0 * scale,
+                                    top: label_top + 36.0 * scale,
+                                    right: content_left + 586.0 * scale,
+                                    bottom: label_top + 64.0 * scale,
+                                },
+                            );
+                        }
+                    }
+                    unsafe {
+                        Self::rounded(
+                            &target_base,
+                            &accent,
+                            D2D_RECT_F {
+                                left: content_left,
+                                top: top + 440.0 * scale,
+                                right: content_left + 210.0 * scale,
+                                bottom: top + 482.0 * scale,
+                            },
+                            8.0 * scale,
+                        );
+                        Self::text(
+                            &target_base,
+                            &self.small_format,
+                            &background,
+                            if scene.ui_chinese {
+                                "保存 API 配置"
+                            } else {
+                                "SAVE API SETTINGS"
+                            },
+                            D2D_RECT_F {
+                                left: content_left + 28.0 * scale,
+                                top: top + 451.0 * scale,
+                                right: content_left + 200.0 * scale,
+                                bottom: top + 478.0 * scale,
+                            },
+                        );
+                    }
+                }
             }
         }
         if let Some(kind) = scene.create_kind {

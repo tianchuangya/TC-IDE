@@ -138,6 +138,10 @@ struct WindowsAppState {
     selected_language: usize,
     language_installed: Vec<bool>,
     language_versions: Vec<usize>,
+    ai_endpoint: String,
+    ai_model: String,
+    ai_key: String,
+    ai_field_focused: Option<usize>,
     hovered_symbol: Option<editor_core::SymbolOccurrence>,
     expanded_comments: HashSet<usize>,
     editing_comment: Option<usize>,
@@ -260,6 +264,10 @@ impl WindowsAppState {
                         .min(2)
                 })
                 .collect(),
+            ai_endpoint: preferences.ai_endpoint,
+            ai_model: preferences.ai_model,
+            ai_key: String::new(),
+            ai_field_focused: None,
             hovered_symbol: None,
             expanded_comments: HashSet::new(),
             editing_comment: None,
@@ -839,6 +847,8 @@ impl WindowsAppState {
             background_offset_x: self.background_offset_x,
             background_offset_y: self.background_offset_y,
             background_zoom: self.background_zoom,
+            ai_endpoint: self.ai_endpoint.clone(),
+            ai_model: self.ai_model.clone(),
         });
     }
 
@@ -1685,6 +1695,10 @@ fn render_window(window: Hwnd) {
                 selected_language: app.selected_language,
                 language_installed: &app.language_installed,
                 language_versions: &app.language_versions,
+                ai_endpoint: &app.ai_endpoint,
+                ai_model: &app.ai_model,
+                ai_key_present: !app.ai_key.is_empty(),
+                ai_field_focused: app.ai_field_focused,
                 symbols: &symbols,
                 project_symbols: &app.project_symbols,
                 hovered_symbol: app.hovered_symbol.as_ref(),
@@ -1734,6 +1748,14 @@ fn handle_character(window: Hwnd, value: char) {
             if !value.is_control() {
                 app.workspace_search.push(value);
                 app.project_scroll = 0;
+            }
+        } else if let Some(field) = app.ai_field_focused {
+            if !value.is_control() {
+                match field {
+                    0 => app.ai_endpoint.push(value),
+                    1 => app.ai_model.push(value),
+                    _ => app.ai_key.push(value),
+                }
             }
         } else if app.terminal_open {
             let active = app.active_terminal;
@@ -1926,8 +1948,29 @@ unsafe extern "system" fn window_proc(
                     return;
                 }
                 if app.extensions_open {
+                    if let Some(field) = app.ai_field_focused {
+                        match w_param as u32 {
+                            0x1b | 0x0d => app.ai_field_focused = None,
+                            VK_BACK => match field {
+                                0 => {
+                                    app.ai_endpoint.pop();
+                                }
+                                1 => {
+                                    app.ai_model.pop();
+                                }
+                                _ => {
+                                    app.ai_key.pop();
+                                }
+                            },
+                            _ => return,
+                        }
+                        return;
+                    }
                     match w_param as u32 {
-                        0x1b => app.extensions_open = false,
+                        0x1b => {
+                            app.extensions_open = false;
+                            app.ai_field_focused = None;
+                        }
                         VK_LEFT => {
                             app.extension_category = app.extension_category.saturating_sub(1)
                         }
@@ -2189,6 +2232,35 @@ unsafe extern "system" fn window_proc(
                             } else if x as f32 >= left + 315.0 * scale {
                                 app.language_versions[language] =
                                     (app.language_versions[language] + 1) % 3;
+                            }
+                        } else if app.extension_category == 4 {
+                            let content_left = left + 205.0 * scale;
+                            for field in 0..3 {
+                                let field_top = top + (142.0 + field as f32 * 92.0) * scale;
+                                if x as f32 >= content_left
+                                    && x as f32 <= content_left + 600.0 * scale
+                                    && y as f32 >= field_top
+                                    && y as f32 <= field_top + 42.0 * scale
+                                {
+                                    app.ai_field_focused = Some(field);
+                                }
+                            }
+                            let save_top = top + 440.0 * scale;
+                            if x as f32 >= content_left
+                                && x as f32 <= content_left + 210.0 * scale
+                                && y as f32 >= save_top
+                                && y as f32 <= save_top + 42.0 * scale
+                            {
+                                if app.ai_endpoint.trim().is_empty()
+                                    || app.ai_model.trim().is_empty()
+                                {
+                                    app.status = "AI endpoint and model are required".into();
+                                } else {
+                                    app.save_preferences();
+                                    app.status =
+                                        "AI API saved; API key remains in memory for this session"
+                                            .into();
+                                }
                             }
                         }
                         app.save_preferences();

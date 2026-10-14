@@ -15,6 +15,8 @@ pub struct WindowsPreferences {
     pub background_offset_x: f32,
     pub background_offset_y: f32,
     pub background_zoom: f32,
+    pub ai_endpoint: String,
+    pub ai_model: String,
 }
 
 impl WindowsPreferences {
@@ -44,6 +46,8 @@ fn path() -> PathBuf {
 
 pub fn load() -> WindowsPreferences {
     let mut preferences = WindowsPreferences::default();
+    preferences.ai_endpoint = "https://api.openai.com/v1".into();
+    preferences.ai_model = "gpt-5.1".into();
     let Ok(content) = fs::read_to_string(path()) else {
         return preferences;
     };
@@ -73,6 +77,8 @@ pub fn load() -> WindowsPreferences {
             "background_offset_x" => preferences.background_offset_x = value.parse().unwrap_or(0.0),
             "background_offset_y" => preferences.background_offset_y = value.parse().unwrap_or(0.0),
             "background_zoom" => preferences.background_zoom = value.parse().unwrap_or(1.0),
+            "ai_endpoint" => preferences.ai_endpoint = value.to_string(),
+            "ai_model" => preferences.ai_model = value.to_string(),
             _ => {}
         }
     }
@@ -88,7 +94,7 @@ pub fn save(preferences: &WindowsPreferences) -> std::io::Result<()> {
     fs::write(
         path,
         format!(
-            "theme={}\nlanguage={}\ncode_zoom={}\nproject_language={}\nproject_environment={}\nlanguage_installed={}\nlanguage_versions={}\nbackground_path={}\nbackground_opacity={}\nbackground_offset_x={}\nbackground_offset_y={}\nbackground_zoom={}\n",
+            "theme={}\nlanguage={}\ncode_zoom={}\nproject_language={}\nproject_environment={}\nlanguage_installed={}\nlanguage_versions={}\nbackground_path={}\nbackground_opacity={}\nbackground_offset_x={}\nbackground_offset_y={}\nbackground_zoom={}\nai_endpoint={}\nai_model={}\n",
             if preferences.light_theme {
                 "light"
             } else {
@@ -123,6 +129,8 @@ pub fn save(preferences: &WindowsPreferences) -> std::io::Result<()> {
             preferences.background_offset_x,
             preferences.background_offset_y,
             preferences.background_zoom,
+            preferences.ai_endpoint.replace(['\n', '\r'], ""),
+            preferences.ai_model.replace(['\n', '\r'], ""),
         ),
     )
 }
