@@ -95,6 +95,10 @@ pub struct WindowsScene<'a> {
     pub background_zoom: f32,
     pub status: &'a str,
     pub terminal_lines: &'a [String],
+    /// Buffer line index of the first drawn terminal row.
+    pub terminal_first_line: usize,
+    /// Selected terminal range as `((line, column), (line, column))`.
+    pub terminal_selection: Option<((usize, usize), (usize, usize))>,
     pub terminal_names: &'a [String],
     pub active_terminal: usize,
     pub terminal_input: &'a str,
@@ -1351,14 +1355,42 @@ impl DirectEditorRenderer {
                     )
                 };
             }
-            for (index, value) in scene
-                .terminal_lines
-                .iter()
-                .rev()
-                .take(terminal_panel.visible_rows)
-                .rev()
-                .enumerate()
-            {
+            for (index, value) in scene.terminal_lines.iter().enumerate() {
+                let row_top = output_top + index as f32 * terminal_panel.row_height;
+                let line = scene.terminal_first_line + index;
+                if let Some(((start_line, start_column), (end_line, end_column))) =
+                    scene.terminal_selection
+                {
+                    if line >= start_line && line <= end_line {
+                        let from = if line == start_line {
+                            terminal_core::visual_cells(value, start_column)
+                        } else {
+                            0
+                        };
+                        let to = if line == end_line {
+                            terminal_core::visual_cells(value, end_column)
+                        } else {
+                            value.chars().count()
+                        };
+                        if to > from {
+                            let cell = self.code_cell * scale;
+                            unsafe {
+                                Self::rounded(
+                                    &target_base,
+                                    &selected_text,
+                                    D2D_RECT_F {
+                                        left: terminal_panel.body_left + from as f32 * cell,
+                                        top: row_top,
+                                        right: (terminal_panel.body_left + to as f32 * cell)
+                                            .min(terminal_panel.body_right),
+                                        bottom: row_top + terminal_panel.row_height,
+                                    },
+                                    3.0 * scale,
+                                )
+                            };
+                        }
+                    }
+                }
                 unsafe {
                     Self::text(
                         &target_base,
@@ -1367,9 +1399,9 @@ impl DirectEditorRenderer {
                         value,
                         D2D_RECT_F {
                             left: terminal_panel.body_left,
-                            top: output_top + index as f32 * terminal_panel.row_height,
+                            top: row_top,
                             right: terminal_panel.body_right,
-                            bottom: output_top + (index as f32 + 1.0) * terminal_panel.row_height,
+                            bottom: row_top + terminal_panel.row_height,
                         },
                     )
                 };

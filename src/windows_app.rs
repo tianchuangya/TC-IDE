@@ -263,6 +263,8 @@ struct WindowsAppState {
     terminal_motion: f32,
     terminal_velocity: f32,
     terminal_scroll: usize,
+    terminal_selection: Option<terminal_core::TerminalSelection>,
+    terminal_dragging: bool,
     terminals: Vec<TerminalTab>,
     active_terminal: usize,
     terminal_grid: terminal_core::GridSize,
@@ -472,6 +474,8 @@ impl WindowsAppState {
             terminal_motion: 0.0,
             terminal_velocity: 0.0,
             terminal_scroll: 0,
+            terminal_selection: None,
+            terminal_dragging: false,
             terminals: Vec::new(),
             active_terminal: 0,
             terminal_grid: terminal_core::GridSize {
@@ -1963,19 +1967,7 @@ fn render_window(window: Hwnd) {
         RENDERER.with(|renderer_cell| {
             let app = app_cell.borrow();
             let active_terminal = app.terminals.get(app.active_terminal);
-            let terminal_buffer = app
-                .terminals
-                .get(app.active_terminal)
-                .and_then(|tab| {
-                    tab.session.view.lock().ok().map(|view| {
-                        let mut lines = view.lines.clone();
-                        if !view.current.is_empty() {
-                            lines.push(view.current.clone());
-                        }
-                        lines
-                    })
-                })
-                .unwrap_or_default();
+            let terminal_buffer = terminal_buffer(&app);
             let panel = terminal_core::panel_metrics(
                 width as f32,
                 height as f32,
@@ -1988,6 +1980,10 @@ fn render_window(window: Hwnd) {
                 scroll: app.terminal_scroll,
             };
             let terminal_lines = terminal_core::visible_lines(&terminal_buffer, &viewport).to_vec();
+            let terminal_selection = app.terminal_selection.map(|selection| {
+                let (start, end) = selection.ordered();
+                ((start.line, start.column), (end.line, end.column))
+            });
             let terminal_names = app
                 .terminals
                 .iter()
@@ -2098,6 +2094,8 @@ fn render_window(window: Hwnd) {
                 background_zoom: app.background_zoom,
                 status: &app.status,
                 terminal_lines: &terminal_lines,
+                terminal_first_line: viewport.first_line(),
+                terminal_selection,
                 terminal_names: &terminal_names,
                 active_terminal: app.active_terminal,
                 terminal_input: active_terminal.map(|tab| tab.input.as_str()).unwrap_or(""),
@@ -2165,6 +2163,7 @@ fn handle_character(window: Hwnd, value: char) {
             }
         } else if app.terminal_open {
             app.terminal_scroll = 0;
+            app.terminal_selection = None;
             let active = app.active_terminal;
             let Some(tab) = app.terminals.get_mut(active) else {
                 return;
@@ -2262,6 +2261,76 @@ fn graph_search_rect(area: &Rect, scale: f32) -> Rect {
 
 fn inside(rect: &Rect, x: i32, y: i32) -> bool {
     x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+}
+
+/// Buffered output of the terminal the panel and the IDE share.
+fn terminal_buffer(app: &WindowsAppState) -> Vec<String> {
+    app.terminals
+        .get(app.active_terminal)
+        .and_then(|tab| {
+            tab.session.view.lock().ok().map(|view| {
+                let mut lines = view.lines.clone();
+                if !view.current.is_empty() {
+                    lines.push(view.current.clone());
+                }
+                lines
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Buffer position under a point inside the bottom terminal panel.
+fn terminal_point_at(
+    app: &WindowsAppState,
+    panel: &terminal_core::TerminalPanel,
+    scale: f32,
+    x: i32,
+    y: i32,
+    clamp: bool,
+) -> Option<terminal_core::TerminalPoint> {
+    let row = (y as f32 - panel.body_top) / panel.row_height.max(1.0);
+    let row = if row < 0.0 {
+        if clamp {
+            0.0
+        } else {
+            return None;
+        }
+    } else if row >= panel.visible_rows as f32 {
+        if clamp {
+            (panel.visible_rows - 1) as f32
+        } else {
+            return None;
+        }
+    } else {
+        row
+    };
+    let lines = terminal_buffer(app);
+    let viewport = terminal_core::TerminalViewport {
+        total_lines: lines.len(),
+        visible_rows: panel.visible_rows,
+        scroll: app.terminal_scroll,
+    };
+    let line = viewport.line_at_row(row.floor() as usize)?;
+    let cell_width = (terminal_core::code_cell_width(app.code_zoom) * scale).max(1.0);
+    let cells = ((x as f32 - panel.body_left) / cell_width).max(0.0) as usize;
+    let value = lines.get(line)?;
+    Some(terminal_core::TerminalPoint {
+        line,
+        column: terminal_core::column_for_cells(value, cells),
+    })
+}
+
+/// Copy the current bottom panel selection into the clipboard.
+fn copy_terminal_selection(window: Hwnd) -> bool {
+    let selection = APP.with(|cell| cell.borrow().terminal_selection);
+    let Some(selection) = selection else {
+        return false;
+    };
+    let lines = APP.with(|cell| terminal_buffer(&cell.borrow()));
+    let Some(text) = terminal_core::selected_text(&lines, &selection) else {
+        return false;
+    };
+    platform::write_clipboard(window, &text).is_ok()
 }
 
 fn handle_terminal_control(window: Hwnd, key: u32) -> bool {
@@ -3176,6 +3245,18 @@ unsafe extern "system" fn window_proc(
         WM_KEYDOWN => {
             if platform::control_pressed() {
                 let terminal_open = APP.with(|cell| cell.borrow().terminal_open);
+                if terminal_open
+                    && w_param as u32 == 0x43
+                    && platform::shift_pressed()
+                    && copy_terminal_selection(window)
+                {
+                    APP.with(|cell| {
+                        cell.borrow_mut().status =
+                            "Terminal selection copied; Ctrl+C still interrupts the shell".into()
+                    });
+                    invalidate(window);
+                    return 0;
+                }
                 if terminal_open && handle_terminal_control(window, w_param as u32) {
                     invalidate(window);
                     return 0;
@@ -3419,6 +3500,7 @@ unsafe extern "system" fn window_proc(
                     }
                 } else {
                     app.terminal_scroll = 0;
+                    app.terminal_selection = None;
                     let active = app.active_terminal;
                     let sequence = match w_param as u32 {
                         VK_UP => "\u{1b}[A",
@@ -3845,6 +3927,37 @@ unsafe extern "system" fn window_proc(
                     }
                 });
                 invalidate(window);
+            } else if y as f32 >= panel.body_top
+                && y as f32 <= panel.body_bottom
+                && x as f32 >= panel.body_left
+                && x as f32 <= panel.body_right
+            {
+                let started = APP.with(|cell| {
+                    let mut app = cell.borrow_mut();
+                    if !app.terminal_open {
+                        return false;
+                    }
+                    let point = terminal_point_at(&app, &panel, scale, x, y, false);
+                    match point {
+                        Some(point) => {
+                            app.terminal_selection =
+                                Some(terminal_core::TerminalSelection::new(point, point));
+                            app.terminal_dragging = true;
+                            app.status =
+                                "Terminal selection: drag to extend, Ctrl+Shift+C copies".into();
+                            true
+                        }
+                        None => {
+                            app.terminal_selection = None;
+                            false
+                        }
+                    }
+                });
+                if started {
+                    unsafe { SetCapture(window) };
+                }
+                invalidate(window);
+                return 0;
             } else if x as f32 <= (area.right as f32 * 0.19).max(220.0 * scale) {
                 if y as f32 >= 56.0 * scale && y as f32 <= 88.0 * scale {
                     APP.with(|cell| {
@@ -3992,6 +4105,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_MOUSEMOVE => {
             let dragging = APP.with(|cell| cell.borrow().dragging_selection);
+            let terminal_dragging = APP.with(|cell| cell.borrow().terminal_dragging);
             let x = (l_param as u16 as i16) as i32;
             let y = ((l_param >> 16) as u16 as i16) as i32;
             APP.with(|cell| {
@@ -3999,6 +4113,35 @@ unsafe extern "system" fn window_proc(
                 app.pointer_x = x;
                 app.pointer_y = y;
             });
+            if terminal_dragging && w_param & 1 != 0 {
+                let mut area = unsafe { std::mem::zeroed::<Rect>() };
+                unsafe { GetClientRect(window, &mut area) };
+                let scale = platform::dpi_for_window(window) as f32 / 96.0;
+                let changed = APP.with(|cell| {
+                    let mut app = cell.borrow_mut();
+                    let panel = terminal_core::panel_metrics(
+                        area.right as f32,
+                        area.bottom as f32,
+                        scale,
+                        app.terminal_motion,
+                    );
+                    let Some(point) = terminal_point_at(&app, &panel, scale, x, y, true) else {
+                        return false;
+                    };
+                    let Some(selection) = app.terminal_selection else {
+                        return false;
+                    };
+                    if selection.focus == point {
+                        return false;
+                    }
+                    app.terminal_selection = Some(selection.extended_to(point));
+                    true
+                });
+                if changed {
+                    invalidate(window);
+                }
+                return 0;
+            }
             if dragging && w_param & 1 != 0 {
                 if let Some(position) = editor_position_at(window, x, y) {
                     APP.with(|cell| cell.borrow_mut().set_caret(position, true));
@@ -4031,6 +4174,40 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_LBUTTONUP => {
+            let terminal_dragging = APP.with(|cell| {
+                let mut app = cell.borrow_mut();
+                let dragging = app.terminal_dragging;
+                app.terminal_dragging = false;
+                if app
+                    .terminal_selection
+                    .map(|selection| selection.is_empty())
+                    .unwrap_or(false)
+                {
+                    app.terminal_selection = None;
+                }
+                dragging
+            });
+            if terminal_dragging {
+                unsafe { ReleaseCapture() };
+                let count = APP.with(|cell| {
+                    let app = cell.borrow();
+                    app.terminal_selection
+                        .and_then(|selection| {
+                            terminal_core::selected_text(&terminal_buffer(&app), &selection)
+                        })
+                        .map(|text| text.chars().count())
+                        .unwrap_or(0)
+                });
+                APP.with(|cell| {
+                    cell.borrow_mut().status = if count > 0 {
+                        format!("Terminal selection: {count} characters · Ctrl+Shift+C copies")
+                    } else {
+                        "Terminal selection cleared".into()
+                    };
+                });
+                invalidate(window);
+                return 0;
+            }
             APP.with(|cell| cell.borrow_mut().dragging_selection = false);
             unsafe { ReleaseCapture() };
             0
