@@ -48,6 +48,13 @@
 - 偏好设置读取改走共享解析器。
 - 新增 `--render-frame <path>`：无需映射窗口即可渲染一帧到 PNG，用于本地与 CI 视觉检查。
 
+- 真实 LSP：`lsp_core` 客户端通过 stdio 管道驱动语言服务器（分帧、自动应答服务端请求、有序关闭），
+  Windows 侧接入补全、诊断（行内标记与状态栏）、F12 跳转定义与 Ctrl+I 悬停。
+- 文本缓冲升级为 piece table（`text_buffer`）：字符边界安全的插入/删除/替换、分组编辑、
+  按编辑的撤销/重做历史；打开、保存、格式化刷新、剪切与 LSP 同步都使用同一份文本。
+- 编辑器按可见窗口绘制（`Viewport` + `line_window`）：只取出并绘制屏幕上的行，新增编辑器滚动条，
+  滚轮在代码列滚动（Shift 为水平滚动），光标始终保持在视野内。
+
 ### 工程与 CI
 
 - CI 新增 `cargo fmt --check`、Linux 与 Windows 目标的 Clippy（`-D warnings`）、

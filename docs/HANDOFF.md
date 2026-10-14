@@ -161,12 +161,12 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 
 ### P1：编辑器达到可日常使用
 
-- [ ] 将文本缓冲从 `Vec<String>` 升级为适合大文件的 rope/piece table；保持 Unicode 字符边界正确。
+- [x] 将文本缓冲升级为适合大文件的 piece table（`text_buffer`）：Unicode 字符边界、分组编辑、按编辑的撤销/重做历史，编辑不再复制整个文档；Windows 编辑器已接入。
 - [ ] 接入 Tree-sitter 或等价增量解析，替换正则/启发式语义关系。
-- [ ] 接入真实 LSP：补全、诊断、跳转定义、引用、重命名、悬停文档。
+- [~] 接入真实 LSP：`lsp_core` 提供客户端（stdio 管道、分帧、自动应答服务端请求）与请求/响应解析；Windows 已接入补全、诊断（行标记与状态栏）、F12 跳转定义与 Ctrl+I 悬停；引用、重命名与诊断面板仍未接入。
 - [ ] 为 C/C++ 正确连接 clangd，为 Python 连接 basedpyright/pyright，为 Rust 连接 rust-analyzer；扩展安装状态必须与真实可执行文件状态一致。
 - [x] 加入文件脏状态、关闭未保存确认、多文件标签、最近项目和会话恢复。（Windows 已实现标签栏、脏标记、Ctrl+W、原生确认框与 session.conf 恢复；Linux 仍未实现）
-- [ ] 增加编辑器/项目树滚动条、代码大文件虚拟化和水平滚动。
+- [~] 编辑器滚动条、大文件虚拟化与水平滚动已完成（`Viewport` + `line_window`，渲染器只绘制可见行并裁剪代码列）；项目树滚动条仍未实现。
 
 ### P1：关系图可扩展性
 
@@ -225,9 +225,8 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 
 1. **Windows 实机验收**：按 `docs/REAL-MACHINE-CHECKLIST.md` 逐项确认，把结果写回本文件与
    `docs/KNOWN-ISSUES.md`。这是当前唯一无法由 CI 或 Linux 本地替代的部分。
-2. **LSP 传输层**：`lsp_core` 已有分帧与请求/解析，缺的是 stdio 传输与界面接入
-   （补全列表、诊断标记、跳转、引用、重命名、悬停）。
-3. **编辑器文本模型**：`Vec<String>` → rope/piece table，并补大文件虚拟化、滚动条、水平滚动。
+2. **LSP 剩余部分**：传输层与界面接入已完成（补全、诊断、F12 跳转、Ctrl+I 悬停、didOpen/didChange），仍缺重命名、引用列表与独立诊断面板。
+3. **编辑器剩余部分**：piece table、虚拟化、编辑器滚动条与水平滚动已完成；仍缺项目树滚动条。
 4. **Tree-sitter 或等价增量解析**：替换正则/启发式语义关系。
 5. **DAP 界面**：断点、调用栈、变量、继续/单步，复用 `workspace_core::debug_adapter_for`。
 6. **AI 聊天面板**：把终端里的回答搬进面板，加入会话历史与取消按钮。
@@ -275,6 +274,11 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 
 - 一个提交完成一个可验证的小功能，示例：`feat: ...`、`fix: ...`。
 - 推送前运行：
+
+Windows 独有的编辑逻辑也可以在 Linux 上直接跑一遍：`python3 tools/windows_editor_sim.py` 会把
+`windows_app.rs` 的编辑方法抽取到临时 crate，链接真实的 `text_buffer`/`editor_core` 并驱动插入、换行、
+退格、剪切、撤销/重做、Unicode 与补全序列。它是排查工具（真正的测试在 Windows 测试模块与 CI 中），
+本轮正是靠它定位到「剪切没有关闭编辑组导致无法撤销」的真实缺陷。
 
 ```bash
 cargo fmt --check
@@ -333,7 +337,7 @@ cargo run --release
 
 ```bash
 cargo fmt --check
-cargo test --all-targets                                   # 115 项共享内核与后端测试
+cargo test --all-targets                                   # 135 项共享内核与后端测试
 cargo clippy --all-targets -- -D warnings                   # 共享内核 + Linux 后端
 cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo check --all-targets --target x86_64-pc-windows-msvc    # Windows 类型检查
