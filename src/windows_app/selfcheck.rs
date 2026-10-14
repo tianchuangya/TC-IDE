@@ -384,6 +384,38 @@ pub(super) fn self_check() -> i32 {
         &mut failures,
     );
 
+    // The palettes of both themes have to be readable, which is the check the
+    // settings panel cannot do by eye.
+    let mut unreadable = Vec::new();
+    for (name, palette) in [
+        ("dark", theme_core::Palette::dark()),
+        ("light", theme_core::Palette::light()),
+    ] {
+        for (role, colour) in palette.all() {
+            let background = if matches!(role, "panel") {
+                palette.background
+            } else {
+                palette.panel
+            };
+            let minimum = if matches!(role, "accent" | "border" | "selection" | "shadow") {
+                theme_core::DECORATION_MINIMUM
+            } else {
+                theme_core::TEXT_MINIMUM
+            };
+            if matches!(role, "background" | "panel" | "raised" | "shadow") {
+                continue;
+            }
+            if !theme_core::meets_contrast(colour, background, minimum) {
+                unreadable.push(format!("{name}/{role}"));
+            }
+        }
+    }
+    report(
+        "both themes stay readable",
+        unreadable.is_empty(),
+        &mut failures,
+    );
+
     // Motion: the row shift slides a list and the edit highlights stay bounded.
     let mut rows = motion_core::RowShift::new();
     rows.place("a", 0.0, 1.0 / 60.0);

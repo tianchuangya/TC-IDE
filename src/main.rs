@@ -16,6 +16,7 @@ mod session_core;
 mod syntax_core;
 mod terminal_core;
 mod text_buffer;
+mod theme_core;
 #[cfg(target_os = "windows")]
 mod windows_app;
 mod workspace_core;

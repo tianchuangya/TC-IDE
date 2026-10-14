@@ -22,6 +22,7 @@ use crate::session_core;
 use crate::syntax_core;
 use crate::terminal_core;
 use crate::text_buffer;
+use crate::theme_core;
 use crate::workspace_core;
 
 #[path = "windows_platform.rs"]

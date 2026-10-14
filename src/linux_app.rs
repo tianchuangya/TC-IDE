@@ -21,6 +21,7 @@ use crate::motion_core;
 use crate::package_motion;
 use crate::session_core;
 use crate::syntax_core;
+use crate::theme_core;
 use crate::workspace_core;
 
 type Window = c_ulong;
@@ -646,49 +647,32 @@ impl App {
         (self.s(28) + self.code_zoom * self.s(2)).max(self.s(20))
     }
 
+    /// The theme colour behind an X11 pixel, for the code that blends colours.
+    ///
+    /// The palette is shared with the Windows renderer, so this reads it back
+    /// instead of repeating the numbers.
     fn color_rgb(&self, color: c_ulong) -> (f64, f64, f64) {
-        let hex = if self.light_theme {
-            if color == self.colors.bg {
-                0xf5f5f7
-            } else if color == self.colors.panel {
-                0xffffff
-            } else if color == self.colors.panel_2 {
-                0xf2f2f7
-            } else if color == self.colors.line {
-                0xd1d1d6
-            } else if color == self.colors.muted {
-                0x6e6e73
-            } else if color == self.colors.text {
-                0x3a3a3c
-            } else if color == self.colors.bright {
-                0x1d1d1f
-            } else if color == self.colors.accent {
-                0x007aff
-            } else if color == self.colors.shadow {
-                0xc7c7cc
-            } else {
-                0xdbeafe
-            }
-        } else if color == self.colors.bg {
-            0x000000
+        let palette = theme_core::Palette::for_scheme(self.light_theme);
+        let hex = if color == self.colors.bg {
+            palette.background
         } else if color == self.colors.panel {
-            0x1c1c1e
+            palette.panel
         } else if color == self.colors.panel_2 {
-            0x2c2c2e
+            palette.raised
         } else if color == self.colors.line {
-            0x38383a
+            palette.border
         } else if color == self.colors.muted {
-            0x8e8e93
+            palette.muted
         } else if color == self.colors.text {
-            0xd1d1d6
+            palette.text
         } else if color == self.colors.bright {
-            0xf5f5f7
+            palette.bright
         } else if color == self.colors.accent {
-            0x0a84ff
+            palette.accent
         } else if color == self.colors.shadow {
-            0x050506
+            palette.shadow
         } else {
-            0x193451
+            palette.selection
         };
         (
             ((hex >> 16) & 255) as f64 / 255.0,
@@ -7164,30 +7148,22 @@ pub fn run() {
         let visual = XDefaultVisual(display, screen);
         let cairo_surface = cairo_xlib_surface_create(display, canvas, visual, width, height);
         let cairo = cairo_create(cairo_surface);
-        let dark_colors = Palette {
-            bg: color(display, map, "#000000"),
-            panel: color(display, map, "#1c1c1e"),
-            panel_2: color(display, map, "#2c2c2e"),
-            line: color(display, map, "#38383a"),
-            muted: color(display, map, "#8e8e93"),
-            text: color(display, map, "#d1d1d6"),
-            bright: color(display, map, "#f5f5f7"),
-            accent: color(display, map, "#0a84ff"),
-            project: color(display, map, "#193451"),
-            shadow: color(display, map, "#050506"),
+        // The palette is shared with the Windows backend, so the themes stay one
+        // design and its contrast is asserted in theme_core's tests.
+        let share = |palette: theme_core::Palette| Palette {
+            bg: color(display, map, &theme_core::Palette::hex(palette.background)),
+            panel: color(display, map, &theme_core::Palette::hex(palette.panel)),
+            panel_2: color(display, map, &theme_core::Palette::hex(palette.raised)),
+            line: color(display, map, &theme_core::Palette::hex(palette.border)),
+            muted: color(display, map, &theme_core::Palette::hex(palette.muted)),
+            text: color(display, map, &theme_core::Palette::hex(palette.text)),
+            bright: color(display, map, &theme_core::Palette::hex(palette.bright)),
+            accent: color(display, map, &theme_core::Palette::hex(palette.accent)),
+            project: color(display, map, &theme_core::Palette::hex(palette.selection)),
+            shadow: color(display, map, &theme_core::Palette::hex(palette.shadow)),
         };
-        let light_colors = Palette {
-            bg: color(display, map, "#f5f5f7"),
-            panel: color(display, map, "#ffffff"),
-            panel_2: color(display, map, "#f2f2f7"),
-            line: color(display, map, "#d1d1d6"),
-            muted: color(display, map, "#6e6e73"),
-            text: color(display, map, "#3a3a3c"),
-            bright: color(display, map, "#1d1d1f"),
-            accent: color(display, map, "#007aff"),
-            project: color(display, map, "#dbeafe"),
-            shadow: color(display, map, "#c7c7cc"),
-        };
+        let dark_colors = share(theme_core::Palette::dark());
+        let light_colors = share(theme_core::Palette::light());
         let preferences = load_ui_preferences();
         let colors = if preferences.light_theme {
             light_colors

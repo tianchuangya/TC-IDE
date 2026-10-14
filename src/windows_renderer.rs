@@ -31,6 +31,7 @@ use crate::editor_core::{self, SymbolOccurrence, TokenKind};
 use crate::graph_core;
 use crate::package_motion;
 use crate::terminal_core;
+use crate::theme_core;
 
 pub struct WindowsScene<'a> {
     pub file_name: &'a str,
@@ -2221,28 +2222,22 @@ impl DirectEditorRenderer {
         let target = unsafe { self.ensure_target(window, width, height) }?;
         let target_base: ID2D1RenderTarget = target.cast()?;
         unsafe { self.sync_background(&target_base, scene.background_path) };
-        let colors = if scene.light_theme {
-            [
-                0xf5f5f7, 0xffffff, 0xf2f2f7, 0xd1d1d6, 0x3a3a3c, 0x6e6e73, 0x1d1d1f,
-            ]
-        } else {
-            [
-                0x000000, 0x1c1c1e, 0x2c2c2e, 0x38383a, 0xd1d1d6, 0x8e8e93, 0xf5f5f7,
-            ]
-        };
-        let bg = unsafe { Self::brush(&target_base, colors[0], 1.0) }?;
-        let panel = unsafe { Self::brush(&target_base, colors[1], 1.0) }?;
-        let raised = unsafe { Self::brush(&target_base, colors[2], 1.0) }?;
-        let line = unsafe { Self::brush(&target_base, colors[3], 1.0) }?;
-        let text = unsafe { Self::brush(&target_base, colors[4], 1.0) }?;
-        let muted = unsafe { Self::brush(&target_base, colors[5], 1.0) }?;
-        let bright = unsafe { Self::brush(&target_base, colors[6], 1.0) }?;
-        let accent = unsafe { Self::brush(&target_base, 0x0a84ff, 1.0) }?;
-        let selection = unsafe { Self::brush(&target_base, 0x193451, 1.0) }?;
-        let selected_text = unsafe { Self::brush(&target_base, 0x0a84ff, 0.46) }?;
-        let keyword = unsafe { Self::brush(&target_base, 0x64d2ff, 1.0) }?;
-        let literal = unsafe { Self::brush(&target_base, 0xff9f0a, 1.0) }?;
-        let comment = unsafe { Self::brush(&target_base, 0x8e8e93, 1.0) }?;
+        // One palette for both backends; the unit tests in theme_core hold it to
+        // the contrast the interface needs.
+        let palette = theme_core::Palette::for_scheme(scene.light_theme);
+        let bg = unsafe { Self::brush(&target_base, palette.background, 1.0) }?;
+        let panel = unsafe { Self::brush(&target_base, palette.panel, 1.0) }?;
+        let raised = unsafe { Self::brush(&target_base, palette.raised, 1.0) }?;
+        let line = unsafe { Self::brush(&target_base, palette.border, 1.0) }?;
+        let text = unsafe { Self::brush(&target_base, palette.text, 1.0) }?;
+        let muted = unsafe { Self::brush(&target_base, palette.muted, 1.0) }?;
+        let bright = unsafe { Self::brush(&target_base, palette.bright, 1.0) }?;
+        let accent = unsafe { Self::brush(&target_base, palette.accent, 1.0) }?;
+        let selection = unsafe { Self::brush(&target_base, palette.selection, 1.0) }?;
+        let selected_text = unsafe { Self::brush(&target_base, palette.selected_text, 0.46) }?;
+        let keyword = unsafe { Self::brush(&target_base, palette.keyword, 1.0) }?;
+        let literal = unsafe { Self::brush(&target_base, palette.literal, 1.0) }?;
+        let comment = unsafe { Self::brush(&target_base, palette.comment, 1.0) }?;
         let width = width as f32;
         let height = height as f32;
         let scale = self.dpi / 96.0;
