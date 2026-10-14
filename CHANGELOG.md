@@ -81,6 +81,11 @@
   （Windows 扩展页与 Linux 扩展面板都会显示 `LSP/格式化/调试` 的 ok 或 missing）。
 - 问题面板可用 Tab 在「全部 / 警告及以上 / 仅错误」之间过滤，行槽标记同步跟随。
 
+- 共享动效模型（`motion_core`）：阻尼弹簧、收敛判定、浮层与抽屉两套手感参数、缓动与悬停逼近，
+  两个后端统一使用，动画手感不再因平台而异。
+- 新增平台边界守卫测试：共享核心不得出现 Win32/X11/Cocoa 类型、句柄、原始 FFI 与 `unsafe`，
+  并检查共享模块都在 `main.rs` 中声明、平台模块仍在 `cfg(target_os)` 之后。
+
 ### 工程与 CI
 
 - CI 新增 `cargo fmt --check`、Linux 与 Windows 目标的 Clippy（`-D warnings`）、

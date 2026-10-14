@@ -206,9 +206,9 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 ### P2：macOS 与共享架构
 
 - [ ] `macos_app.rs` 目前远落后于 Windows/Linux；实现 Cocoa 原生窗口、CoreText/Metal、NSPasteboard、NSOpenPanel、PTY 和 NSWorkspace。
-- [ ] 将工作区、设置、项目创建、终端会话描述、打包任务和动画模型逐步移入共享模块。
+- [~] 共享模型下沉：工作区（`workspace_core`）、设置、项目模板、会话（`session_core`）、终端（`terminal_core`）、关系图（`graph_core`）、AI/扩展/LSP/DAP 与动画模型（`motion_core`）都已下沉；**仍待下沉的是 `windows_app.rs` 中的打包命令拼装与偏好设置持久化细节**。
 - [ ] 把 `windows_app.rs` 拆为事件/编辑器/工作区/扩展/打包/终端窗口模块；把绘制按场景区域拆分。
-- [ ] 保持平台模块只调用本平台 API，共享核心禁止出现 Win32/X11/Cocoa 类型。
+- [x] 平台边界：`tests/platform_boundary.rs` 会拒绝共享核心里的平台导入、窗口句柄、原始 FFI 类型与 `unsafe` 块，检查每个共享核心都在 `main.rs` 中声明（防止守卫漏掉新模块），并断言三个平台模块仍处于 `cfg(target_os)` 之后。
 
 ### P2：自动化与发布前门槛
 
@@ -338,7 +338,7 @@ cargo run --release
 
 ```bash
 cargo fmt --check
-cargo test --all-targets                                   # 160 项共享内核与后端测试
+cargo test --all-targets                                   # 167 项共享内核测试 + 4 项平台边界测试
 cargo clippy --all-targets -- -D warnings                   # 共享内核 + Linux 后端
 cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo check --all-targets --target x86_64-pc-windows-msvc    # Windows 类型检查
