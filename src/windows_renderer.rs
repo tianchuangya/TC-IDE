@@ -69,6 +69,9 @@ pub struct WindowsScene<'a> {
     pub ai_endpoint: &'a str,
     pub ai_model: &'a str,
     pub ai_key_present: bool,
+    pub ai_prompt: &'a str,
+    pub ai_prompt_focused: bool,
+    pub ai_cache_summary: &'a str,
     pub ai_field_focused: Option<usize>,
     pub symbols: &'a [SymbolOccurrence],
     pub hovered_symbol: Option<&'a SymbolOccurrence>,
@@ -2221,6 +2224,115 @@ impl DirectEditorRenderer {
                                 top: top + 451.0 * scale,
                                 right: content_left + 200.0 * scale,
                                 bottom: top + 478.0 * scale,
+                            },
+                        );
+                    }
+                    // Prompt plus the connection test and streamed send actions.
+                    let prompt_top = top + 500.0 * scale;
+                    unsafe {
+                        Self::text(
+                            &target_base,
+                            &self.small_format,
+                            &muted,
+                            if scene.ui_chinese {
+                                "提问（回车发送，终端里 Ctrl+C 取消）"
+                            } else {
+                                "PROMPT (enter sends, Ctrl+C in the terminal cancels)"
+                            },
+                            D2D_RECT_F {
+                                left: content_left,
+                                top: prompt_top,
+                                right: content_left + 600.0 * scale,
+                                bottom: prompt_top + 24.0 * scale,
+                            },
+                        );
+                        Self::rounded(
+                            &target_base,
+                            if scene.ai_prompt_focused {
+                                &selection
+                            } else {
+                                &bg
+                            },
+                            D2D_RECT_F {
+                                left: content_left,
+                                top: prompt_top + 26.0 * scale,
+                                right: content_left + 600.0 * scale,
+                                bottom: prompt_top + 68.0 * scale,
+                            },
+                            7.0 * scale,
+                        );
+                        Self::text(
+                            &target_base,
+                            &self.small_format,
+                            &text,
+                            scene.ai_prompt,
+                            D2D_RECT_F {
+                                left: content_left + 12.0 * scale,
+                                top: prompt_top + 36.0 * scale,
+                                right: content_left + 586.0 * scale,
+                                bottom: prompt_top + 64.0 * scale,
+                            },
+                        );
+                        Self::rounded(
+                            &target_base,
+                            &accent,
+                            D2D_RECT_F {
+                                left: content_left,
+                                top: prompt_top + 78.0 * scale,
+                                right: content_left + 210.0 * scale,
+                                bottom: prompt_top + 120.0 * scale,
+                            },
+                            8.0 * scale,
+                        );
+                        Self::text(
+                            &target_base,
+                            &self.small_format,
+                            &bg,
+                            if scene.ui_chinese { "发送" } else { "SEND" },
+                            D2D_RECT_F {
+                                left: content_left + 28.0 * scale,
+                                top: prompt_top + 89.0 * scale,
+                                right: content_left + 200.0 * scale,
+                                bottom: prompt_top + 116.0 * scale,
+                            },
+                        );
+                        Self::rounded(
+                            &target_base,
+                            &raised,
+                            D2D_RECT_F {
+                                left: content_left + 226.0 * scale,
+                                top: prompt_top + 78.0 * scale,
+                                right: content_left + 466.0 * scale,
+                                bottom: prompt_top + 120.0 * scale,
+                            },
+                            8.0 * scale,
+                        );
+                        Self::text(
+                            &target_base,
+                            &self.small_format,
+                            &bright,
+                            if scene.ui_chinese {
+                                "测试连接"
+                            } else {
+                                "TEST CONNECTION"
+                            },
+                            D2D_RECT_F {
+                                left: content_left + 254.0 * scale,
+                                top: prompt_top + 89.0 * scale,
+                                right: content_left + 460.0 * scale,
+                                bottom: prompt_top + 116.0 * scale,
+                            },
+                        );
+                        Self::text(
+                            &target_base,
+                            &self.small_format,
+                            &muted,
+                            scene.ai_cache_summary,
+                            D2D_RECT_F {
+                                left: content_left,
+                                top: prompt_top + 130.0 * scale,
+                                right: content_left + 600.0 * scale,
+                                bottom: prompt_top + 156.0 * scale,
                             },
                         );
                     }

@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use std::ptr;
 use std::time::Instant;
 
+use crate::ai_core;
 use crate::editor_core;
+use crate::extension_core;
 use crate::graph_core;
 use crate::session_core;
 use crate::terminal_core;
@@ -252,6 +254,12 @@ struct WindowsAppState {
     ai_model: String,
     ai_key: String,
     ai_field_focused: Option<usize>,
+    ai_prompt: String,
+    ai_prompt_focused: bool,
+    ai_terminal: Option<usize>,
+    ai_last_report: String,
+    runtime_cache: extension_core::RuntimeCache,
+    pending_extension: Option<extension_core::ExtensionSource>,
     hovered_symbol: Option<editor_core::SymbolOccurrence>,
     expanded_comments: HashSet<usize>,
     editing_comment: Option<usize>,
@@ -496,6 +504,12 @@ impl WindowsAppState {
             ai_model: preferences.ai_model,
             ai_key: String::new(),
             ai_field_focused: None,
+            ai_prompt: String::new(),
+            ai_prompt_focused: false,
+            ai_terminal: None,
+            ai_last_report: String::new(),
+            runtime_cache: load_runtime_cache(),
+            pending_extension: None,
             hovered_symbol: None,
             expanded_comments: HashSet::new(),
             editing_comment: None,
@@ -1618,6 +1632,295 @@ impl WindowsAppState {
         }
     }
 
+    /// Settings the AI page currently shows.
+    fn ai_settings(&self) -> ai_core::AiSettings {
+        ai_core::AiSettings {
+            endpoint: self.ai_endpoint.clone(),
+            model: self.ai_model.clone(),
+        }
+    }
+
+    /// Terminal that runs AI requests, spawned with the key in its environment.
+    ///
+    /// The key never appears in a command line or a log; only the child process
+    /// environment carries it, and it stays in memory for this session.
+    fn ensure_ai_terminal(&mut self) -> Option<usize> {
+        if let Some(index) = self.ai_terminal {
+            if index < self.terminals.len() {
+                return Some(index);
+            }
+        }
+        let grid = self.terminal_grid;
+        let mut extra = Vec::new();
+        if !self.ai_key.is_empty() {
+            extra.push((ai_core::API_KEY_ENV.to_string(), self.ai_key.clone()));
+        }
+        let cwd = self.project_root.clone();
+        match unsafe { ConPtySession::spawn_with_env(&cwd, grid.columns, grid.rows, &extra) } {
+            Ok(session) => {
+                self.terminals.push(TerminalTab {
+                    name: "AI".into(),
+                    session,
+                    input: String::new(),
+                });
+                self.ai_terminal = Some(self.terminals.len() - 1);
+                self.active_terminal = self.terminals.len() - 1;
+                self.terminal_open = true;
+                self.ai_terminal
+            }
+            Err(error) => {
+                self.status = format!("AI terminal could not start: {error}");
+                None
+            }
+        }
+    }
+
+    /// Write a request body to the project cache and return its path.
+    fn write_ai_body(&self, body: &str) -> Option<PathBuf> {
+        let directory = self.project_root.join(".tc-ide-ai");
+        fs::create_dir_all(&directory).ok()?;
+        let path = directory.join("request.json");
+        fs::write(&path, body).ok()?;
+        Some(path)
+    }
+
+    /// Run one AI request in the visible terminal.
+    fn run_ai_request(&mut self, prompt: &str, stream: bool) {
+        if self.ai_key.is_empty() {
+            self.status = "AI API key is required for this session".into();
+            return;
+        }
+        let settings = self.ai_settings();
+        let shell = if cfg!(windows) {
+            ai_core::Shell::Windows
+        } else {
+            ai_core::Shell::Unix
+        };
+        let body = if prompt.is_empty() {
+            ai_core::connection_test_body(&settings.model)
+        } else {
+            ai_core::chat_body(&settings.model, prompt, stream)
+        };
+        let Some(path) = self.write_ai_body(&body) else {
+            self.status = "Could not write the AI request body".into();
+            return;
+        };
+        let command = match ai_core::chat_command(
+            &settings,
+            &path.to_string_lossy(),
+            stream,
+            ai_core::DEFAULT_TIMEOUT_SECONDS,
+            shell,
+        ) {
+            Ok(command) => command,
+            Err(error) => {
+                self.status = error.message();
+                return;
+            }
+        };
+        let Some(index) = self.ensure_ai_terminal() else {
+            return;
+        };
+        if let Some(tab) = self.terminals.get(index) {
+            let _ = tab.session.write(&format!(
+                "{command}
+"
+            ));
+            self.active_terminal = index;
+            self.ai_last_report.clear();
+            self.status = if prompt.is_empty() {
+                "Testing the AI connection in the AI terminal".into()
+            } else {
+                "AI request running in the AI terminal (Ctrl+C cancels)".into()
+            };
+        }
+    }
+
+    /// Watch the AI terminal for the status code curl reports, and explain it.
+    fn poll_ai_terminal(&mut self) {
+        let Some(index) = self.ai_terminal else {
+            return;
+        };
+        let Some(tab) = self.terminals.get(index) else {
+            return;
+        };
+        let Ok(view) = tab.session.view.lock() else {
+            return;
+        };
+        let mut report = None;
+        for line in view.lines.iter().rev().take(6) {
+            let (_, status) = ai_core::split_status(line);
+            if let Some(status) = status {
+                report = Some((status, line.clone()));
+                break;
+            }
+        }
+        drop(view);
+        let Some((status, line)) = report else {
+            return;
+        };
+        if self.ai_last_report == line {
+            return;
+        }
+        self.ai_last_report = line;
+        if status < 400 {
+            self.status = format!("AI request completed (HTTP {status})");
+            return;
+        }
+        let body = self
+            .terminals
+            .get(index)
+            .and_then(|tab| {
+                tab.session.view.lock().ok().map(|view| {
+                    view.lines.join(
+                        "
+",
+                    )
+                })
+            })
+            .unwrap_or_default();
+        self.status = ai_core::describe_status(status, &body);
+    }
+
+    /// Record an install once the terminal shows the matching checksum.
+    fn confirm_pending_extension(&mut self) {
+        let Some(source) = self.pending_extension.clone() else {
+            return;
+        };
+        let Some(index) = self
+            .terminals
+            .iter()
+            .position(|tab| tab.name == "Output")
+            .or_else(|| self.terminals.len().checked_sub(1))
+        else {
+            return;
+        };
+        let output = self
+            .terminals
+            .get(index)
+            .and_then(|tab| {
+                tab.session.view.lock().ok().map(|view| {
+                    view.lines.join(
+                        "
+",
+                    )
+                })
+            })
+            .unwrap_or_default();
+        let Some(digest) = extension_core::checksum_from_output(&output) else {
+            return;
+        };
+        if !extension_core::verify_checksum(&digest, &source.sha256) {
+            self.status = format!(
+                "{} failed checksum verification; the download was not installed",
+                source.name
+            );
+            self.pending_extension = None;
+            return;
+        }
+        let root = extension_cache_root();
+        let shell = if cfg!(windows) {
+            extension_core::Shell::Windows
+        } else {
+            extension_core::Shell::Unix
+        };
+        let directory = extension_core::install_plan(&root.to_string_lossy(), &source, shell)
+            .map(|plan| plan.directory)
+            .unwrap_or_default();
+        self.runtime_cache.record(extension_core::CacheEntry {
+            id: source.id.clone(),
+            version: source.version.clone(),
+            sha256: digest,
+            bytes: source.bytes,
+            directory,
+        });
+        save_runtime_cache(&self.runtime_cache);
+        self.pending_extension = None;
+        self.status = format!(
+            "{} {} verified and recorded in the runtime cache",
+            source.name, source.version
+        );
+    }
+
+    /// Catalog the project ships, when the user provides one.
+    ///
+    /// Real downloads need a real url and checksum, so the catalog is data the
+    /// user supplies at `<project>/.tc-ide-catalog.conf` instead of a list this
+    /// repository would have to invent.
+    fn project_catalog(&self) -> Result<Vec<extension_core::ExtensionSource>, String> {
+        let path = self.project_root.join(".tc-ide-catalog.conf");
+        let content = fs::read_to_string(&path).map_err(|_| {
+            format!(
+                "No extension catalog at {}; add one to install for real",
+                path.display()
+            )
+        })?;
+        extension_core::parse_catalog(&content)
+    }
+
+    /// Install the catalog entry for a language, when the project has one.
+    fn install_language_extension(&mut self, language: &str) {
+        let catalog = match self.project_catalog() {
+            Ok(catalog) => catalog,
+            Err(message) => {
+                self.status = message;
+                return;
+            }
+        };
+        let wanted = language.to_ascii_lowercase();
+        let Some(source) = catalog.into_iter().find(|source| {
+            source.name.to_ascii_lowercase() == wanted
+                || source.id.to_ascii_lowercase().contains(&wanted)
+        }) else {
+            self.status = format!("No catalog entry matches {language}");
+            return;
+        };
+        self.run_extension_install(&source);
+    }
+
+    /// Install an extension by planning the real download and unpack steps.
+    fn run_extension_install(&mut self, source: &extension_core::ExtensionSource) {
+        let shell = if cfg!(windows) {
+            extension_core::Shell::Windows
+        } else {
+            extension_core::Shell::Unix
+        };
+        let root = extension_cache_root();
+        let plan = match extension_core::install_plan(&root.to_string_lossy(), source, shell) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        if let Some(entry) = self.runtime_cache.reuse(&source.id, &source.version) {
+            self.status = format!(
+                "{} {} is already cached in {}",
+                source.name, entry.version, entry.directory
+            );
+            return;
+        }
+        self.terminal_open = true;
+        self.ensure_terminal();
+        let Some(index) = self.terminals.len().checked_sub(1) else {
+            return;
+        };
+        if let Some(tab) = self.terminals.get(index) {
+            for command in &plan.commands {
+                let _ = tab.session.write(&format!(
+                    "{command}
+"
+                ));
+            }
+            self.active_terminal = index;
+            self.pending_extension = Some(source.clone());
+            self.status = format!(
+                "Installing {} {} into {}",
+                source.name, source.version, plan.directory
+            );
+        }
+    }
+
     fn probe_extension_tool(&mut self, label: &str, command: &str) {
         self.terminal_open = true;
         self.ensure_terminal();
@@ -2160,6 +2463,11 @@ fn render_window(window: Hwnd) {
                 .map(|document| document.title())
                 .collect::<Vec<_>>();
             let active_tab = app.session.active();
+            let ai_cache_summary = format!(
+                "runtime cache: {} entries · {}",
+                app.runtime_cache.entries().len(),
+                extension_core::format_bytes(app.runtime_cache.total_bytes())
+            );
             let graph_first_index = graph.clamped_scroll(app.graph_scroll, graph_rows);
             let graph_nodes = graph.visible(app.graph_scroll, graph_rows).to_vec();
             let graph_summary = graph.footer(app.graph_scroll, graph_rows);
@@ -2236,6 +2544,9 @@ fn render_window(window: Hwnd) {
                 ai_endpoint: &app.ai_endpoint,
                 ai_model: &app.ai_model,
                 ai_key_present: !app.ai_key.is_empty(),
+                ai_prompt: &app.ai_prompt,
+                ai_prompt_focused: app.ai_prompt_focused,
+                ai_cache_summary: &ai_cache_summary,
                 ai_field_focused: app.ai_field_focused,
                 symbols: &symbols,
                 hovered_symbol: app.hovered_symbol.as_ref(),
@@ -2314,6 +2625,10 @@ fn handle_character(window: Hwnd, value: char) {
         } else if app.font_search_focused {
             if !value.is_control() {
                 app.font_search.push(value);
+            }
+        } else if app.ai_prompt_focused {
+            if !value.is_control() {
+                app.ai_prompt.push(value);
             }
         } else if let Some(field) = app.ai_field_focused {
             if !value.is_control() {
@@ -2580,7 +2895,36 @@ fn confirm_discard(window: Hwnd, name: &str) -> bool {
     answer == IDYES
 }
 
-/// Where the session (open documents, project, recent projects) is stored.
+/// User level runtime cache for extensions and runtimes.
+fn extension_cache_root() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("TC-IDE")
+        .join("runtimes")
+}
+
+/// Manifest path of the runtime cache.
+fn runtime_cache_path() -> PathBuf {
+    extension_cache_root().join("cache.conf")
+}
+
+fn load_runtime_cache() -> extension_core::RuntimeCache {
+    match fs::read_to_string(runtime_cache_path()) {
+        Ok(content) => extension_core::RuntimeCache::parse(&content),
+        Err(_) => extension_core::RuntimeCache::default(),
+    }
+}
+
+fn save_runtime_cache(cache: &extension_core::RuntimeCache) {
+    let path = runtime_cache_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, cache.serialize());
+}
+
+/// Where the session (open documents, project, recent projects) is stored./// Where the session (open documents, project, recent projects) is stored.
 fn session_path() -> PathBuf {
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
@@ -4039,8 +4383,17 @@ unsafe extern "system" fn window_proc(
                                 {
                                     app.selected_language = language;
                                     if x as f32 >= left + 445.0 * scale {
+                                        let name =
+                                            WindowsAppState::EXTENSION_LANGUAGES[language].to_string();
                                         app.language_installed[language] =
                                             !app.language_installed[language];
+                                        if app.project_root.join(".tc-ide-catalog.conf").is_file() {
+                                            app.install_language_extension(&name);
+                                        } else {
+                                            app.status = format!(
+                                                "{name} marked as wanted; add .tc-ide-catalog.conf to the project to download it for real"
+                                            );
+                                        }
                                     } else if x as f32 >= left + 315.0 * scale {
                                         app.language_versions[language] =
                                             (app.language_versions[language] + 1) % 3;
@@ -4086,6 +4439,33 @@ unsafe extern "system" fn window_proc(
                                 {
                                     app.ai_field_focused = Some(field);
                                 }
+                            }
+                            let prompt_top = top + 500.0 * scale;
+                            if x as f32 >= content_left
+                                && x as f32 <= content_left + 600.0 * scale
+                                && y as f32 >= prompt_top + 26.0 * scale
+                                && y as f32 <= prompt_top + 68.0 * scale
+                            {
+                                app.ai_prompt_focused = true;
+                                app.ai_field_focused = None;
+                                return;
+                            }
+                            if y as f32 >= prompt_top + 78.0 * scale
+                                && y as f32 <= prompt_top + 120.0 * scale
+                            {
+                                if x as f32 >= content_left
+                                    && x as f32 <= content_left + 210.0 * scale
+                                {
+                                    let prompt = app.ai_prompt.clone();
+                                    app.ai_prompt_focused = false;
+                                    app.run_ai_request(&prompt, true);
+                                } else if x as f32 >= content_left + 226.0 * scale
+                                    && x as f32 <= content_left + 466.0 * scale
+                                {
+                                    app.ai_prompt_focused = false;
+                                    app.run_ai_request("", false);
+                                }
+                                return;
                             }
                             let save_top = top + 440.0 * scale;
                             if x as f32 >= content_left
@@ -4631,6 +5011,11 @@ unsafe extern "system" fn window_proc(
                 let _ = platform::open_in_explorer(window, &path);
             }
             sync_terminal_grid(window);
+            APP.with(|cell| {
+                let mut app = cell.borrow_mut();
+                app.poll_ai_terminal();
+                app.confirm_pending_extension();
+            });
             invalidate(window);
             0
         }

@@ -16,7 +16,7 @@ use windows::Win32::System::Threading::{
     PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
 };
 
-use crate::terminal_core::{TerminalParser, TerminalView};
+use crate::terminal_core::{environment_block, TerminalParser, TerminalView};
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
@@ -31,6 +31,17 @@ pub struct ConPtySession {
 
 impl ConPtySession {
     pub unsafe fn spawn(cwd: &Path, columns: i16, rows: i16) -> Result<Self> {
+        unsafe { Self::spawn_with_env(cwd, columns, rows, &[]) }
+    }
+
+    /// Spawn a session whose shell also sees `extra` environment entries. The
+    /// values never appear on a command line, so secrets stay out of logs.
+    pub unsafe fn spawn_with_env(
+        cwd: &Path,
+        columns: i16,
+        rows: i16,
+        extra: &[(String, String)],
+    ) -> Result<Self> {
         let mut pseudo_input_read = HANDLE::default();
         let mut input_write = HANDLE::default();
         let mut output_read = HANDLE::default();
@@ -87,6 +98,17 @@ impl ConPtySession {
         let mut command = wide("powershell.exe -NoLogo");
         let cwd = wide(&cwd.to_string_lossy());
         let mut process_info = PROCESS_INFORMATION::default();
+        let mut environment = Vec::new();
+        if !extra.is_empty() {
+            let mut entries = std::env::vars().collect::<Vec<_>>();
+            entries.extend(extra.iter().cloned());
+            environment = environment_block(&entries);
+        }
+        let environment_pointer = if environment.is_empty() {
+            None
+        } else {
+            Some(environment.as_ptr().cast::<c_void>())
+        };
         let process_result = unsafe {
             CreateProcessW(
                 PCWSTR::null(),
@@ -95,7 +117,7 @@ impl ConPtySession {
                 None,
                 false,
                 EXTENDED_STARTUPINFO_PRESENT,
-                None,
+                environment_pointer,
                 PCWSTR(cwd.as_ptr()),
                 &startup.StartupInfo,
                 &mut process_info,

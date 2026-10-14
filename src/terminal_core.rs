@@ -337,7 +337,35 @@ pub fn selected_text(lines: &[String], selection: &TerminalSelection) -> Option<
     }
 }
 
-/// Output lines a session keeps before dropping the oldest ones.
+/// Environment block of a Windows child process: `KEY=VALUE` entries, sorted
+/// case insensitively and terminated by an extra NUL, as `CreateProcessW` wants.
+pub fn environment_block(entries: &[(String, String)]) -> Vec<u16> {
+    let mut sorted = entries.to_vec();
+    sorted.sort_by(|left, right| {
+        left.0
+            .to_ascii_uppercase()
+            .cmp(&right.0.to_ascii_uppercase())
+    });
+    sorted.dedup_by(|left, right| left.0.eq_ignore_ascii_case(&right.0));
+    let mut block = Vec::new();
+    for (key, value) in sorted {
+        if key.is_empty() || key.contains('=') || key.contains('\0') {
+            continue;
+        }
+        for unit in key.encode_utf16() {
+            block.push(unit);
+        }
+        block.push('=' as u16);
+        for unit in value.encode_utf16() {
+            block.push(unit);
+        }
+        block.push(0);
+    }
+    block.push(0);
+    block
+}
+
+/// Output lines a session keeps before dropping the oldest ones./// Output lines a session keeps before dropping the oldest ones.
 pub const MAX_SCROLLBACK_LINES: usize = 800;
 
 /// Incremental terminal scrollback shared by every backend.
@@ -683,6 +711,25 @@ mod tests {
         assert_eq!(code_cell_width(0), 8.9);
         assert_eq!(code_cell_width(-5), code_cell_width(-2));
         assert_eq!(code_cell_width(20), code_cell_width(8));
+    }
+
+    #[test]
+    fn environment_blocks_are_sorted_and_double_terminated() {
+        let block = environment_block(&[
+            ("Path".into(), "C:\\bin".into()),
+            ("TC_IDE_AI_KEY".into(), "secret".into()),
+            ("path".into(), "ignored".into()),
+            ("BAD=KEY".into(), "x".into()),
+            (String::new(), "y".into()),
+        ]);
+        assert_eq!(*block.last().unwrap(), 0);
+        assert_eq!(block[block.len() - 2], 0);
+        let text = String::from_utf16_lossy(&block);
+        let entries = text
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, ["Path=C:\\bin", "TC_IDE_AI_KEY=secret"]);
     }
 
     #[test]
