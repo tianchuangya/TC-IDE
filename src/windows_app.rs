@@ -116,6 +116,14 @@ struct TextPosition {
 }
 
 /// Buffer of a document that is open but not active.
+/// Language server request the UI is waiting for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LspRequest {
+    Completion,
+    Hover,
+    Definition,
+}
+
 struct StoredBuffer {
     lines: Vec<String>,
     file_name: String,
@@ -259,6 +267,14 @@ struct WindowsAppState {
     ai_prompt_focused: bool,
     ai_terminal: Option<usize>,
     ai_last_report: String,
+    language_server: Option<lsp_core::LanguageServer>,
+    lsp_diagnostics: Vec<lsp_core::Diagnostic>,
+    lsp_pending: Vec<(u64, LspRequest)>,
+    lsp_completions: Vec<String>,
+    lsp_hover: Option<(usize, usize, String)>,
+    lsp_last_change: Option<Instant>,
+    lsp_dirty: bool,
+    lsp_completion_asked: Option<Instant>,
     index_request:
         Option<std::sync::mpsc::Sender<(PathBuf, Vec<editor_core::ProjectSymbolOccurrence>)>>,
     index_result:
@@ -515,6 +531,14 @@ impl WindowsAppState {
             ai_prompt_focused: false,
             ai_terminal: None,
             ai_last_report: String::new(),
+            language_server: None,
+            lsp_diagnostics: Vec::new(),
+            lsp_pending: Vec::new(),
+            lsp_completions: Vec::new(),
+            lsp_hover: None,
+            lsp_last_change: None,
+            lsp_dirty: false,
+            lsp_completion_asked: None,
             index_request: None,
             index_result: None,
             runtime_cache: load_runtime_cache(),
@@ -652,6 +676,9 @@ impl WindowsAppState {
         self.stash_active_buffer();
         self.session.activate(index);
         self.load_document(index);
+        self.lsp_diagnostics.clear();
+        self.lsp_completions.clear();
+        self.ensure_language_server();
         self.status = format!("Active document: {}", self.file_name);
         true
     }
@@ -759,6 +786,7 @@ impl WindowsAppState {
     }
 
     fn record_undo(&mut self) {
+        self.lsp_dirty = true;
         self.undo_stack.push(self.snapshot());
         if self.undo_stack.len() > 200 {
             self.undo_stack.remove(0);
@@ -854,6 +882,9 @@ impl WindowsAppState {
     }
 
     fn completions(&self) -> Vec<String> {
+        if !self.lsp_completions.is_empty() {
+            return self.lsp_completions.clone();
+        }
         editor_core::completions(
             &self.file_name,
             &self.lines[self.caret_line],
@@ -1079,6 +1110,7 @@ impl WindowsAppState {
                 self.request_project_index();
                 self.session.remember_project(&self.project_root.clone());
                 save_session(&self.session);
+                self.ensure_language_server();
                 self.status = format!(
                     "Opened {}  ·  {}",
                     path.display(),
@@ -1224,7 +1256,8 @@ impl WindowsAppState {
             self.project_entry_paths,
             self.project_entry_is_dir,
         ) = Self::scan_project(&self.project_root, &self.collapsed_directories);
-        self.project_symbols = Self::index_project(&self.project_root);
+        self.shutdown_language_server();
+        self.request_project_index();
         self.file_path = None;
         self.file_name = "Select a file".into();
         self.lines = vec!["// Choose a source file from the project tree".into()];
@@ -1575,6 +1608,252 @@ impl WindowsAppState {
             self.package_open = false;
             self.status = "Packaging started in the Build terminal".into();
         }
+    }
+
+    /// Document text the language server should index.
+    fn document_text(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    /// Start the language server for the active file, when it is installed.
+    fn ensure_language_server(&mut self) {
+        let path = self
+            .file_path
+            .clone()
+            .or_else(|| Some(self.project_root.join(&self.file_name)));
+        let Some(path) = path else {
+            return;
+        };
+        let name = self.file_name.clone();
+        let Some((spec, installed)) = lsp_core::server_status(&name) else {
+            self.lsp_diagnostics.clear();
+            self.shutdown_language_server();
+            return;
+        };
+        if !installed {
+            self.lsp_diagnostics.clear();
+            self.shutdown_language_server();
+            self.status = format!(
+                "{} is not installed; using the built-in symbol index for {}",
+                spec.program, name
+            );
+            return;
+        }
+        let already_running = self
+            .language_server
+            .as_mut()
+            .map(|server| server.is_running() && server.spec().program == spec.program)
+            .unwrap_or(false);
+        if already_running {
+            let path_text = path.to_string_lossy().into_owned();
+            let text = self.document_text();
+            if let Some(server) = self.language_server.as_mut() {
+                let _ = server.change_document(&path_text, &text);
+            }
+            self.lsp_last_change = Some(Instant::now());
+            return;
+        }
+        self.shutdown_language_server();
+        let root = self.project_root.clone();
+        match lsp_core::LanguageServer::start(&spec, &root) {
+            Ok(mut server) => {
+                if server.initialize().is_err() || server.notify_initialized().is_err() {
+                    self.status = format!("{} did not answer initialize", spec.program);
+                    return;
+                }
+                if let Err(error) =
+                    server.open_document(&path.to_string_lossy(), &self.document_text())
+                {
+                    self.status = error;
+                    return;
+                }
+                self.language_server = Some(server);
+                self.lsp_pending.clear();
+                self.lsp_completions.clear();
+                self.lsp_hover = None;
+                self.status = format!("{} started for {}", spec.program, name);
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn shutdown_language_server(&mut self) {
+        if let Some(server) = self.language_server.as_mut() {
+            if let Some(path) = self.file_path.clone() {
+                let _ = server.close_document(&path.to_string_lossy());
+            }
+        }
+        self.language_server = None;
+        self.lsp_pending.clear();
+        self.lsp_completions.clear();
+    }
+
+    /// Tell the server about an edit, coalescing rapid typing.
+    fn notify_language_server(&mut self) {
+        let Some(path) = self
+            .file_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let text = self.document_text();
+        let running = self
+            .language_server
+            .as_mut()
+            .map(|server| server.is_running())
+            .unwrap_or(false);
+        if !running {
+            return;
+        }
+        if let Some(server) = self.language_server.as_mut() {
+            let _ = server.change_document(&path, &text);
+        }
+        self.lsp_last_change = Some(Instant::now());
+        self.lsp_pending
+            .retain(|(_, request)| *request != LspRequest::Hover);
+    }
+
+    /// Ask the server for completion, hover or definition at the caret.
+    fn request_language_feature(&mut self, request: LspRequest) {
+        let Some(server) = self.language_server.as_mut() else {
+            return;
+        };
+        let Some(path) = self
+            .file_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let line = self.caret_line as u32;
+        let character = self.caret_column as u32;
+        let method = match request {
+            LspRequest::Completion => "textDocument/completion",
+            LspRequest::Hover => "textDocument/hover",
+            LspRequest::Definition => "textDocument/definition",
+        };
+        match server.position_request(method, &path, line, character) {
+            Ok(id) => self.lsp_pending.push((id, request)),
+            Err(error) => self.status = error,
+        }
+    }
+
+    /// Collect whatever the language server has sent since the last tick.
+    ///
+    /// The client is taken out of the state for the duration so the collected
+    /// diagnostics and pending requests can be updated without fighting the
+    /// borrow checker.
+    fn poll_language_server(&mut self) {
+        let Some(mut server) = self.language_server.take() else {
+            return;
+        };
+        if !server.is_running() {
+            let name = server.spec().program.clone();
+            let errors = server.stderr_lines();
+            self.lsp_pending.clear();
+            self.status = match errors.first() {
+                Some(line) => format!("{name} stopped: {line}"),
+                None => format!("{name} stopped"),
+            };
+            return;
+        }
+        let file_name = self.file_name.clone();
+        let mut diagnostics_changed = false;
+        while let Some(message) = server.try_message() {
+            if server.answer_automatically(&message) {
+                continue;
+            }
+            if let Some(method) = lsp_core::message_method(&message) {
+                if method == "textDocument/publishDiagnostics" {
+                    self.lsp_diagnostics = lsp_core::parse_diagnostics(&message)
+                        .into_iter()
+                        .filter(|diagnostic| diagnostic.path.ends_with(&file_name))
+                        .collect();
+                    diagnostics_changed = true;
+                }
+                continue;
+            }
+            let Some(id) = lsp_core::message_id(&message) else {
+                continue;
+            };
+            let Some(position) = self
+                .lsp_pending
+                .iter()
+                .position(|(candidate, _)| *candidate == id)
+            else {
+                continue;
+            };
+            let (_, request) = self.lsp_pending.remove(position);
+            match request {
+                LspRequest::Completion => {
+                    self.lsp_completions = lsp_core::parse_completions(&message)
+                        .into_iter()
+                        .map(|(label, detail)| {
+                            if detail.is_empty() {
+                                label
+                            } else {
+                                format!("{label}  {detail}")
+                            }
+                        })
+                        .collect();
+                }
+                LspRequest::Hover => {
+                    if let Some(text) = lsp_core::parse_hover(&message) {
+                        self.lsp_hover = Some((self.caret_line, self.caret_column, text));
+                    }
+                }
+                LspRequest::Definition => {
+                    if let Some((path, line, column)) =
+                        lsp_core::parse_locations(&message).into_iter().next()
+                    {
+                        let target = PathBuf::from(path);
+                        if target.is_file() {
+                            self.open_file(target);
+                            self.caret_line = line as usize;
+                            self.caret_column = column as usize;
+                            self.clamp_caret();
+                            self.status = "Jumped to the definition reported by the server".into();
+                        }
+                    }
+                }
+            }
+        }
+        self.language_server = Some(server);
+        if diagnostics_changed {
+            let errors = self
+                .lsp_diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.severity == lsp_core::DiagnosticSeverity::Error)
+                .count();
+            let warnings = self
+                .lsp_diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.severity == lsp_core::DiagnosticSeverity::Warning)
+                .count();
+            self.status = match (errors, warnings) {
+                (0, 0) => "Language server reports no problems".into(),
+                (0, warnings) => format!("{warnings} warning(s) from the language server"),
+                (errors, 0) => format!("{errors} error(s) from the language server"),
+                (errors, warnings) => {
+                    format!("{errors} error(s) and {warnings} warning(s) from the language server")
+                }
+            };
+        }
+    }
+
+    /// Diagnostics grouped by line, for the gutter markers.
+    fn diagnostic_lines(&self) -> Vec<(usize, bool)> {
+        let mut lines: Vec<(usize, bool)> = Vec::new();
+        for diagnostic in &self.lsp_diagnostics {
+            let is_error = diagnostic.severity == lsp_core::DiagnosticSeverity::Error;
+            let line = diagnostic.line as usize;
+            match lines.iter_mut().find(|entry| entry.0 == line) {
+                Some(entry) => entry.1 = entry.1 || is_error,
+                None => lines.push((line, is_error)),
+            }
+        }
+        lines
     }
 
     /// Start indexing the project on a background thread.
@@ -2691,6 +2970,11 @@ fn render_window(window: Hwnd) {
                 app.runtime_cache.entries().len(),
                 extension_core::format_bytes(app.runtime_cache.total_bytes())
             );
+            let diagnostic_lines = app.diagnostic_lines();
+            let status_line = match &app.lsp_hover {
+                Some((_, _, text)) => text.lines().next().unwrap_or("").to_string(),
+                None => app.status.clone(),
+            };
             let graph_first_index = graph.clamped_scroll(app.graph_scroll, graph_rows);
             let graph_nodes = graph.visible(app.graph_scroll, graph_rows).to_vec();
             let graph_summary = graph.footer(app.graph_scroll, graph_rows);
@@ -2801,7 +3085,8 @@ fn render_window(window: Hwnd) {
                 background_offset_x: app.background_offset_x,
                 background_offset_y: app.background_offset_y,
                 background_zoom: app.background_zoom,
-                status: &app.status,
+                status: &status_line,
+                diagnostic_lines: &diagnostic_lines,
                 terminal_lines: &terminal_lines,
                 terminal_first_line: viewport.first_line(),
                 terminal_selection,
@@ -4072,6 +4357,14 @@ unsafe extern "system" fn window_proc(
                         invalidate(window);
                         return 0;
                     }
+                    0x49 => {
+                        APP.with(|cell| {
+                            cell.borrow_mut()
+                                .request_language_feature(LspRequest::Hover)
+                        });
+                        invalidate(window);
+                        return 0;
+                    }
                     0x57 => {
                         // Ctrl+W closes the active document.
                         APP.with(|cell| {
@@ -4089,6 +4382,14 @@ unsafe extern "system" fn window_proc(
                     perform_command(window, command);
                     return 0;
                 }
+            }
+            if w_param as u32 == 0x7b {
+                APP.with(|cell| {
+                    cell.borrow_mut()
+                        .request_language_feature(LspRequest::Definition)
+                });
+                invalidate(window);
+                return 0;
             }
             APP.with(|cell| {
                 let mut app = cell.borrow_mut();
@@ -5258,6 +5559,27 @@ unsafe extern "system" fn window_proc(
                 app.poll_ai_terminal();
                 app.confirm_pending_extension();
                 app.poll_project_index();
+                app.poll_language_server();
+                // Coalesce edits: tell the server after typing pauses.
+                if app.lsp_dirty
+                    && app
+                        .lsp_last_change
+                        .map(|started| started.elapsed().as_millis() > 220)
+                        .unwrap_or(true)
+                {
+                    app.lsp_dirty = false;
+                    app.lsp_completions.clear();
+                    app.notify_language_server();
+                }
+                if app.language_server.is_some()
+                    && app
+                        .lsp_completion_asked
+                        .map(|asked| asked.elapsed().as_millis() > 400)
+                        .unwrap_or(true)
+                {
+                    app.lsp_completion_asked = Some(Instant::now());
+                    app.request_language_feature(LspRequest::Completion);
+                }
             });
             invalidate(window);
             0
@@ -5465,6 +5787,27 @@ pub fn self_check() -> i32 {
     report(
         "formatter selection",
         workspace_core::format_command("Rust", "src/main.rs").is_some(),
+        &mut failures,
+    );
+    let mut reader = lsp_core::FrameReader::new();
+    let framed = lsp_core::encode_message("{\"id\":7}");
+    let bytes = framed.as_bytes();
+    let split = bytes.len() - 2;
+    let mut frames = reader.push(&bytes[..split]);
+    frames.extend(reader.push(&bytes[split..]));
+    report("LSP byte framing", frames == ["{\"id\":7}"], &mut failures);
+    report(
+        "LSP client request answering",
+        lsp_core::automatic_reply(
+            "{\"id\":2,\"method\":\"workspace/configuration\",\"params\":{\"items\":[{}]}}",
+        )
+        .map(|reply| reply.contains("[null]"))
+        .unwrap_or(false),
+        &mut failures,
+    );
+    report(
+        "language id mapping",
+        lsp_core::language_id("app.py") == "python",
         &mut failures,
     );
 

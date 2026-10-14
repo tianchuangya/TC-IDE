@@ -79,6 +79,8 @@ pub struct WindowsScene<'a> {
     pub tabs: &'a [String],
     pub active_tab: usize,
     pub tab_dirty: Vec<bool>,
+    /// `(line, is_error)` pairs the gutter marks.
+    pub diagnostic_lines: &'a [(usize, bool)],
     pub graph_nodes: &'a [graph_core::GraphNode],
     /// Absolute index of the first drawn node.
     pub graph_first_index: usize,
@@ -493,6 +495,23 @@ impl DirectEditorRenderer {
         let editor_right = width - graph_w;
         let code_top = header_h + 58.0 * scale;
         let line_step = 25.0 * scale;
+        // Diagnostics from the language server, marked in the gutter.
+        for (line, is_error) in scene.diagnostic_lines.iter().take(200) {
+            let top = code_top + *line as f32 * line_step;
+            if top < header_h || top > body_bottom {
+                continue;
+            }
+            unsafe {
+                Self::fill(
+                    &target_base,
+                    if *is_error { &literal } else { &accent },
+                    tree_w + 34.0 * scale,
+                    top + 5.0 * scale,
+                    tree_w + 40.0 * scale,
+                    top + 11.0 * scale,
+                )
+            };
+        }
         let max_lines = ((body_bottom - code_top) / line_step).max(0.0) as usize;
 
         unsafe { target_base.BeginDraw() };

@@ -206,6 +206,421 @@ pub fn exit_notification() -> String {
     "{\"jsonrpc\":\"2.0\",\"method\":\"exit\",\"params\":null}".to_string()
 }
 
+/// Byte level frame reader.
+///
+/// Reading must tolerate a multi byte character or a header split across two
+/// sockets reads, so frames are assembled from bytes and only decoded once a
+/// complete body has arrived.
+#[derive(Default)]
+pub struct FrameReader {
+    buffer: Vec<u8>,
+}
+
+impl FrameReader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed received bytes and take every complete message body.
+    pub fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+        self.buffer.extend_from_slice(bytes);
+        let mut messages = Vec::new();
+        while let Some(header_end) = find_header_end(&self.buffer) {
+            let header = String::from_utf8_lossy(&self.buffer[..header_end]).to_string();
+            let Some(length) = content_length(&header) else {
+                // Unusable header: drop it rather than stalling forever.
+                self.buffer.drain(..header_end + 4);
+                continue;
+            };
+            let body_start = header_end + 4;
+            if self.buffer.len() < body_start + length {
+                break;
+            }
+            let body =
+                String::from_utf8_lossy(&self.buffer[body_start..body_start + length]).to_string();
+            self.buffer.drain(..body_start + length);
+            messages.push(body);
+        }
+        messages
+    }
+
+    /// Bytes of an incomplete frame still waiting for more input.
+    pub fn pending(&self) -> usize {
+        self.buffer.len()
+    }
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn content_length(header: &str) -> Option<usize> {
+    header.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            value.trim().parse::<usize>().ok()
+        } else {
+            None
+        }
+    })
+}
+
+/// What kind of message a server sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageKind {
+    /// A response to one of our requests.
+    Response,
+    /// A notification we only have to observe.
+    Notification,
+    /// A request from the server that we must answer.
+    ServerRequest,
+}
+
+/// Classify an incoming message by its `id` and `method` fields.
+pub fn message_kind(text: &str) -> MessageKind {
+    let has_method = text.contains("\"method\"");
+    let has_id = text.contains("\"id\"");
+    match (has_method, has_id) {
+        (true, true) => MessageKind::ServerRequest,
+        (true, false) => MessageKind::Notification,
+        _ => MessageKind::Response,
+    }
+}
+
+/// Method of a message, when it has one.
+pub fn message_method(text: &str) -> Option<String> {
+    json_string(text, "method")
+}
+
+/// Numeric id of a message, when it has one.
+pub fn message_id(text: &str) -> Option<u64> {
+    json_number(text, "id")
+}
+
+/// Replies the client must send to keep a server running.
+///
+/// Servers ask for configuration or capabilities and wait for an answer; a
+/// client that stays silent makes them look broken.
+pub fn automatic_reply(request: &str) -> Option<String> {
+    let method = message_method(request)?;
+    let id = message_id(request)?;
+    let result = match method.as_str() {
+        "workspace/configuration" => {
+            let items = json_objects(request, "items");
+            let values = items
+                .iter()
+                .map(|_| "null".to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[{values}]")
+        }
+        "workspace/workspaceFolders" => "null".to_string(),
+        "client/registerCapability"
+        | "client/unregisterCapability"
+        | "window/workDoneProgress/create"
+        | "window/showMessageRequest" => "null".to_string(),
+        _ => "null".to_string(),
+    };
+    Some(format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{result}}}"
+    ))
+}
+
+/// `textDocument/didClose` notification.
+pub fn did_close_notification(path: &str) -> String {
+    format!(
+        "{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didClose\",\"params\":{{\"textDocument\":{{\"uri\":\"{}\"}}}}}}",
+        escape(&file_uri(path))
+    )
+}
+
+/// Language id a server expects for a file.
+pub fn language_id(name: &str) -> &'static str {
+    let extension = name.rsplit_once('.').map(|(_, value)| value).unwrap_or("");
+    match extension.to_ascii_lowercase().as_str() {
+        "rs" => "rust",
+        "c" | "h" => "c",
+        "cc" | "cpp" | "cxx" | "hpp" => "cpp",
+        "py" | "pyi" => "python",
+        "ts" => "typescript",
+        "tsx" => "typescriptreact",
+        "js" | "mjs" | "cjs" => "javascript",
+        "jsx" => "javascriptreact",
+        "go" => "go",
+        "java" => "java",
+        "json" => "json",
+        "md" => "markdown",
+        _ => "plaintext",
+    }
+}
+
+/// Whether a program is really available on `PATH`.
+///
+/// The extension page uses this so an install state reflects a real executable
+/// instead of a stored flag.
+pub fn executable_available(program: &str) -> bool {
+    if program.is_empty() {
+        return false;
+    }
+    let candidate = std::path::Path::new(program);
+    if candidate.is_absolute() {
+        return candidate.is_file();
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let extensions: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".EXE;.CMD;.BAT".to_string())
+            .split(';')
+            .map(|value| value.to_ascii_lowercase())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for directory in std::env::split_paths(&path) {
+        let direct = directory.join(program);
+        if direct.is_file() {
+            return true;
+        }
+        for extension in &extensions {
+            let mut name = program.to_string();
+            name.push_str(extension);
+            if directory.join(name).is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Server for a file together with whether it is installed.
+pub fn server_status(name: &str) -> Option<(ServerSpec, bool)> {
+    let spec = server_for_file(name)?;
+    let installed = executable_available(&spec.program);
+    Some((spec, installed))
+}
+
+/// A running language server with piped standard input and output.
+///
+/// Starting a server, framing requests and collecting messages is the same on
+/// every platform, so the client lives in shared code; the backends only decide
+/// when to start it and what to do with the answers.
+pub struct LanguageServer {
+    child: std::process::Child,
+    input: Option<std::process::ChildStdin>,
+    messages: std::sync::mpsc::Receiver<String>,
+    errors: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    next_id: u64,
+    root: String,
+    opened: Vec<String>,
+    version: u64,
+    spec: ServerSpec,
+}
+
+impl LanguageServer {
+    /// Start a server in a project directory.
+    pub fn start(spec: &ServerSpec, root: &std::path::Path) -> Result<Self, String> {
+        use std::process::{Command, Stdio};
+        let mut command = Command::new(&spec.program);
+        command
+            .args(&spec.arguments)
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("{} could not start: {error}", spec.program))?;
+        let input = child.stdin.take();
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "the server has no standard output".to_string())?;
+        let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (sender, messages) = std::sync::mpsc::channel();
+        let reader_errors = std::sync::Arc::clone(&errors);
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut stdout = stdout;
+            let mut reader = FrameReader::new();
+            let mut buffer = [0u8; 8192];
+            loop {
+                match stdout.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        for message in reader.push(&buffer[..read]) {
+                            if sender.send(message).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = reader_errors; // the thread ends with the pipe
+        });
+        if let Some(stderr) = child.stderr.take() {
+            let errors = std::sync::Arc::clone(&errors);
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut stderr = stderr;
+                let mut buffer = String::new();
+                let _ = stderr.read_to_string(&mut buffer);
+                if !buffer.trim().is_empty() {
+                    if let Ok(mut errors) = errors.lock() {
+                        for line in buffer.lines().take(20) {
+                            errors.push(line.to_string());
+                        }
+                    }
+                }
+            });
+        }
+        Ok(Self {
+            child,
+            input,
+            messages,
+            errors,
+            next_id: 1,
+            root: file_uri(&root.to_string_lossy()),
+            opened: Vec::new(),
+            version: 1,
+            spec: spec.clone(),
+        })
+    }
+
+    pub fn spec(&self) -> &ServerSpec {
+        &self.spec
+    }
+
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Lines the server wrote to standard error, for the status bar.
+    pub fn stderr_lines(&self) -> Vec<String> {
+        self.errors
+            .lock()
+            .map(|errors| errors.clone())
+            .unwrap_or_default()
+    }
+
+    fn send(&mut self, message: String) -> Result<(), String> {
+        use std::io::Write;
+        let Some(input) = self.input.as_mut() else {
+            return Err("the server input is closed".into());
+        };
+        input
+            .write_all(encode_message(&message).as_bytes())
+            .and_then(|()| input.flush())
+            .map_err(|error| format!("could not reach the language server: {error}"))
+    }
+
+    fn allocate_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    /// Send `initialize` and return its request id.
+    pub fn initialize(&mut self) -> Result<u64, String> {
+        let id = self.allocate_id();
+        self.send(initialize_request(id, &self.root))?;
+        Ok(id)
+    }
+
+    /// Send `initialized`, which servers require before serving requests.
+    pub fn notify_initialized(&mut self) -> Result<(), String> {
+        self.send(initialized_notification())
+    }
+
+    /// Tell the server about an opened document and remember it.
+    pub fn open_document(&mut self, path: &str, text: &str) -> Result<(), String> {
+        let language = language_id(path);
+        self.send(did_open_notification(path, language, text))?;
+        if !self.opened.iter().any(|opened| opened == path) {
+            self.opened.push(path.to_string());
+        }
+        Ok(())
+    }
+
+    /// Send the new document text.
+    pub fn change_document(&mut self, path: &str, text: &str) -> Result<(), String> {
+        self.version += 1;
+        self.send(did_change_notification(path, self.version, text))
+    }
+
+    /// Forget a document and tell the server.
+    pub fn close_document(&mut self, path: &str) -> Result<(), String> {
+        self.opened.retain(|opened| opened != path);
+        self.send(did_close_notification(path))
+    }
+
+    /// Request completion, hover, definition, references or rename.
+    pub fn position_request(
+        &mut self,
+        method: &str,
+        path: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<u64, String> {
+        let id = self.allocate_id();
+        self.send(position_request(id, method, path, line, character))?;
+        Ok(id)
+    }
+
+    pub fn rename(
+        &mut self,
+        path: &str,
+        line: u32,
+        character: u32,
+        new_name: &str,
+    ) -> Result<u64, String> {
+        let id = self.allocate_id();
+        self.send(rename_request(id, path, line, character, new_name))?;
+        Ok(id)
+    }
+
+    /// Take the next message without blocking.
+    pub fn try_message(&mut self) -> Option<String> {
+        self.messages.try_recv().ok()
+    }
+
+    /// Answer the server when it needs an answer, and report whether it did.
+    pub fn answer_automatically(&mut self, message: &str) -> bool {
+        if message_kind(message) != MessageKind::ServerRequest {
+            return false;
+        }
+        match automatic_reply(message) {
+            Some(reply) => self.send(reply).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Ask the server to stop and wait briefly for it to exit.
+    pub fn shutdown(&mut self) {
+        let id = self.allocate_id();
+        let _ = self.send(shutdown_request(id));
+        let _ = self.send(exit_notification());
+        self.input = None;
+        for _ in 0..20 {
+            if !self.is_running() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+}
+
+impl Drop for LanguageServer {
+    fn drop(&mut self) {
+        self.shutdown();
+        if self.is_running() {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+    }
+}
+
 /// Severity of a diagnostic, mapped to something the UI can colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiagnosticSeverity {
@@ -663,6 +1078,206 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].0, "/p/a.rs");
         assert_eq!(edits[0].1, 3);
+    }
+
+    #[test]
+    fn byte_frames_survive_split_packets_and_multibyte_text() {
+        let mut reader = FrameReader::new();
+        let message = encode_message("{\"text\":\"你好\"}");
+        let bytes = message.as_bytes();
+        let split = bytes.len() - 4;
+        assert!(reader.push(&bytes[..split]).is_empty());
+        assert!(reader.pending() > 0);
+        let messages = reader.push(&bytes[split..]);
+        assert_eq!(messages, ["{\"text\":\"你好\"}"]);
+
+        // Two frames in one read, plus a partial third.
+        let mut reader = FrameReader::new();
+        let buffer = format!(
+            "{}{}Content-Length: 4\r\n\r\n{}",
+            encode_message("{\"a\":1}"),
+            encode_message("{\"b\":2}"),
+            "par"
+        );
+        let messages = reader.push(buffer.as_bytes());
+        assert_eq!(messages, ["{\"a\":1}", "{\"b\":2}"]);
+        // A garbage header is dropped instead of blocking the stream.
+        let mut reader = FrameReader::new();
+        let messages = reader.push(b"junk\r\n\r\nContent-Length: 2\r\n\r\n{}");
+        assert_eq!(messages, ["{}"]);
+        assert_eq!(reader.pending(), 0);
+    }
+
+    #[test]
+    fn messages_are_classified_and_client_requests_are_answered() {
+        let response = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":null}";
+        assert_eq!(message_kind(response), MessageKind::Response);
+        assert_eq!(message_id(response), Some(3));
+        assert_eq!(message_method(response), None);
+
+        let notification =
+            "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{}}";
+        assert_eq!(message_kind(notification), MessageKind::Notification);
+
+        let request = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"workspace/configuration\",\"params\":{\"items\":[{\"section\":\"rust-analyzer\"},{\"section\":\"editor\"}]}}";
+        assert_eq!(message_kind(request), MessageKind::ServerRequest);
+        let reply = automatic_reply(request).expect("reply");
+        assert!(reply.contains("\"id\":9"));
+        assert!(reply.contains("[null,null]"));
+        let unknown = automatic_reply("{\"id\":4,\"method\":\"custom/thing\"}").expect("reply");
+        assert!(unknown.contains("\"result\":null"));
+        assert!(automatic_reply("{\"method\":\"no/id\"}").is_none());
+    }
+
+    #[test]
+    fn language_ids_and_executable_probing_are_real() {
+        assert_eq!(language_id("main.rs"), "rust");
+        assert_eq!(language_id("App.cpp"), "cpp");
+        assert_eq!(language_id("view.tsx"), "typescriptreact");
+        assert_eq!(language_id("notes.txt"), "plaintext");
+        assert!(executable_available(if cfg!(windows) {
+            "cmd"
+        } else {
+            "sh"
+        }));
+        assert!(!executable_available("tc-ide-definitely-missing-program"));
+        assert!(!executable_available(""));
+        let status = server_status("main.rs").expect("status");
+        assert_eq!(status.0.program, "rust-analyzer");
+        // The installation flag matches the real PATH, whatever it says.
+        assert_eq!(status.1, executable_available("rust-analyzer"));
+    }
+
+    #[test]
+    fn did_close_notification_names_the_document() {
+        let notification = did_close_notification("/tmp/app.py");
+        assert!(notification.contains("textDocument/didClose"));
+        assert!(notification.contains("file:///tmp/app.py"));
+    }
+
+    #[test]
+    fn a_real_server_process_is_driven_over_pipes() {
+        // A tiny python language server: answers initialize, publishes one
+        // diagnostic, asks for configuration (which the client must answer) and
+        // answers completion.
+        let script = r#"
+import json, sys
+
+def read_message():
+    length = 0
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        if line.lower().startswith(b"content-length:"):
+            length = int(line.split(b":")[1].strip())
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode("utf-8"))
+
+def send(payload):
+    body = json.dumps(payload).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
+    elif method == "initialized":
+        send({"jsonrpc": "2.0", "id": 100, "method": "workspace/configuration",
+              "params": {"items": [{"section": "demo"}]}})
+        send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+              "params": {"uri": "file:///tmp/app.py", "diagnostics": [
+                  {"range": {"start": {"line": 2, "character": 1}, "end": {"line": 2, "character": 2}},
+                   "severity": 1, "message": "boom"}]}})
+    elif method == "textDocument/didOpen":
+        send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+              "params": {"uri": "file:///tmp/app.py", "diagnostics": []}})
+    elif method == "textDocument/completion":
+        send({"jsonrpc": "2.0", "id": message["id"],
+              "result": {"items": [{"label": "print", "detail": "builtin"}]}})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": None})
+    elif method == "exit":
+        break
+"#;
+        let directory = std::env::temp_dir().join("tc-ide-lsp-test");
+        let _ = std::fs::create_dir_all(&directory);
+        let script_path = directory.join("fake_server.py");
+        std::fs::write(&script_path, script).expect("write fake server");
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        if !executable_available(python) {
+            // Without a python interpreter this test cannot spawn a server.
+            return;
+        }
+        let spec = ServerSpec {
+            kind: ServerKind::Pyright,
+            program: python.to_string(),
+            arguments: vec![script_path.to_string_lossy().into_owned()],
+            probe_command: String::new(),
+        };
+        let mut server = LanguageServer::start(&spec, &directory).expect("start server");
+        assert!(server.is_running());
+
+        let initialize = server.initialize().expect("initialize");
+        assert_eq!(initialize, 1);
+        server.notify_initialized().expect("initialized");
+        server
+            .open_document("/tmp/app.py", "print(1)\n")
+            .expect("didOpen");
+
+        // Collect messages, answering any server request as the real client does.
+        let mut diagnostics = 0;
+        let mut collected = Vec::new();
+        for _ in 0..200 {
+            let Some(message) = server.try_message() else {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            };
+            if server.answer_automatically(&message) {
+                continue;
+            }
+            if message_method(&message).as_deref() == Some("textDocument/publishDiagnostics") {
+                diagnostics += parse_diagnostics(&message).len();
+            }
+            collected.push(message);
+            if diagnostics >= 1 && collected.len() >= 2 {
+                break;
+            }
+        }
+        assert!(diagnostics >= 1, "no diagnostics arrived: {collected:?}");
+
+        let id = server
+            .position_request("textDocument/completion", "/tmp/app.py", 0, 5)
+            .expect("completion");
+        let mut completion = None;
+        for _ in 0..200 {
+            let Some(message) = server.try_message() else {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            };
+            if server.answer_automatically(&message) {
+                continue;
+            }
+            if message_id(&message) == Some(id) {
+                completion = Some(parse_completions(&message));
+                break;
+            }
+        }
+        assert_eq!(
+            completion,
+            Some(vec![("print".to_string(), "builtin".to_string())])
+        );
+
+        server.close_document("/tmp/app.py").expect("didClose");
+        drop(server);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
