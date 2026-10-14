@@ -61,6 +61,10 @@ pub struct WindowsScene<'a> {
     pub extensions_motion: f32,
     pub extension_category: usize,
     pub selected_language: usize,
+    pub extension_search: &'a str,
+    pub extension_search_focused: bool,
+    pub extension_scroll: usize,
+    pub language_options: &'a [&'a str],
     pub language_installed: &'a [bool],
     pub language_versions: &'a [usize],
     pub ai_endpoint: &'a str,
@@ -119,7 +123,16 @@ impl DirectEditorRenderer {
             3 => ["C++23", "C++20", "C++17"],
             4 => ["25", "21 LTS", "17 LTS"],
             5 => ["1.25", "1.24", "1.23"],
-            _ => ["ES2025", "ES2024", "ES2023"],
+            6 => ["ES2025", "ES2024", "ES2023"],
+            7 => [".NET 10", ".NET 9", ".NET 8"],
+            8 => ["2.2", "2.1", "2.0"],
+            9 => ["6.2", "6.1", "6.0"],
+            10 => ["0.15", "0.14", "master"],
+            11 => ["5.4", "5.3", "LuaJIT"],
+            12 => ["3.4", "3.3", "3.2"],
+            13 => ["8.4", "8.3", "8.2"],
+            14 => ["2025", "2023", "2019"],
+            _ => ["system", "bash", "PowerShell"],
         };
         values[version.min(2)]
     }
@@ -1690,11 +1703,52 @@ impl DirectEditorRenderer {
             }
             let content_left = left + 205.0 * scale;
             if scene.extension_category == 0 {
-                for (index, language) in ["Rust", "Python", "C", "C++", "Java", "Go", "Web"]
+                unsafe {
+                    Self::rounded(
+                        &target_base,
+                        if scene.extension_search_focused {
+                            &selection
+                        } else {
+                            &raised
+                        },
+                        D2D_RECT_F {
+                            left: content_left,
+                            top: top + 72.0 * scale,
+                            right: left + panel_w - 24.0 * scale,
+                            bottom: top + 114.0 * scale,
+                        },
+                        8.0 * scale,
+                    );
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        &text,
+                        if scene.extension_search.is_empty() {
+                            "Search programming languages"
+                        } else {
+                            scene.extension_search
+                        },
+                        D2D_RECT_F {
+                            left: content_left + 14.0 * scale,
+                            top: top + 83.0 * scale,
+                            right: left + panel_w - 36.0 * scale,
+                            bottom: top + 110.0 * scale,
+                        },
+                    );
+                }
+                let needle = scene.extension_search.trim().to_ascii_lowercase();
+                for (visible, (index, language)) in scene
+                    .language_options
                     .iter()
                     .enumerate()
+                    .filter(|(_, language)| {
+                        needle.is_empty() || language.to_ascii_lowercase().contains(&needle)
+                    })
+                    .skip(scene.extension_scroll)
+                    .take(8)
+                    .enumerate()
                 {
-                    let y = top + (92.0 + index as f32 * 48.0) * scale;
+                    let y = top + (142.0 + visible as f32 * 48.0) * scale;
                     if index == scene.selected_language {
                         unsafe {
                             Self::rounded(

@@ -143,6 +143,9 @@ struct WindowsAppState {
     extensions_velocity: f32,
     extension_category: usize,
     selected_language: usize,
+    extension_search: String,
+    extension_search_focused: bool,
+    extension_scroll: usize,
     language_installed: Vec<bool>,
     language_versions: Vec<usize>,
     ai_endpoint: String,
@@ -185,6 +188,10 @@ struct WindowsAppState {
 impl WindowsAppState {
     const PROJECT_LANGUAGES: [&'static str; 7] =
         ["Rust", "Python", "C", "C++", "Java", "Go", "Web"];
+    const EXTENSION_LANGUAGES: [&'static str; 16] = [
+        "Rust", "Python", "C", "C++", "Java", "Go", "Web", "C#", "Kotlin", "Swift", "Zig", "Lua",
+        "Ruby", "PHP", "SQL", "Shell",
+    ];
     const CODE_FONTS: [&'static str; 9] = [
         "Cascadia Mono",
         "JetBrains Mono",
@@ -204,6 +211,18 @@ impl WindowsAppState {
             .enumerate()
             .filter(|(_, family)| {
                 needle.is_empty() || family.to_ascii_lowercase().contains(&needle)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn filtered_language_indices(&self) -> Vec<usize> {
+        let needle = self.extension_search.trim().to_ascii_lowercase();
+        Self::EXTENSION_LANGUAGES
+            .iter()
+            .enumerate()
+            .filter(|(_, language)| {
+                needle.is_empty() || language.to_ascii_lowercase().contains(&needle)
             })
             .map(|(index, _)| index)
             .collect()
@@ -308,7 +327,10 @@ impl WindowsAppState {
             extensions_velocity: 0.0,
             extension_category: 0,
             selected_language: 0,
-            language_installed: (0..7)
+            extension_search: String::new(),
+            extension_search_focused: false,
+            extension_scroll: 0,
+            language_installed: (0..Self::EXTENSION_LANGUAGES.len())
                 .map(|index| {
                     preferences
                         .language_installed
@@ -317,7 +339,7 @@ impl WindowsAppState {
                         .unwrap_or(false)
                 })
                 .collect(),
-            language_versions: (0..7)
+            language_versions: (0..Self::EXTENSION_LANGUAGES.len())
                 .map(|index| {
                     preferences
                         .language_versions
@@ -1871,6 +1893,10 @@ fn render_window(window: Hwnd) {
                 extensions_motion: app.extensions_motion,
                 extension_category: app.extension_category,
                 selected_language: app.selected_language,
+                extension_search: &app.extension_search,
+                extension_search_focused: app.extension_search_focused,
+                extension_scroll: app.extension_scroll,
+                language_options: &WindowsAppState::EXTENSION_LANGUAGES,
                 language_installed: &app.language_installed,
                 language_versions: &app.language_versions,
                 ai_endpoint: &app.ai_endpoint,
@@ -1947,6 +1973,11 @@ fn handle_character(window: Hwnd, value: char) {
                     1 => app.ai_model.push(value),
                     _ => app.ai_key.push(value),
                 }
+            }
+        } else if app.extension_search_focused {
+            if !value.is_control() {
+                app.extension_search.push(value);
+                app.extension_scroll = 0;
             }
         } else if app.settings_open || app.extensions_open || app.package_open {
             // Overlay shortcuts must never leak their printable WM_CHAR into the editor.
@@ -2151,6 +2182,17 @@ unsafe extern "system" fn window_proc(
                     return;
                 }
                 if app.extensions_open {
+                    if app.extension_search_focused {
+                        match w_param as u32 {
+                            0x1b | 0x0d => app.extension_search_focused = false,
+                            VK_BACK => {
+                                app.extension_search.pop();
+                                app.extension_scroll = 0;
+                            }
+                            _ => return,
+                        }
+                        return;
+                    }
                     if let Some(field) = app.ai_field_focused {
                         match w_param as u32 {
                             0x1b | 0x0d => app.ai_field_focused = None,
@@ -2181,7 +2223,7 @@ unsafe extern "system" fn window_proc(
                         VK_UP => app.selected_language = app.selected_language.saturating_sub(1),
                         VK_DOWN => {
                             app.selected_language = (app.selected_language + 1)
-                                % WindowsAppState::PROJECT_LANGUAGES.len()
+                                % WindowsAppState::EXTENSION_LANGUAGES.len()
                         }
                         0x20 if app.extension_category == 0 => {
                             let index = app.selected_language;
@@ -2441,18 +2483,26 @@ unsafe extern "system" fn window_proc(
                                 .clamp(0.0, 4.0)
                                 as usize;
                             app.extension_category = category;
+                            app.extension_search_focused = false;
                         } else if app.extension_category == 0 {
-                            let language = ((y as f32 - top - 70.0 * scale) / (48.0 * scale))
-                                .floor()
-                                .clamp(0.0, 6.0)
-                                as usize;
-                            app.selected_language = language;
-                            if x as f32 >= left + 445.0 * scale {
-                                app.language_installed[language] =
-                                    !app.language_installed[language];
-                            } else if x as f32 >= left + 315.0 * scale {
-                                app.language_versions[language] =
-                                    (app.language_versions[language] + 1) % 3;
+                            let local_y = (y as f32 - top) / scale;
+                            if (72.0..116.0).contains(&local_y) {
+                                app.extension_search_focused = true;
+                            } else if (124.0..508.0).contains(&local_y) {
+                                let visible = ((local_y - 124.0) / 48.0).floor() as usize;
+                                let position = app.extension_scroll + visible;
+                                if let Some(language) =
+                                    app.filtered_language_indices().get(position).copied()
+                                {
+                                    app.selected_language = language;
+                                    if x as f32 >= left + 445.0 * scale {
+                                        app.language_installed[language] =
+                                            !app.language_installed[language];
+                                    } else if x as f32 >= left + 315.0 * scale {
+                                        app.language_versions[language] =
+                                            (app.language_versions[language] + 1) % 3;
+                                    }
+                                }
                             }
                         } else if app.extension_category == 1 {
                             let local_y = (y as f32 - top) / scale;
@@ -2666,7 +2716,15 @@ unsafe extern "system" fn window_proc(
             let graph_left = area.right as f32 - (area.right as f32 * 0.27).max(300.0 * scale);
             APP.with(|cell| {
                 let mut app = cell.borrow_mut();
-                if app.pointer_x as f32 >= graph_left {
+                if app.extensions_open && app.extension_category == 0 {
+                    let count = app.filtered_language_indices().len();
+                    if delta > 0 {
+                        app.extension_scroll = app.extension_scroll.saturating_sub(1);
+                    } else if delta < 0 {
+                        app.extension_scroll =
+                            (app.extension_scroll + 1).min(count.saturating_sub(8));
+                    }
+                } else if app.pointer_x as f32 >= graph_left {
                     if delta > 0 {
                         app.graph_scroll = app.graph_scroll.saturating_sub(1);
                     } else if delta < 0 {

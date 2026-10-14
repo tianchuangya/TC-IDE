@@ -184,6 +184,11 @@ pub fn language_for_file(name: &str) -> &'static str {
         "html" | "htm" | "css" | "scss" | "sass" | "vue" | "svelte" => "Web / HTML / CSS",
         "cs" => "C#",
         "swift" => "Swift",
+        "zig" => "Zig",
+        "lua" => "Lua",
+        "rb" => "Ruby",
+        "php" => "PHP",
+        "r" => "R",
         "sql" => "SQL",
         "sh" | "bash" | "zsh" | "fish" => "Shell",
         "json" | "jsonc" => "JSON",
@@ -478,6 +483,14 @@ mod tests {
     fn completion_follows_the_file_language() {
         assert!(completions("main.cpp", "cons", 4).contains(&"const".into()));
         assert!(!completions("main.c", "cla", 3).contains(&"class".into()));
+    }
+
+    #[test]
+    fn common_extension_languages_are_detected() {
+        assert_eq!(language_for_file("main.zig"), "Zig");
+        assert_eq!(language_for_file("plugin.lua"), "Lua");
+        assert_eq!(language_for_file("task.rb"), "Ruby");
+        assert_eq!(language_for_file("index.php"), "PHP");
     }
 
     #[test]
