@@ -1,4 +1,6 @@
+mod ai_core;
 mod editor_core;
+mod extension_core;
 mod graph_core;
 #[cfg(target_os = "linux")]
 mod linux_app;
