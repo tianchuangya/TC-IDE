@@ -164,7 +164,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 - [x] 将文本缓冲升级为适合大文件的 piece table（`text_buffer`）：Unicode 字符边界、分组编辑、按编辑的撤销/重做历史，编辑不再复制整个文档；Windows 编辑器已接入。
 - [~] 语义关系不再依赖行正则与括号计数：`syntax_core` 提供语言感知的作用域扫描（注释/字符串屏蔽、括号与缩进块配对、声明归属、调用归属），关系图取用真实作用域；**仍不是 Tree-sitter 级别的完整语法树**（无表达式与类型分析，跨文件解析仍是逐文件扫描）。
 - [x] 接入真实 LSP：`lsp_core` 客户端（stdio 管道、分帧、自动应答服务端请求）已在 Windows 侧驱动补全、诊断（行标记与状态栏、光标所在行的诊断信息）、F12 跳转定义、Ctrl+I 悬停、Ctrl+R 引用列表（再次按 Ctrl+R 依次跳转）与 F2 重命名（编辑应用到当前缓冲与其他文件）。仍未实现独立的诊断面板与重命名预览。
-- [ ] 为 C/C++ 正确连接 clangd，为 Python 连接 basedpyright/pyright，为 Rust 连接 rust-analyzer；扩展安装状态必须与真实可执行文件状态一致。
+- [x] 语言服务器与工具状态：按语言查找 rust-analyzer / clangd / basedpyright / typescript-language-server / gopls / jdtls 以及 rustfmt / clang-format / ruff / biome / gofmt / lldb-dap / debugpy / dlv，并用行为探针报告真实安装状态（Windows 扩展页与 Linux 扩展面板按语言显示 `LSP/格式化/调试` 的 ok 或 missing），不再使用持久化假状态。
 - [x] 加入文件脏状态、关闭未保存确认、多文件标签、最近项目和会话恢复。（Windows 已实现标签栏、脏标记、Ctrl+W、原生确认框与 session.conf 恢复；Linux 仍未实现）
 - [x] 编辑器滚动条、大文件虚拟化、水平滚动与项目树滚动条均已完成（`Viewport` + `line_window`，渲染器只绘制可见行、裁剪代码列，并按总行数与偏移绘制两侧滚动条）。
 
@@ -338,7 +338,7 @@ cargo run --release
 
 ```bash
 cargo fmt --check
-cargo test --all-targets                                   # 158 项共享内核与后端测试
+cargo test --all-targets                                   # 160 项共享内核与后端测试
 cargo clippy --all-targets -- -D warnings                   # 共享内核 + Linux 后端
 cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo check --all-targets --target x86_64-pc-windows-msvc    # Windows 类型检查
