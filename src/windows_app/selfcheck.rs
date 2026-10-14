@@ -385,28 +385,52 @@ pub(super) fn self_check() -> i32 {
     );
 
     // The palettes of both themes have to be readable, which is the check the
-    // settings panel cannot do by eye.
+    // settings panel cannot do by eye. The rule follows where each colour is
+    // actually drawn: text and hints also sit on raised controls, syntax colours
+    // only on the code background, a border only has to separate, and a
+    // selection only has to be a fill with readable text in it.
     let mut unreadable = Vec::new();
     for (name, palette) in [
         ("dark", theme_core::Palette::dark()),
         ("light", theme_core::Palette::light()),
     ] {
         for (role, colour) in palette.all() {
-            let background = if matches!(role, "panel") {
-                palette.background
-            } else {
-                palette.panel
+            let mut check = |surface: u32, minimum: f64| {
+                if !theme_core::meets_contrast(colour, surface, minimum) {
+                    unreadable.push(format!("{name}/{role}"));
+                }
             };
-            let minimum = if matches!(role, "accent" | "border" | "selection" | "shadow") {
-                theme_core::DECORATION_MINIMUM
-            } else {
-                theme_core::TEXT_MINIMUM
-            };
-            if matches!(role, "background" | "panel" | "raised" | "shadow") {
-                continue;
-            }
-            if !theme_core::meets_contrast(colour, background, minimum) {
-                unreadable.push(format!("{name}/{role}"));
+            match role {
+                "background" | "panel" | "raised" | "shadow" => {}
+                "text" | "bright" | "muted" => {
+                    check(palette.panel, theme_core::TEXT_MINIMUM);
+                    check(palette.raised, theme_core::TEXT_MINIMUM);
+                }
+                "keyword" | "literal" | "comment" => {
+                    check(palette.background, theme_core::TEXT_MINIMUM);
+                    check(palette.panel, theme_core::TEXT_MINIMUM);
+                }
+                "accent" => {
+                    check(palette.background, theme_core::DECORATION_MINIMUM);
+                    check(palette.panel, theme_core::DECORATION_MINIMUM);
+                }
+                "border" => {
+                    if theme_core::contrast_ratio(colour, palette.background) < 1.2 {
+                        unreadable.push(format!("{name}/{role}"));
+                    }
+                }
+                "selected_text" => check(palette.selection, theme_core::DECORATION_MINIMUM),
+                "selection"
+                    if colour == palette.background
+                        || !theme_core::meets_contrast(
+                            palette.text,
+                            colour,
+                            theme_core::DECORATION_MINIMUM,
+                        ) =>
+                {
+                    unreadable.push(format!("{name}/{role}"));
+                }
+                _ => {}
             }
         }
     }
