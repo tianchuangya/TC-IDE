@@ -39,6 +39,7 @@ pub struct WindowsScene<'a> {
     pub create_error: &'a str,
     pub create_location: &'a str,
     pub create_language: &'a str,
+    pub create_version: &'a str,
     pub create_environment: &'a str,
     pub lines: &'a [String],
     pub caret_line: usize,
@@ -110,6 +111,19 @@ pub struct DirectEditorRenderer {
 }
 
 impl DirectEditorRenderer {
+    fn language_version(language: usize, version: usize) -> &'static str {
+        let values = match language {
+            0 => ["stable", "beta", "nightly"],
+            1 => ["3.13", "3.12", "3.11"],
+            2 => ["C23", "C17", "C11"],
+            3 => ["C++23", "C++20", "C++17"],
+            4 => ["25", "21 LTS", "17 LTS"],
+            5 => ["1.25", "1.24", "1.23"],
+            _ => ["ES2025", "ES2024", "ES2023"],
+        };
+        values[version.min(2)]
+    }
+
     fn character_cells(value: char) -> usize {
         match value as u32 {
             0x1100..=0x115f
@@ -1720,9 +1734,9 @@ impl DirectEditorRenderer {
                             &target_base,
                             &self.small_format,
                             &accent,
-                            &format!(
-                                "v{}",
-                                scene.language_versions.get(index).copied().unwrap_or(0) + 1
+                            Self::language_version(
+                                index,
+                                scene.language_versions.get(index).copied().unwrap_or(0),
                             ),
                             D2D_RECT_F {
                                 left: content_left + 110.0 * scale,
@@ -1751,12 +1765,14 @@ impl DirectEditorRenderer {
                         )
                     };
                 }
-                let version = scene
-                    .language_versions
-                    .get(scene.selected_language)
-                    .copied()
-                    .unwrap_or(0)
-                    + 1;
+                let version = Self::language_version(
+                    scene.selected_language,
+                    scene
+                        .language_versions
+                        .get(scene.selected_language)
+                        .copied()
+                        .unwrap_or(0),
+                );
                 unsafe {
                     Self::text(
                         &target_base,
@@ -1901,7 +1917,7 @@ impl DirectEditorRenderer {
         }
         if let Some(kind) = scene.create_kind {
             let dialog_w = (520.0 * scale).min(width - 40.0 * scale);
-            let dialog_h = if kind == "New project" { 310.0 } else { 230.0 } * scale;
+            let dialog_h = if kind == "New project" { 350.0 } else { 230.0 } * scale;
             let left = (width - dialog_w) * 0.5;
             let top =
                 (height - dialog_h) * 0.42 - (1.0 - scene.create_motion.min(1.0)) * 28.0 * scale;
@@ -2011,13 +2027,27 @@ impl DirectEditorRenderer {
                     Self::text(
                         &target_base,
                         &self.small_format,
+                        &accent,
+                        &format!("Version (click): {}", scene.create_version),
+                        D2D_RECT_F {
+                            left: left + 26.0 * scale,
+                            top: top + 204.0 * scale,
+                            right: left + dialog_w - 26.0 * scale,
+                            bottom: top + 236.0 * scale,
+                        },
+                    )
+                };
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
                         &muted,
                         &format!("Location: {}", scene.create_location),
                         D2D_RECT_F {
                             left: left + 26.0 * scale,
-                            top: top + 202.0 * scale,
+                            top: top + 242.0 * scale,
                             right: left + dialog_w - 26.0 * scale,
-                            bottom: top + 226.0 * scale,
+                            bottom: top + 270.0 * scale,
                         },
                     )
                 };

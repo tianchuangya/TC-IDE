@@ -213,6 +213,28 @@ impl WindowsAppState {
         Self::PROJECT_LANGUAGES[self.project_language.min(Self::PROJECT_LANGUAGES.len() - 1)]
     }
 
+    fn language_version_values(index: usize) -> &'static [&'static str; 3] {
+        match index {
+            0 => &["stable", "beta", "nightly"],
+            1 => &["3.13", "3.12", "3.11"],
+            2 => &["C23", "C17", "C11"],
+            3 => &["C++23", "C++20", "C++17"],
+            4 => &["25", "21 LTS", "17 LTS"],
+            5 => &["1.25", "1.24", "1.23"],
+            _ => &["ES2025", "ES2024", "ES2023"],
+        }
+    }
+
+    fn project_version_name(&self) -> &'static str {
+        let versions = Self::language_version_values(self.project_language);
+        versions[self
+            .language_versions
+            .get(self.project_language)
+            .copied()
+            .unwrap_or(0)
+            .min(2)]
+    }
+
     fn project_environments(&self) -> &'static [&'static str] {
         match self.project_language_name() {
             "Python" => &["None", "venv", "uv", "conda", "poetry"],
@@ -977,7 +999,8 @@ impl WindowsAppState {
         fs::write(
             target.join(".tc-ide-project"),
             format!(
-                "language={language}\nenvironment={}\n",
+                "language={language}\nversion={}\nenvironment={}\n",
+                self.project_version_name(),
                 self.project_environments()[self
                     .project_environment
                     .min(self.project_environments().len() - 1)]
@@ -1822,6 +1845,7 @@ fn render_window(window: Hwnd) {
                 create_error: &app.create_error,
                 create_location: &create_location,
                 create_language: app.project_language_name(),
+                create_version: app.project_version_name(),
                 create_environment: app.project_environments()[app
                     .project_environment
                     .min(app.project_environments().len() - 1)],
@@ -1924,6 +1948,8 @@ fn handle_character(window: Hwnd, value: char) {
                     _ => app.ai_key.push(value),
                 }
             }
+        } else if app.settings_open || app.extensions_open || app.package_open {
+            // Overlay shortcuts must never leak their printable WM_CHAR into the editor.
         } else if app.terminal_open {
             let active = app.active_terminal;
             let Some(tab) = app.terminals.get_mut(active) else {
@@ -2241,7 +2267,7 @@ unsafe extern "system" fn window_proc(
             if let Some(kind) = create_kind {
                 let dialog_w = (520.0 * scale).min(area.right as f32 - 40.0 * scale);
                 let dialog_h = if kind == CreateKind::Project {
-                    310.0
+                    350.0
                 } else {
                     230.0
                 } * scale;
@@ -2281,7 +2307,18 @@ unsafe extern "system" fn window_proc(
                         });
                     } else if kind == CreateKind::Project
                         && y as f32 >= top + 202.0 * scale
-                        && (y as f32) < top + 244.0 * scale
+                        && (y as f32) < top + 238.0 * scale
+                    {
+                        APP.with(|cell| {
+                            let mut app = cell.borrow_mut();
+                            let language = app.project_language;
+                            app.language_versions[language] =
+                                (app.language_versions[language] + 1) % 3;
+                            app.save_preferences();
+                        });
+                    } else if kind == CreateKind::Project
+                        && y as f32 >= top + 238.0 * scale
+                        && (y as f32) < top + 282.0 * scale
                     {
                         if let Some(location) = platform::choose_folder(window) {
                             APP.with(|cell| cell.borrow_mut().create_location = location);
