@@ -580,6 +580,8 @@ struct App {
     graph_zoom: f32,
     session: session_core::Session,
     runtime_cache: extension_core::RuntimeCache,
+    /// Cached extensions the project catalog has a newer version of.
+    extension_upgrades: usize,
     graph_relation: graph_core::GraphRelation,
     graph_scope: usize,
     graph_scroll: usize,
@@ -1658,7 +1660,7 @@ impl App {
 
     /// Summary of the extension runtime cache, for the extensions panel.
     fn runtime_cache_summary(&self) -> String {
-        format!(
+        let summary = format!(
             "{} {} · {}",
             self.runtime_cache.entries().len(),
             if self.ui_chinese {
@@ -1667,7 +1669,22 @@ impl App {
                 "cached extension(s)"
             },
             extension_core::format_bytes(self.runtime_cache.total_bytes())
-        )
+        );
+        if self.extension_upgrades == 0 {
+            return summary;
+        }
+        // The shared update plan says which cached extensions the project
+        // catalog has a newer version of.
+        summary
+            + &format!(
+                " · {}{}",
+                self.extension_upgrades,
+                if self.ui_chinese {
+                    "个可升级"
+                } else {
+                    " can be upgraded"
+                }
+            )
     }
 
     /// Record the project and the open documents, then persist the session.
@@ -6259,6 +6276,29 @@ fn runtime_cache_path() -> PathBuf {
     ui_settings_path().with_file_name("runtimes.conf")
 }
 
+/// How many cached extensions the project catalog offers a newer version of.
+///
+/// The catalog is user supplied data (`<project>/.tc-ide-catalog.conf`), so a
+/// project without one simply has nothing to upgrade.
+fn extension_upgrade_count(
+    cache: &extension_core::RuntimeCache,
+    project: &Option<PathBuf>,
+) -> usize {
+    let Some(project) = project.as_ref() else {
+        return 0;
+    };
+    let Ok(content) = fs::read_to_string(project.join(".tc-ide-catalog.conf")) else {
+        return 0;
+    };
+    let Ok(catalog) = extension_core::parse_catalog(&content) else {
+        return 0;
+    };
+    extension_core::update_plan(cache, &catalog)
+        .iter()
+        .filter(|plan| plan.state == extension_core::UpdateState::Upgrade)
+        .count()
+}
+
 fn load_runtime_cache() -> extension_core::RuntimeCache {
     match fs::read_to_string(runtime_cache_path()) {
         Ok(content) => extension_core::RuntimeCache::parse(&content),
@@ -7244,6 +7284,7 @@ pub fn run() {
             graph_zoom: 1.0,
             session: session_core::Session::default(),
             runtime_cache: extension_core::RuntimeCache::default(),
+            extension_upgrades: 0,
             graph_relation: graph_core::GraphRelation::Follow,
             graph_scope: 0,
             graph_scroll: 0,
@@ -7286,6 +7327,7 @@ pub fn run() {
         app.rebuild_project_index();
         app.restore_session();
         app.runtime_cache = load_runtime_cache();
+        app.extension_upgrades = extension_upgrade_count(&app.runtime_cache, &app.project_path);
         let frame = Duration::from_micros(16_667);
         if let Some(path) = frame_export {
             if let Some(scene) = frame_scene() {

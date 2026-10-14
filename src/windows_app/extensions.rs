@@ -142,6 +142,114 @@ impl WindowsAppState {
         }
     }
 
+    /// Catalog entry that matches a language, if the project has one.
+    pub(super) fn catalog_source_for(
+        &self,
+        language: &str,
+    ) -> Option<extension_core::ExtensionSource> {
+        let catalog = self.project_catalog().ok()?;
+        let wanted = language.to_ascii_lowercase();
+        catalog.into_iter().find(|source| {
+            source.name.to_ascii_lowercase() == wanted
+                || source.id.to_ascii_lowercase().contains(&wanted)
+        })
+    }
+
+    /// Cache entry that belongs to a language.
+    ///
+    /// The catalog names the extension, so it is the reliable way to find it;
+    /// without a catalog the id has to mention the language instead.
+    pub(super) fn cached_entry_for(&self, language: &str) -> Option<extension_core::CacheEntry> {
+        let wanted = language.to_ascii_lowercase();
+        let id = self.catalog_source_for(language).map(|source| source.id);
+        self.runtime_cache
+            .entries()
+            .iter()
+            .find(|entry| match &id {
+                Some(id) => &entry.id == id,
+                None => entry.id.to_ascii_lowercase().contains(&wanted),
+            })
+            .cloned()
+    }
+
+    /// What can be done with the extension of the selected language.
+    pub(super) fn extension_update_state(&self) -> Option<extension_core::UpdatePlan> {
+        let language = self.selected_language_name();
+        let entry = self.cached_entry_for(&language)?;
+        let catalog = self.project_catalog().unwrap_or_default();
+        extension_core::update_plan(&self.runtime_cache, &catalog)
+            .into_iter()
+            .find(|plan| plan.id == entry.id)
+    }
+
+    /// Upgrade the selected language's extension from the catalog.
+    pub(super) fn upgrade_selected_extension(&mut self) {
+        let language = self.selected_language_name();
+        match self.extension_update_state() {
+            Some(plan) if plan.state == extension_core::UpdateState::Upgrade => {
+                match self.catalog_source_for(&language) {
+                    Some(source) => {
+                        self.status = plan.describe();
+                        self.run_extension_install(&source);
+                    }
+                    None => self.status = format!("No catalog entry matches {language}"),
+                }
+            }
+            Some(plan) => self.status = plan.describe(),
+            None => {
+                self.status = format!("{language} has no installed extension to upgrade");
+            }
+        }
+    }
+
+    /// Uninstall the selected language's extension and drop its cache entry.
+    pub(super) fn uninstall_selected_extension(&mut self) {
+        let language = self.selected_language_name();
+        let Some(entry) = self.cached_entry_for(&language) else {
+            self.status = format!("{language} has no installed extension to remove");
+            return;
+        };
+        let shell = if cfg!(windows) {
+            extension_core::Shell::Windows
+        } else {
+            extension_core::Shell::Unix
+        };
+        let root = extension_cache_root();
+        let commands = extension_core::uninstall_commands(&root.to_string_lossy(), &entry, shell);
+        self.terminal_open = true;
+        self.ensure_terminal();
+        let Some(index) = self.terminals.len().checked_sub(1) else {
+            return;
+        };
+        if let Some(tab) = self.terminals.get(index) {
+            for command in &commands {
+                let _ = tab.session.write(&format!("{command}\r"));
+            }
+            self.active_terminal = index;
+        }
+        self.runtime_cache.remove(&entry.id);
+        save_runtime_cache(&self.runtime_cache);
+        if let Some(slot) = WindowsAppState::EXTENSION_LANGUAGES
+            .iter()
+            .position(|name| *name == language)
+        {
+            self.language_installed[slot] = false;
+        }
+        self.status = format!(
+            "Removed {} {} from {}",
+            entry.id, entry.version, entry.directory
+        );
+    }
+
+    /// Report what the catalog offers for the selected language.
+    pub(super) fn describe_selected_extension(&mut self) {
+        let language = self.selected_language_name();
+        self.status = match self.extension_update_state() {
+            Some(plan) => plan.describe(),
+            None => format!("{language}: nothing installed yet"),
+        };
+    }
+
     pub(super) fn probe_extension_tool(&mut self, label: &str, command: &str) {
         self.terminal_open = true;
         self.ensure_terminal();

@@ -487,6 +487,139 @@ pub fn install_plan(
     })
 }
 
+/// Whether `candidate` is a newer version than `current`.
+///
+/// Versions are compared part by part, so `1.2.10` is newer than `1.2.9`, which a
+/// string comparison gets wrong. A version with a suffix (`1.0.0-beta`) is older
+/// than the plain release of the same numbers, and anything that is not made of
+/// numbers at all falls back to "a different string is a newer one", which is
+/// what a user of a hand written catalog expects.
+pub fn version_is_newer(candidate: &str, current: &str) -> bool {
+    let candidate = candidate.trim();
+    let current = current.trim();
+    if candidate == current {
+        return false;
+    }
+    let (candidate_numbers, candidate_suffix) = split_version(candidate);
+    let (current_numbers, current_suffix) = split_version(current);
+    if candidate_numbers.is_empty() || current_numbers.is_empty() {
+        return true;
+    }
+    for index in 0..candidate_numbers.len().max(current_numbers.len()) {
+        let left = candidate_numbers.get(index).copied().unwrap_or(0);
+        let right = current_numbers.get(index).copied().unwrap_or(0);
+        if left != right {
+            return left > right;
+        }
+    }
+    // Same numbers: a plain release beats a prerelease of the same version.
+    match (candidate_suffix.is_empty(), current_suffix.is_empty()) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => candidate_suffix > current_suffix,
+    }
+}
+
+/// Numbers and suffix of a dotted version.
+fn split_version(version: &str) -> (Vec<u64>, String) {
+    let mut numbers = Vec::new();
+    let mut suffix = String::new();
+    for (index, part) in version.split(['.', '-', '+']).enumerate() {
+        match part.parse::<u64>() {
+            Ok(number) => numbers.push(number),
+            Err(_) => {
+                suffix = version
+                    .split(['-', '+'])
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                let _ = index;
+                break;
+            }
+        }
+    }
+    (numbers, suffix)
+}
+
+/// What is on offer for an extension that is already installed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateState {
+    /// The catalog has nothing newer.
+    UpToDate,
+    /// The catalog has a newer version.
+    Upgrade,
+    /// The extension is not in the catalog any more.
+    NotInCatalog,
+}
+
+/// One extension of the runtime cache, and what the catalog says about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdatePlan {
+    pub id: String,
+    pub name: String,
+    pub installed: String,
+    /// Version the catalog offers, when the catalog knows the extension.
+    pub available: Option<String>,
+    pub state: UpdateState,
+}
+
+impl UpdatePlan {
+    /// One line for the extensions panel.
+    pub fn describe(&self) -> String {
+        match (self.state, self.available.as_deref()) {
+            (UpdateState::Upgrade, Some(available)) => {
+                format!("{} {} → {available} available", self.name, self.installed)
+            }
+            (UpdateState::UpToDate, _) => {
+                format!("{} {} is up to date", self.name, self.installed)
+            }
+            (UpdateState::Upgrade, None) => {
+                format!("{} {} can be upgraded", self.name, self.installed)
+            }
+            (UpdateState::NotInCatalog, _) => format!(
+                "{} {} is installed; the catalog no longer lists it",
+                self.name, self.installed
+            ),
+        }
+    }
+}
+
+/// What the user can do with every installed extension.
+///
+/// The cache is the record of what is installed, and the catalog (which the user
+/// supplies) is the record of what could be installed, so an upgrade is simply a
+/// catalog entry whose version is newer than the cached one.
+pub fn update_plan(cache: &RuntimeCache, catalog: &[ExtensionSource]) -> Vec<UpdatePlan> {
+    let mut plans = cache
+        .entries()
+        .iter()
+        .map(|entry| {
+            let source = catalog.iter().find(|source| source.id == entry.id);
+            let state = match source {
+                Some(source) => {
+                    if version_is_newer(&source.version, &entry.version) {
+                        UpdateState::Upgrade
+                    } else {
+                        UpdateState::UpToDate
+                    }
+                }
+                None => UpdateState::NotInCatalog,
+            };
+            UpdatePlan {
+                id: entry.id.clone(),
+                name: source
+                    .map(|source| source.name.clone())
+                    .unwrap_or_else(|| entry.id.clone()),
+                installed: entry.version.clone(),
+                available: source.map(|source| source.version.clone()),
+                state,
+            }
+        })
+        .collect::<Vec<_>>();
+    plans.sort_by(|left, right| left.id.cmp(&right.id));
+    plans
+}
+
 /// Steps an uninstall performs.
 pub fn uninstall_commands(root: &str, entry: &CacheEntry, shell: Shell) -> Vec<String> {
     let directory = if entry.directory.is_empty() {
@@ -693,5 +826,86 @@ mod tests {
         assert_eq!(format_bytes(1024), "1.0 KB");
         assert_eq!(format_bytes(1024 * 1024 * 3 / 2), "1.5 MB");
         assert_eq!(format_bytes(1024 * 1024 * 1024 * 2), "2.0 GB");
+    }
+
+    fn source_of(id: &str, name: &str, version: &str) -> ExtensionSource {
+        ExtensionSource {
+            id: id.into(),
+            name: name.into(),
+            version: version.into(),
+            url: format!("https://example.invalid/{id}-{version}.zip"),
+            sha256: "a".repeat(64),
+            bytes: 1024,
+            kind: ExtensionKind::Language,
+            binary: None,
+        }
+    }
+
+    #[test]
+    fn versions_compare_number_by_number() {
+        assert!(version_is_newer("1.2.10", "1.2.9"));
+        assert!(!version_is_newer("1.2.9", "1.2.10"));
+        assert!(version_is_newer("2.0", "1.9.9"));
+        assert!(!version_is_newer("2.0.0", "2.0"));
+        assert!(!version_is_newer("2.0", "2.0.0"));
+        assert!(version_is_newer("1.0.1", "1.0"));
+        // A prerelease is older than the release of the same numbers.
+        assert!(!version_is_newer("1.0.0-beta", "1.0.0"));
+        assert!(version_is_newer("1.0.0", "1.0.0-beta"));
+        assert!(version_is_newer("1.0.0-rc2", "1.0.0-beta"));
+        // Hand written versions fall back to "different means newer".
+        assert!(version_is_newer("nightly", "stable"));
+        assert!(!version_is_newer("stable", "stable"));
+        assert!(version_is_newer(" 1.2 ", "1.1"));
+    }
+
+    #[test]
+    fn the_update_plan_compares_the_cache_with_the_catalog() {
+        let mut cache = RuntimeCache::default();
+        let entry = |id: &str, version: &str| CacheEntry {
+            id: id.into(),
+            version: version.into(),
+            sha256: "b".repeat(64),
+            bytes: 10,
+            directory: format!("/cache/{id}"),
+        };
+        cache.record(entry("rust-analyzer", "1.2.9"));
+        cache.record(entry("clangd", "18.1.3"));
+        cache.record(entry("gone", "0.1.0"));
+
+        let catalog = vec![
+            source_of("rust-analyzer", "rust-analyzer", "1.2.10"),
+            source_of("clangd", "clangd", "18.1.3"),
+        ];
+        let plan = update_plan(&cache, &catalog);
+        assert_eq!(plan.len(), 3);
+        let by_id = |id: &str| {
+            plan.iter()
+                .find(|entry| entry.id == id)
+                .expect("a plan entry")
+        };
+        assert_eq!(by_id("rust-analyzer").state, UpdateState::Upgrade);
+        assert_eq!(by_id("rust-analyzer").available.as_deref(), Some("1.2.10"));
+        assert!(by_id("rust-analyzer")
+            .describe()
+            .contains("1.2.9 → 1.2.10 available"));
+        assert_eq!(by_id("clangd").state, UpdateState::UpToDate);
+        assert!(by_id("clangd").describe().contains("up to date"));
+        assert_eq!(by_id("gone").state, UpdateState::NotInCatalog);
+        assert!(by_id("gone").describe().contains("no longer lists it"));
+
+        // No catalog at all means nothing to upgrade to.
+        let empty = update_plan(&cache, &[]);
+        assert!(empty
+            .iter()
+            .all(|entry| entry.state == UpdateState::NotInCatalog));
+        assert!(update_plan(&RuntimeCache::default(), &catalog).is_empty());
+
+        // Uninstalling removes the entry and its plan.
+        let removed = cache.remove("gone").expect("the entry");
+        assert_eq!(removed.directory, "/cache/gone");
+        assert!(!update_plan(&cache, &catalog)
+            .iter()
+            .any(|entry| entry.id == "gone"));
     }
 }

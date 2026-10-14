@@ -348,11 +348,23 @@ pub(super) fn handle_key_down(window: Hwnd, w_param: Wparam) -> Lresult {
                 }
                 VK_LEFT => app.extension_category = app.extension_category.saturating_sub(1),
                 VK_RIGHT => app.extension_category = (app.extension_category + 1) % 5,
-                VK_UP => app.selected_language = app.selected_language.saturating_sub(1),
+                VK_UP => {
+                    app.selected_language = app.selected_language.saturating_sub(1);
+                    if app.extension_category == 0 {
+                        app.describe_selected_extension();
+                    }
+                }
                 VK_DOWN => {
                     app.selected_language =
-                        (app.selected_language + 1) % WindowsAppState::EXTENSION_LANGUAGES.len()
+                        (app.selected_language + 1) % WindowsAppState::EXTENSION_LANGUAGES.len();
+                    if app.extension_category == 0 {
+                        app.describe_selected_extension();
+                    }
                 }
+                // U upgrades the selected extension when the catalog is newer,
+                // X removes it and drops its runtime cache entry.
+                0x55 if app.extension_category == 0 => app.upgrade_selected_extension(),
+                0x58 if app.extension_category == 0 => app.uninstall_selected_extension(),
                 0x20 if app.extension_category == 0 => {
                     let index = app.selected_language;
                     app.language_installed[index] = !app.language_installed[index];

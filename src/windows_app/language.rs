@@ -16,6 +16,14 @@ impl WindowsAppState {
     }
 
     /// Summary of the tooling for the selected extension language.
+    /// Name of the language the extensions panel has selected.
+    pub(super) fn selected_language_name(&self) -> String {
+        WindowsAppState::EXTENSION_LANGUAGES[self
+            .selected_language
+            .min(WindowsAppState::EXTENSION_LANGUAGES.len() - 1)]
+        .to_string()
+    }
+
     pub(super) fn selected_language_tooling(&self) -> String {
         let language = WindowsAppState::EXTENSION_LANGUAGES[self
             .selected_language
