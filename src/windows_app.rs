@@ -265,7 +265,6 @@ struct WindowsAppState {
     graph_relation: graph_core::GraphRelation,
     session: session_core::Session,
     stored_buffers: BTreeMap<usize, StoredBuffer>,
-    pending_close: Option<usize>,
     graph_selected: Option<usize>,
     graph_keyboard_active: bool,
     background_path: Option<PathBuf>,
@@ -510,7 +509,6 @@ impl WindowsAppState {
             graph_relation: graph_core::GraphRelation::Follow,
             session: session_core::Session::default(),
             stored_buffers: BTreeMap::new(),
-            pending_close: None,
             graph_selected: None,
             graph_keyboard_active: false,
             background_path: preferences.background_path.clone().map(PathBuf::from),
@@ -2089,7 +2087,12 @@ fn perform_command(window: Hwnd, command: Wparam) {
                 }
             }
             platform::COMMAND_REVEAL_FOLDER => {
-                if platform::open_in_explorer(window, &app.project_root) {
+                if platform::open_external_terminal(window, &app.project_root) {
+                    app.status = format!(
+                        "Opened an external terminal in {}",
+                        app.project_root.display()
+                    );
+                } else if platform::open_in_explorer(window, &app.project_root) {
                     app.status = format!("Opened Explorer at {}", app.project_root.display());
                 } else {
                     app.status = "Could not open the current project in Explorer".into();
@@ -2217,13 +2220,10 @@ fn render_window(window: Hwnd) {
                 ui_chinese: app.ui_chinese,
                 code_zoom: app.code_zoom,
                 code_font_family: app.code_font_family,
-                code_font_name: WindowsAppState::CODE_FONTS[app.code_font_family],
                 font_search: &app.font_search,
                 font_search_focused: app.font_search_focused,
                 font_options: &WindowsAppState::CODE_FONTS,
-                settings_open: app.settings_open,
                 settings_motion: app.settings_motion,
-                extensions_open: app.extensions_open,
                 extensions_motion: app.extensions_motion,
                 extension_category: app.extension_category,
                 selected_language: app.selected_language,
@@ -2257,7 +2257,6 @@ fn render_window(window: Hwnd) {
                 expanded_comments: &expanded_comments,
                 editing_comment: app.editing_comment,
                 pointer_x: app.pointer_x,
-                package_open: app.package_open,
                 package_motion: app.package_motion,
                 package_targets: app.package_targets,
                 package_running: app.package_running,

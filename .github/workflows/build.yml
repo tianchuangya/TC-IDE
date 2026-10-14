@@ -15,9 +15,11 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
       - name: Check formatting
         run: cargo fmt --check
+      - name: Lint the shared core and the Linux backend
+        run: cargo clippy --all-targets -- -D warnings
 
   linux:
     runs-on: ubuntu-24.04
@@ -33,6 +35,19 @@ jobs:
         run: cargo check --all-targets
       - name: Test
         run: cargo test --all-targets
+      - name: Install headless X for the frame smoke test
+        run: sudo apt-get install --yes xvfb
+      - name: Render one native frame
+        run: |
+          xvfb-run -a cargo run -- --render-frame /tmp/tc-frame.png
+          python3 - <<'PY'
+          import os
+          import sys
+
+          size = os.path.getsize("/tmp/tc-frame.png")
+          print("rendered frame bytes:", size)
+          sys.exit(0 if size > 20_000 else 1)
+          PY
 
   windows-typecheck:
     runs-on: ubuntu-24.04
@@ -42,8 +57,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+          components: clippy
       - name: Type check the Win32 backend without linking
         run: cargo check --all-targets --target x86_64-pc-windows-msvc
+      - name: Lint the Win32 backend without linking
+        run: cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 
   windows:
     runs-on: windows-2025

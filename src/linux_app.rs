@@ -2490,10 +2490,7 @@ impl App {
                     self.highlighted_text(left + s(52), y, line, detected);
                 }
             }
-            if self.editor_focused
-                && index == self.caret_line
-                && (self.started.elapsed().as_millis() / 500) % 2 == 0
-            {
+            if self.editor_focused && index == self.caret_line && blink_phase(self.started) {
                 let caret_x = left
                     + s(52)
                     + self.code_text_width(
@@ -3054,7 +3051,7 @@ impl App {
                 self.height - s(18),
                 &terminal.input,
             );
-            if self.terminal_focused && (self.started.elapsed().as_millis() / 500) % 2 == 0 {
+            if self.terminal_focused && blink_phase(self.started) {
                 let x = s(44) + self.pango_text_size(&terminal.input, false).0;
                 self.line(
                     self.colors.bright,
@@ -3566,7 +3563,7 @@ impl App {
                 &self.new_file_name
             },
         );
-        if !self.project_location_focused && (self.started.elapsed().as_millis() / 500) % 2 == 0 {
+        if !self.project_location_focused && blink_phase(self.started) {
             let prefix = &self.new_file_name[..self.create_caret.min(self.new_file_name.len())];
             let caret = x + s(35) + self.pango_text_size(prefix, false).0;
             self.line(
@@ -3653,8 +3650,7 @@ impl App {
                 y + s(287),
                 &self.project_location,
             );
-            if self.project_location_focused && (self.started.elapsed().as_millis() / 500) % 2 == 0
-            {
+            if self.project_location_focused && blink_phase(self.started) {
                 let caret = x + s(36) + self.pango_text_size(&self.project_location, false).0;
                 self.line(
                     self.colors.bright,
@@ -3836,7 +3832,7 @@ impl App {
                 if !self.package_targets[index] {
                     continue;
                 }
-                let spread = ((t - 0.08 * index as f32).max(0.0)).min(1.0);
+                let spread = (t - 0.08 * index as f32).clamp(0.0, 1.0);
                 let eased = 1.0 - (1.0 - spread).powf(2.6);
                 let px = cx + (*dx as f32 * eased) as i32;
                 let py = cy + (*dy as f32 * eased) as i32;
@@ -4968,7 +4964,7 @@ impl App {
                 if self.extension_category != 0 {
                     if self.extension_category == 1 {
                         for index in 0..2 {
-                            let row = menu_y + s(116 + index as i32 * 52);
+                            let row = menu_y + s(116 + index * 52);
                             if x >= menu_x + s(195)
                                 && x <= menu_x + s(510)
                                 && (y - row).abs() < s(22)
@@ -5013,7 +5009,7 @@ impl App {
                         }
                     } else {
                         for index in 0..3 {
-                            let row = menu_y + s(116 + index as i32 * 52);
+                            let row = menu_y + s(116 + index * 52);
                             if x >= menu_x + s(195)
                                 && x <= menu_x + s(510)
                                 && (y - row).abs() < s(22)
@@ -5887,6 +5883,13 @@ fn collect_project_sources(root: &PathBuf, sources: &mut Vec<(String, Vec<String
     walk(root, root, sources);
 }
 
+/// Blinking caret phase. `u128::is_multiple_of` is newer than the toolchain this
+/// project still builds with locally, so keep the modulo form and allow the lint.
+#[allow(unknown_lints, clippy::manual_is_multiple_of)]
+fn blink_phase(started: Instant) -> bool {
+    (started.elapsed().as_millis() / 500) % 2 == 0
+}
+
 fn initial_files() -> Vec<FileBuffer> {
     let sources = [
         (
@@ -6331,8 +6334,7 @@ fn syntax_tokens(value: &str, keywords: &[&str]) -> Vec<(String, u8)> {
     let mut index = 0;
     while index < chars.len() {
         let start = index;
-        let kind;
-        if chars[index] == '"' || chars[index] == '\'' {
+        let kind: u8 = if chars[index] == '"' || chars[index] == '\'' {
             let quote = chars[index];
             index += 1;
             while index < chars.len() {
@@ -6343,7 +6345,7 @@ fn syntax_tokens(value: &str, keywords: &[&str]) -> Vec<(String, u8)> {
                     break;
                 }
             }
-            kind = 2;
+            2
         } else if chars[index].is_ascii_alphabetic() || chars[index] == '_' {
             index += 1;
             while index < chars.len()
@@ -6352,12 +6354,12 @@ fn syntax_tokens(value: &str, keywords: &[&str]) -> Vec<(String, u8)> {
                 index += 1;
             }
             let word = chars[start..index].iter().collect::<String>();
-            kind = if keywords.contains(&word.as_str()) {
+            let value = if keywords.contains(&word.as_str()) {
                 1
             } else {
                 0
             };
-            result.push((word, kind));
+            result.push((word, value));
             continue;
         } else if chars[index].is_ascii_digit() {
             index += 1;
@@ -6366,7 +6368,7 @@ fn syntax_tokens(value: &str, keywords: &[&str]) -> Vec<(String, u8)> {
             {
                 index += 1;
             }
-            kind = 2;
+            2
         } else {
             index += 1;
             while index < chars.len()
@@ -6377,8 +6379,8 @@ fn syntax_tokens(value: &str, keywords: &[&str]) -> Vec<(String, u8)> {
             {
                 index += 1;
             }
-            kind = 0;
-        }
+            0
+        };
         result.push((chars[start..index].iter().collect(), kind));
     }
     result

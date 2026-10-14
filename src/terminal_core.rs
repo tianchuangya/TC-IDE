@@ -315,8 +315,8 @@ pub fn selected_text(lines: &[String], selection: &TerminalSelection) -> Option<
     let start_line = start.line.min(last_line);
     let end_line = end.line.min(last_line).max(start_line);
     let mut result = String::new();
-    for line in start_line..=end_line {
-        let chars = lines[line].chars().collect::<Vec<_>>();
+    for (line, value) in lines.iter().enumerate().take(end_line + 1).skip(start_line) {
+        let chars = value.chars().collect::<Vec<_>>();
         let from = if line == start_line { start.column } else { 0 }.min(chars.len());
         let to = if line == end_line {
             end.column
@@ -653,25 +653,16 @@ mod tests {
     fn line_selection_and_containment_are_consistent() {
         let buffer = lines(&["one two"]);
         let selection = line_selection(0, buffer[0].chars().count());
-        assert_eq!(
-            selection.contains(TerminalPoint { line: 0, column: 0 }),
-            true
-        );
-        assert_eq!(
-            selection.contains(TerminalPoint { line: 0, column: 6 }),
-            true
-        );
-        assert_eq!(
-            selection.contains(TerminalPoint { line: 0, column: 7 }),
-            false
-        );
+        assert!(selection.contains(TerminalPoint { line: 0, column: 0 }));
+        assert!(selection.contains(TerminalPoint { line: 0, column: 6 }));
+        assert!(!selection.contains(TerminalPoint { line: 0, column: 7 }));
         assert_eq!(
             selected_text(&buffer, &selection).as_deref(),
             Some("one two")
         );
         let dragged = selection.extended_to(TerminalPoint { line: 1, column: 0 });
         assert_eq!(dragged.anchor, selection.anchor);
-        assert_eq!(dragged.contains(TerminalPoint { line: 0, column: 3 }), true);
+        assert!(dragged.contains(TerminalPoint { line: 0, column: 3 }));
     }
 
     #[test]

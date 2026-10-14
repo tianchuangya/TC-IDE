@@ -1711,7 +1711,7 @@ mod tests {
             .find(|node| node.key == file_key)
             .expect("file node");
         assert!(file.folded);
-        assert!(!file.has_children() == false);
+        assert!(file.has_children());
         assert_eq!(graph.len(), 2);
     }
 

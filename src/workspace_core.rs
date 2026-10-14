@@ -392,22 +392,23 @@ mod tests {
 
     #[test]
     fn preferences_round_trip_through_the_settings_file() {
-        let mut preferences = Preferences::default();
-        preferences.light_theme = true;
-        preferences.ui_chinese = true;
-        preferences.code_zoom = 4;
-        preferences.code_font_family = 2;
-        preferences.project_language = 3;
-        preferences.project_environment = 1;
-        preferences.language_installed = vec![true, false, true];
-        preferences.language_versions = vec![0, 2, 1];
-        preferences.background_path = Some("/tmp/wall.png".into());
-        preferences.background_opacity = 0.5;
-        preferences.background_offset_x = -0.25;
-        preferences.background_offset_y = 0.25;
-        preferences.background_zoom = 2.0;
-        preferences.ai_endpoint = "https://example.test/v1".into();
-        preferences.ai_model = "example-model".into();
+        let preferences = Preferences {
+            light_theme: true,
+            ui_chinese: true,
+            code_zoom: 4,
+            code_font_family: 2,
+            project_language: 3,
+            project_environment: 1,
+            language_installed: vec![true, false, true],
+            language_versions: vec![0, 2, 1],
+            background_path: Some("/tmp/wall.png".into()),
+            background_opacity: 0.5,
+            background_offset_x: -0.25,
+            background_offset_y: 0.25,
+            background_zoom: 2.0,
+            ai_endpoint: "https://example.test/v1".into(),
+            ai_model: "example-model".into(),
+        };
 
         let text = serialize_preferences(&preferences);
         assert_eq!(parse_preferences(&text), preferences);

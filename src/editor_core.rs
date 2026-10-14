@@ -1,3 +1,6 @@
+/// Syntax token kinds. The Windows backend draws them; the Linux backend has its
+/// own tokenizer, so the shared version is allowed to be unused on Linux.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenKind {
     Plain,
@@ -6,6 +9,7 @@ pub enum TokenKind {
     Comment,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyntaxToken {
     pub text: String,
@@ -393,6 +397,7 @@ pub fn comment_bounds(line: &str, file: &str) -> Option<(usize, usize, usize)> {
     Some((marker_start, content_start, content_end))
 }
 
+#[allow(dead_code)]
 pub fn completion_words(language: &str) -> &'static [&'static str] {
     match language {
         "C" => &[
@@ -514,6 +519,7 @@ pub fn completion_words(language: &str) -> &'static [&'static str] {
     }
 }
 
+#[allow(dead_code)]
 pub fn completion_prefix(line: &str, character_column: usize) -> String {
     line.chars()
         .take(character_column)
@@ -527,6 +533,7 @@ pub fn completion_prefix(line: &str, character_column: usize) -> String {
         .collect()
 }
 
+#[allow(dead_code)]
 pub fn completions(file: &str, line: &str, column: usize) -> Vec<String> {
     let prefix = completion_prefix(line, column);
     if prefix.is_empty() {
@@ -540,6 +547,7 @@ pub fn completions(file: &str, line: &str, column: usize) -> Vec<String> {
         .collect()
 }
 
+#[allow(dead_code)]
 pub fn syntax_tokens(value: &str, file: &str) -> Vec<SyntaxToken> {
     if let Some((comment_start, _, _)) = comment_bounds(value, file) {
         let mut tokens = syntax_tokens_without_comment(&value[..comment_start], file);
@@ -552,6 +560,7 @@ pub fn syntax_tokens(value: &str, file: &str) -> Vec<SyntaxToken> {
     syntax_tokens_without_comment(value, file)
 }
 
+#[allow(dead_code)]
 fn syntax_tokens_without_comment(value: &str, file: &str) -> Vec<SyntaxToken> {
     let keywords = completion_words(language_for_file(file));
     let chars = value.chars().collect::<Vec<_>>();
