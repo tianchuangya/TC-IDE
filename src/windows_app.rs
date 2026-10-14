@@ -13,6 +13,7 @@ use crate::dap_core;
 use crate::editor_core;
 use crate::extension_core;
 use crate::graph_core;
+use crate::index_core;
 use crate::lsp_core;
 use crate::session_core;
 use crate::terminal_core;
@@ -229,6 +230,7 @@ struct WindowsAppState {
     collapsed_directories: HashSet<PathBuf>,
     project_scroll: usize,
     project_symbols: Vec<editor_core::ProjectSymbolOccurrence>,
+    project_index: index_core::IncrementalIndex,
     workspace_search: String,
     workspace_search_focused: bool,
     create_kind: Option<CreateKind>,
@@ -296,10 +298,20 @@ struct WindowsAppState {
     lsp_last_change: Option<Instant>,
     lsp_dirty: bool,
     lsp_completion_asked: Option<Instant>,
-    index_request:
-        Option<std::sync::mpsc::Sender<(PathBuf, Vec<editor_core::ProjectSymbolOccurrence>)>>,
-    index_result:
-        Option<std::sync::mpsc::Receiver<(PathBuf, Vec<editor_core::ProjectSymbolOccurrence>)>>,
+    index_request: Option<
+        std::sync::mpsc::Sender<(
+            PathBuf,
+            index_core::IncrementalIndex,
+            index_core::IndexStats,
+        )>,
+    >,
+    index_result: Option<
+        std::sync::mpsc::Receiver<(
+            PathBuf,
+            index_core::IncrementalIndex,
+            index_core::IndexStats,
+        )>,
+    >,
     runtime_cache: extension_core::RuntimeCache,
     pending_extension: Option<extension_core::ExtensionSource>,
     hovered_symbol: Option<editor_core::SymbolOccurrence>,
@@ -467,7 +479,11 @@ impl WindowsAppState {
         let collapsed_directories = HashSet::new();
         let (project_entries, project_entry_paths, project_entry_is_dir) =
             Self::scan_project(&project_root, &collapsed_directories);
-        let project_symbols = Self::index_project(&project_root);
+        let mut project_index = index_core::IncrementalIndex::new();
+        project_index.refresh(Self::scan_project_fingerprints(&project_root), |relative| {
+            Self::read_project_file(&project_root, relative)
+        });
+        let project_symbols = project_index.symbols();
         let package_targets = Self::load_package_targets(&project_root);
         let create_location = project_root.clone();
         Self {
@@ -480,6 +496,7 @@ impl WindowsAppState {
             collapsed_directories,
             project_scroll: 0,
             project_symbols,
+            project_index,
             workspace_search: String::new(),
             workspace_search_focused: false,
             create_kind: None,
@@ -849,7 +866,29 @@ impl WindowsAppState {
         self.buffer.end_group();
         self.sync_lines();
         self.reveal_caret();
+        self.update_active_index_entry();
         self.last_edit = Some(Instant::now());
+    }
+
+    /// Re-parse only the file being edited, so the relation graph stays fresh.
+    fn update_active_index_entry(&mut self) {
+        let Some(path) = self.file_path.clone() else {
+            return;
+        };
+        let Ok(relative) = path.strip_prefix(&self.project_root) else {
+            return;
+        };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        let bytes = self.buffer.len() as u64;
+        // The modified time is irrelevant here: the editor is the source of truth.
+        let fingerprint = index_core::FileFingerprint::new(
+            relative,
+            bytes,
+            self.started.elapsed().as_millis() as u64,
+        );
+        if self.project_index.update_file(fingerprint, &self.lines) {
+            self.project_symbols = self.project_index.symbols();
+        }
     }
 
     /// Scroll so the caret is inside the window.
@@ -1188,6 +1227,7 @@ impl WindowsAppState {
         match fs::write(path, self.buffer.to_text().replace('\n', "\r\n")) {
             Ok(()) => {
                 self.status = format!("Saved {}", path.display());
+                self.update_active_index_entry();
                 self.request_project_index();
                 if let Some(index) = self.active_document() {
                     self.session.mark_dirty(index, false);
@@ -1315,20 +1355,21 @@ impl WindowsAppState {
         )
     }
 
-    fn index_project(root: &std::path::Path) -> Vec<editor_core::ProjectSymbolOccurrence> {
+    /// Fingerprints of the project files, without reading their contents.
+    fn scan_project_fingerprints(root: &std::path::Path) -> Vec<index_core::FileFingerprint> {
         fn collect(
             root: &std::path::Path,
             path: &std::path::Path,
-            sources: &mut Vec<(String, Vec<String>)>,
+            out: &mut Vec<index_core::FileFingerprint>,
         ) {
-            if sources.len() >= 300 {
+            if out.len() >= 300 {
                 return;
             }
             let Ok(entries) = fs::read_dir(path) else {
                 return;
             };
             for entry in entries.filter_map(Result::ok) {
-                if sources.len() >= 300 {
+                if out.len() >= 300 {
                     break;
                 }
                 let path = entry.path();
@@ -1339,7 +1380,7 @@ impl WindowsAppState {
                         .map(|name| matches!(name, ".git" | "target" | "node_modules" | ".venv"))
                         .unwrap_or(false);
                     if !ignored {
-                        collect(root, &path, sources);
+                        collect(root, &path, out);
                     }
                     continue;
                 }
@@ -1357,15 +1398,33 @@ impl WindowsAppState {
                 if metadata.len() > 1_000_000 {
                     continue;
                 }
-                if let Ok(content) = fs::read_to_string(&path) {
-                    sources.push((display, content.lines().map(str::to_string).collect()));
-                }
+                let modified = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_millis() as u64)
+                    .unwrap_or(0);
+                out.push(index_core::FileFingerprint::new(
+                    display,
+                    metadata.len(),
+                    modified,
+                ));
             }
         }
+        let mut fingerprints = Vec::new();
+        collect(root, root, &mut fingerprints);
+        fingerprints
+    }
 
-        let mut sources = Vec::new();
-        collect(root, root, &mut sources);
-        editor_core::project_symbol_occurrences(&sources)
+    /// Read one project file for the index.
+    fn read_project_file(root: &std::path::Path, relative: &str) -> Option<Vec<String>> {
+        let path = root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let content = fs::read_to_string(path).ok()?;
+        let mut lines = content.lines().map(str::to_string).collect::<Vec<_>>();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        Some(lines)
     }
 
     fn open_project(&mut self, root: PathBuf) {
@@ -1441,7 +1500,6 @@ impl WindowsAppState {
             self.project_entry_paths,
             self.project_entry_is_dir,
         ) = Self::scan_project(&self.project_root, &self.collapsed_directories);
-        self.project_symbols = Self::index_project(&self.project_root);
         self.project_scroll = self
             .project_scroll
             .min(self.project_entries.len().saturating_sub(1));
@@ -2418,17 +2476,25 @@ impl WindowsAppState {
     /// on its own thread and the result is collected by `poll_project_index`.
     fn request_project_index(&mut self) {
         let root = self.project_root.clone();
-        let (request, receive) =
-            std::sync::mpsc::channel::<(PathBuf, Vec<editor_core::ProjectSymbolOccurrence>)>();
+        let fingerprints = Self::scan_project_fingerprints(&root);
+        let previous = std::mem::take(&mut self.project_index);
+        let (request, receive) = std::sync::mpsc::channel::<(
+            PathBuf,
+            index_core::IncrementalIndex,
+            index_core::IndexStats,
+        )>();
         let sender = request.clone();
         let scan_root = root.clone();
         std::thread::spawn(move || {
-            let symbols = WindowsAppState::index_project(&scan_root);
-            let _ = sender.send((scan_root, symbols));
+            let mut index = previous;
+            let stats = index.refresh(fingerprints, |relative| {
+                WindowsAppState::read_project_file(&scan_root, relative)
+            });
+            let _ = sender.send((scan_root, index, stats));
         });
         self.index_request = Some(request);
         self.index_result = Some(receive);
-        self.status = "Indexing the project in the background".into();
+        self.status = "Refreshing the project index in the background".into();
     }
 
     /// Collect a finished background index, if one is ready.
@@ -2436,7 +2502,7 @@ impl WindowsAppState {
         let Some(receiver) = self.index_result.as_ref() else {
             return;
         };
-        let Ok((root, symbols)) = receiver.try_recv() else {
+        let Ok((root, index, stats)) = receiver.try_recv() else {
             return;
         };
         self.index_result = None;
@@ -2445,13 +2511,12 @@ impl WindowsAppState {
             // The project changed while the scan was running; drop the result.
             return;
         }
-        let files = symbols
-            .iter()
-            .map(|entry| entry.file.clone())
-            .collect::<HashSet<_>>()
-            .len();
-        self.project_symbols = symbols;
-        self.status = format!("Indexed {files} files in the background");
+        self.project_symbols = index.symbols();
+        self.project_index = index;
+        self.status = format!(
+            "Index: {} file(s) reused, {} re-parsed, {} removed",
+            stats.reused, stats.reparsed, stats.removed
+        );
     }
 
     /// Progress the packaging output has actually reached.    /// Progress the packaging output has actually reached.
@@ -6580,6 +6645,20 @@ pub fn self_check() -> i32 {
     report(
         "rename edits apply to a document",
         applied == "let answer = 1;\n",
+        &mut failures,
+    );
+    let mut index = index_core::IncrementalIndex::new();
+    let stats = index.refresh(
+        vec![index_core::FileFingerprint::new("src/a.rs", 10, 1)],
+        |_| Some(vec!["pub fn run() {}".to_string()]),
+    );
+    let reused = index.refresh(
+        vec![index_core::FileFingerprint::new("src/a.rs", 10, 1)],
+        |_| panic!("an unchanged file must not be read again"),
+    );
+    report(
+        "incremental index reuses unchanged files",
+        stats.reparsed == 1 && reused.reused == 1 && !index.symbols().is_empty(),
         &mut failures,
     );
     report(

@@ -3,6 +3,7 @@ mod dap_core;
 mod editor_core;
 mod extension_core;
 mod graph_core;
+mod index_core;
 #[cfg(target_os = "linux")]
 mod linux_app;
 mod lsp_core;
