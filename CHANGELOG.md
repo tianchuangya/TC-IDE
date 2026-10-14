@@ -70,6 +70,13 @@
 - 项目索引移到后台线程执行，扫描期间界面不阻塞；结果所属项目已变化时会丢弃旧结果。
 - 关系图在文件数超过预算时把文件夹聚合成 `+N more files` 节点，避免大项目一次铺满。
 
+### macOS 后端
+
+- `macos_app.rs` 不再是占位：直接通过 Objective-C 运行时创建 Cocoa 窗口与 `NSView` 子类，标题栏、行号栏、
+  代码列、选区、呼吸光标与状态栏都会绘制，输入/换行/退格/Delete/方向键/Home/End/全选/保存都可用，
+  编辑状态来自共享的 piece table、视口、会话、调色板与弹簧模型。CI 的 macOS runner 会运行
+  `--self-check` 与单元测试，Linux 上的 `windows-typecheck` job 也会类型检查与 lint Darwin 目标。
+
 ### Linux 后端
 
 - 设置面板的 14 个控件共用一份矩形定义（绘制、命中测试、键盘焦点三者一致）：新增按下态、不可用控件的

@@ -205,7 +205,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 
 ### P2：macOS 与共享架构
 
-- [ ] `macos_app.rs` 目前远落后于 Windows/Linux；实现 Cocoa 原生窗口、CoreText/Metal、NSPasteboard、NSOpenPanel、PTY 和 NSWorkspace。
+- [~] `macos_app.rs` 目前远落后于 Windows/Linux；实现 Cocoa 原生窗口、CoreText/Metal、NSPasteboard、NSOpenPanel、PTY 和 NSWorkspace。**本轮落地了真正的 Cocoa 后端骨架**：不经任何绑定 crate、直接通过 Objective-C 运行时与 AppKit 通话（保持零依赖），创建 `NSApplication` + `NSWindow` 与用 `objc_allocateClassPair` 注册的 `NSView` 子类 `TcIdeEditorView`（实现 `drawRect:`/`keyDown:`/`insertText:`/`mouseDown:`/`isFlipped`/`acceptsFirstResponder`），并用 60Hz `NSTimer` 驱动共享动效模型与重绘。状态全部来自共享内核：piece table 文本缓冲、`Viewport`、`session_core` 会话、`workspace_core` 偏好、`theme_core` 调色板、`motion_core` 弹簧、`editor_core` 符号扫描。绘制：CoreGraphics 画背景/标题栏/状态栏，AppKit 文本绘制（内部即 CoreText）画行号栏、代码列、选区与光标（光标用共享弹簧做呼吸），状态栏显示光标所在符号。编辑：输入（含 IME 提交走的 `insertText:`）、换行、退格、Delete、方向键/Home/End、全选、保存、Tab，光标自动滚动可见，点击定位光标；键位映射是纯函数（macOS 虚拟键码表）并有单元测试。**验证方式也补齐了**：`cargo check/clippy --target x86_64-apple-darwin` 在本机即可类型检查与 lint，CI 的 `windows-typecheck` job 现在同时检查 Darwin 目标，而 macOS runner 除了 release 构建还会**真正运行** `tc-ide --self-check` 与 `cargo test --all-targets`（本后端因此是被执行而不只是被编译）。**仍缺**：CoreText 直接排版（字宽实测）与 Metal 渲染、`NSPasteboard` 复制粘贴、`NSOpenPanel` 打开文件/项目、PTY 终端、`NSWorkspace` 在访达中显示，以及各面板（设置/扩展/打包/关系图/终端）与多标签界面；这些都需要在真机（或后续轮次）继续）
 - [x] 共享模型下沉：工作区（`workspace_core`）、设置、项目模板、会话（`session_core`）、终端（`terminal_core`）、关系图（`graph_core`）、AI/扩展/LSP/DAP 与动画模型（`motion_core`）都已下沉。（本轮补上最后两块：打包目标选择的读写（`PACKAGE_TARGETS_FILE` + `parse_package_targets`/`serialize_package_targets`，Windows 三个目标与 Linux 四个目标共用同一份文件格式）、完整打包命令拼装（`PackageRequest`/`package_command`：Rust/Go/C/C++/Python/Java 的构建步骤、ZIP、`MakeAppx`、`signtool` 签名与结束/失败标记）、MSIX 清单（`msix_identity`/`msix_display_name`/`msix_manifest`/`MSIX_ASSET_FILES`，清单版本改为随 `CARGO_PKG_VERSION` 变化，此前写死 0.2.0.0），以及设置/会话文件名常量。Windows 与 Linux 后端都已改为调用共享实现；`windows_app.rs` 里不再有自己的拼装逻辑）
 - [x] 把 `windows_app.rs` 拆为事件/编辑器/工作区/扩展/打包/终端窗口模块；把绘制按场景区域拆分。（`windows_app.rs` 从 7131 行降为 1359 行的模块根：只留 Win32 声明、常量、应用状态与生命周期，其余拆到 `src/windows_app/` 下的 14 个模块——`events`（窗口过程与命令分发）、`keys`、`pointer`、`editor`、`workspace`、`language`、`extensions`、`packaging`、`debug`、`ai`、`panel`、`detached`、`scene`、`motion`；`windows_renderer.rs` 中 2651 行的 `render` 拆为共享 `ScenePaint`（画笔与几何）加 8 个场景区域绘制方法：终端面板、打包进度、打包浮层、设置、扩展、问题、AI、新建对话框。`tests/module_layout.rs` 守卫这次拆分：模块文件必须存在且各带模块注释、单文件不得超过 1000/1500 行、每个场景区域必须有独立绘制方法并在 `render` 中被调用）
 - [x] 平台边界：`tests/platform_boundary.rs` 会拒绝共享核心里的平台导入、窗口句柄、原始 FFI 类型与 `unsafe` 块，检查每个共享核心都在 `main.rs` 中声明（防止守卫漏掉新模块），并断言三个平台模块仍处于 `cfg(target_os)` 之后。
@@ -339,6 +339,8 @@ cargo run --release
 ```bash
 rustup run stable cargo fmt --check                          # 必须用 stable 的 rustfmt：本机 /usr/bin/rustfmt 1.7
                                                              # 与 CI 的 1.10 排版结果不同，用错版本会“本地通过、CI 失败”
+cargo check --all-targets --target x86_64-apple-darwin       # macOS 后端类型检查（本机即可）
+cargo clippy --all-targets --target x86_64-apple-darwin -- -D warnings
 cargo test --all-targets                                   # 218 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试
 DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png --render-scene packaging   # 包装与编辑动画也可渲染成帧
 DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png --render-scene edit

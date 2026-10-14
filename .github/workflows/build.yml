@@ -85,12 +85,18 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: x86_64-pc-windows-msvc, x86_64-apple-darwin
           components: clippy
       - name: Type check the Win32 backend without linking
         run: cargo check --all-targets --target x86_64-pc-windows-msvc
       - name: Lint the Win32 backend without linking
         run: cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+      # The Cocoa backend is type checked and linted on Linux as well, so a
+      # mistake shows up before the macOS job spends a runner on it.
+      - name: Type check the Cocoa backend without linking
+        run: cargo check --all-targets --target x86_64-apple-darwin
+      - name: Lint the Cocoa backend without linking
+        run: cargo clippy --all-targets --target x86_64-apple-darwin -- -D warnings
 
   windows:
     runs-on: windows-2025
@@ -113,3 +119,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build isolated macOS backend
         run: cargo build --release
+      # The state layer check runs on the runner, so the Cocoa backend is
+      # executed here and not only compiled.
+      - name: Run the scriptable state layer check
+        run: ./target/release/tc-ide --self-check
+      - name: Run the unit tests
+        run: cargo test --all-targets
