@@ -84,6 +84,8 @@ impl App {{
 
     fn mark_active_dirty(&mut self) {{}}
     fn notify_language_server(&mut self) {{}}
+    fn update_active_index_entry(&mut self) {{}}
+    fn ensure_language_server(&mut self) {{}}
     fn code_cell_width(&self) -> f32 {{ 8.9 }}
 
     fn seed(&mut self, lines: &[&str]) {{
@@ -235,9 +237,11 @@ def main() -> int:
     for line in result.stdout.splitlines():
         if line.startswith(("FAILED", "all editor")):
             print(line)
-    if result.returncode != 0 and not result.stdout.strip():
-        print(result.stderr[-2000:])
-    return result.returncode
+    if result.returncode != 0:
+        if not result.stdout.strip():
+            print(result.stderr[-2000:])
+        return result.returncode
+    return 0
 
 
 if __name__ == "__main__":
