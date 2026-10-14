@@ -37,7 +37,7 @@ pub struct ProjectSymbolOccurrence {
     pub symbol: SymbolOccurrence,
 }
 
-fn identifier_ranges(line: &str) -> Vec<(usize, usize, String)> {
+pub fn identifier_ranges(line: &str) -> Vec<(usize, usize, String)> {
     let chars = line.chars().collect::<Vec<_>>();
     let mut result = Vec::new();
     let mut index = 0;
@@ -120,7 +120,50 @@ fn variable_declaration(code: &str, identifiers: &[(usize, usize, String)]) -> O
     None
 }
 
-fn declaration_name(line: &str, file: &str) -> Option<String> {
+/// `name(args) {` or `name(args):` defines a method in languages that have no
+/// declaration keyword, such as Java, C# and TypeScript. Requiring the
+/// definition shape keeps plain calls (`helper();`) out.
+fn bare_definition(code: &str) -> Option<String> {
+    let trimmed = code.trim_end();
+    if !(trimmed.ends_with('{') || trimmed.ends_with(':')) {
+        return None;
+    }
+    let open = code.find('(')?;
+    let close = code.rfind(')')?;
+    if close < open {
+        return None;
+    }
+    let before = &code[..open];
+    if !before.trim().is_empty()
+        && !before
+            .trim()
+            .chars()
+            .all(|value| value.is_alphanumeric() || matches!(value, '_' | ' ' | '\t' | '\'' | '#'))
+    {
+        // Something like `if (x) {` or `value.map(|x| {` is not a definition.
+        return None;
+    }
+    let names = identifier_ranges(before);
+    // Exactly one identifier: `start() {`. A prefixed definition such as
+    // `public void start() {` is handled by the caller argument heuristic, and
+    // `if let Some(x) {` must not look like a definition.
+    if names.len() != 1 {
+        return None;
+    }
+    let candidate = names.last()?;
+    if matches!(
+        candidate.2.as_str(),
+        "if" | "for" | "while" | "switch" | "catch" | "match" | "else" | "do" | "return"
+    ) {
+        return None;
+    }
+    if before.contains('.') || before.contains("::") || before.contains("->") {
+        return None;
+    }
+    Some(candidate.2.clone())
+}
+
+pub fn declaration_name(line: &str, file: &str) -> Option<String> {
     let code = comment_bounds(line, file)
         .map(|(start, _, _)| &line[..start])
         .unwrap_or(line);
@@ -134,6 +177,9 @@ fn declaration_name(line: &str, file: &str) -> Option<String> {
         }
     }
     if let Some(name) = variable_declaration(code, &identifiers) {
+        return Some(name);
+    }
+    if let Some(name) = bare_definition(code) {
         return Some(name);
     }
     let open = code.find('(')?;

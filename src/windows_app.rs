@@ -16,6 +16,7 @@ use crate::graph_core;
 use crate::index_core;
 use crate::lsp_core;
 use crate::session_core;
+use crate::syntax_core;
 use crate::terminal_core;
 use crate::text_buffer;
 use crate::workspace_core;
@@ -6661,6 +6662,28 @@ pub fn self_check() -> i32 {
     report(
         "rename edits apply to a document",
         applied == "let answer = 1;\n",
+        &mut failures,
+    );
+    let scan = syntax_core::scan(
+        &[
+            "class Engine {".to_string(),
+            "    start() {".to_string(),
+            "        helper();".to_string(),
+            "    }".to_string(),
+            "}".to_string(),
+        ],
+        "main.ts",
+    );
+    report(
+        "syntax scan finds class members and calls",
+        scan.scopes
+            .iter()
+            .any(|scope| scope.name.as_deref() == Some("Engine"))
+            && scan
+                .scopes
+                .iter()
+                .any(|scope| scope.name.as_deref() == Some("start") && scope.end_line == 3)
+            && scan.declarations.iter().any(|entry| entry.name == "start"),
         &mut failures,
     );
     let mut index = index_core::IncrementalIndex::new();

@@ -10,6 +10,7 @@ mod lsp_core;
 #[cfg(target_os = "macos")]
 mod macos_app;
 mod session_core;
+mod syntax_core;
 mod terminal_core;
 mod text_buffer;
 #[cfg(target_os = "windows")]

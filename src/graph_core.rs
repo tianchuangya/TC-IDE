@@ -8,6 +8,7 @@
 #![allow(dead_code)] // The Linux and macOS backends adopt this model next.
 
 use crate::editor_core::{self, ProjectSymbolOccurrence, SymbolKind, SymbolOccurrence, SymbolRole};
+use crate::syntax_core;
 
 /// Safety valve so a huge project can never queue an unbounded node list.
 pub const MAX_NODES: usize = 240;
@@ -147,35 +148,23 @@ fn occurrence_edge(
     }
 }
 
-/// Names the focused declaration calls inside its own block.
+/// Names the focused declaration calls inside its own body.
+///
+/// The syntax scan knows which scope a call belongs to, so a name mentioned in a
+/// comment, a string or a nested closure is no longer reported as a callee.
 fn callee_names(inputs: &GraphInputs<'_>, hovered: &SymbolOccurrence) -> Vec<String> {
-    let Some(lines) = inputs
-        .file_lines
-        .get(hovered.line)
-        .map(|_| inputs.file_lines)
-    else {
+    if inputs.file_lines.get(hovered.line).is_none() {
+        return Vec::new();
+    }
+    let scan = syntax_core::scan(inputs.file_lines, inputs.current_file);
+    let Some(scope) = scan.scope_of_symbol(&hovered.name, hovered.line) else {
         return Vec::new();
     };
-    let end = block_end(lines, hovered.line);
     let declared = declared_names(inputs);
-    let mut names = Vec::new();
-    for line in lines.iter().take(end + 1).skip(hovered.line) {
-        let code = editor_core::comment_bounds(line, inputs.current_file)
-            .map(|(start, _, _)| &line[..start])
-            .unwrap_or(line);
-        for word in code
-            .split(|value: char| !value.is_alphanumeric() && value != '_')
-            .filter(|word| !word.is_empty())
-        {
-            if word == hovered.name || !declared.contains(&word.to_string()) {
-                continue;
-            }
-            if !names.iter().any(|known| known == word) {
-                names.push(word.to_string());
-            }
-        }
-    }
-    names
+    scan.called_names(scope)
+        .into_iter()
+        .filter(|name| name != &hovered.name && declared.contains(name))
+        .collect()
 }
 
 fn is_folded(inputs: &GraphInputs<'_>, key: &str) -> bool {
