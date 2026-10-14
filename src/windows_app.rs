@@ -12,6 +12,7 @@ use crate::ai_core;
 use crate::editor_core;
 use crate::extension_core;
 use crate::graph_core;
+use crate::lsp_core;
 use crate::session_core;
 use crate::terminal_core;
 use crate::workspace_core;
@@ -5247,7 +5248,196 @@ unsafe extern "system" fn window_proc(
     }
 }
 
+/// Scriptable state layer check: `tc-ide --self-check` exercises the shared
+/// cores inside the Windows binary and prints a report, so CI can run it on a
+/// Windows runner without a display.
+pub fn self_check() -> i32 {
+    let mut failures = Vec::new();
+    let mut checks = 0usize;
+    let mut report = |name: &str, ok: bool, failures: &mut Vec<String>| {
+        checks += 1;
+        if !ok {
+            failures.push(name.to_string());
+        }
+    };
+
+    // Preferences round trip.
+    let preferences = workspace_core::Preferences {
+        light_theme: true,
+        ui_chinese: true,
+        code_zoom: 44,
+        ..workspace_core::Preferences::default()
+    };
+    let text = workspace_core::serialize_preferences(&preferences);
+    let parsed = workspace_core::parse_preferences(&text);
+    report(
+        "preferences serialize and parse",
+        parsed.ui_chinese,
+        &mut failures,
+    );
+    report(
+        "preferences normalize zoom",
+        parsed.code_zoom == 8,
+        &mut failures,
+    );
+
+    // Project template and task command.
+    let template = workspace_core::project_template("Demo App", "Rust", "stable", "None");
+    report(
+        "rust template writes Cargo.toml and main.rs",
+        template.files.iter().any(|file| file.path == "Cargo.toml")
+            && template.files.iter().any(|file| file.path == "src/main.rs"),
+        &mut failures,
+    );
+    let facts = workspace_core::ProjectFacts {
+        has_cargo: true,
+        language: "Rust".into(),
+        file_name: "main.rs".into(),
+        file_stem: "main".into(),
+        windows: true,
+        ..workspace_core::ProjectFacts::default()
+    };
+    report(
+        "rust task command",
+        workspace_core::task_command(&facts, true) == "cargo build",
+        &mut failures,
+    );
+
+    // Terminal grid, scrollback and selection.
+    let grid = terminal_core::GridSize::from_metrics(800.0, 480.0, 8.0, 16.0);
+    report(
+        "terminal grid fits the window",
+        grid.columns == 100 && grid.rows == 30,
+        &mut failures,
+    );
+    let mut parser = terminal_core::TerminalParser::new();
+    parser.feed("hello\r\nworld");
+    let view = std::sync::Arc::new(std::sync::Mutex::new(terminal_core::TerminalView::default()));
+    parser.publish(&view);
+    let published = view
+        .lock()
+        .map(|view| view.current.clone())
+        .unwrap_or_default();
+    report(
+        "VT parser publishes the live prompt",
+        published == "world",
+        &mut failures,
+    );
+    let buffer = vec!["alpha".to_string(), "beta".to_string()];
+    let selection = terminal_core::line_selection(0, 5);
+    report(
+        "terminal selection copies text",
+        terminal_core::selected_text(&buffer, &selection).as_deref() == Some("alpha"),
+        &mut failures,
+    );
+
+    // Relation graph scope, folding and edges.
+    let sources = vec![(
+        "src/main.rs".to_string(),
+        vec![
+            "pub fn run() {".to_string(),
+            "    helper();".to_string(),
+            "}".to_string(),
+            "pub fn helper() {}".to_string(),
+        ],
+    )];
+    let project = editor_core::project_symbol_occurrences(&sources);
+    let lines = sources[0].1.clone();
+    let symbols = editor_core::symbol_occurrences(&lines, "src/main.rs");
+    let folded = vec![graph_core::file_key("src/main.rs")];
+    let inputs = graph_core::GraphInputs {
+        project_name: "demo",
+        current_file: "src/main.rs",
+        current_folder: "src",
+        hovered: None,
+        file_lines: &lines,
+        file_symbols: &symbols,
+        project_symbols: &project,
+        folded: &folded,
+        relation: graph_core::GraphRelation::Follow,
+    };
+    let graph = graph_core::build_graph(&inputs, graph_core::GraphScope::File, "");
+    report(
+        "graph has a project root",
+        graph.nodes[0].level == graph_core::GraphLevel::Project,
+        &mut failures,
+    );
+    report("folding hides children", graph.len() == 2, &mut failures);
+
+    // Session parsing and AI request building.
+    let session =
+        session_core::Session::parse("project=C:\\demo\ndocument=C:\\demo\\a.rs|a.rs|0\n");
+    report(
+        "session restores documents",
+        session.documents().len() == 1 && session.project().is_some(),
+        &mut failures,
+    );
+    let settings = ai_core::AiSettings::default();
+    let command = ai_core::chat_command(&settings, "body.json", true, 30, ai_core::Shell::Windows);
+    report(
+        "AI command keeps the key in the environment",
+        command
+            .map(|command| command.contains("%TC_IDE_AI_KEY%") && !command.contains("Bearer sk-"))
+            .unwrap_or(false),
+        &mut failures,
+    );
+
+    // Extension catalog and runtime cache.
+    let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let catalog = format!(
+        "[extension]\nid=rust-analyzer\nname=Rust Analyzer\nkind=language\nversion=1.0\nurl=https://example.test/ra.zip\nsha256={digest}\n"
+    );
+    let sources = extension_core::parse_catalog(&catalog).unwrap_or_default();
+    report(
+        "extension catalog parses",
+        sources.len() == 1 && sources[0].is_installable(),
+        &mut failures,
+    );
+    report(
+        "checksum verification",
+        extension_core::verify_checksum(digest, &digest.to_uppercase()),
+        &mut failures,
+    );
+
+    // Language tooling.
+    report(
+        "language server selection",
+        lsp_core::server_for_file("main.rs")
+            .map(|spec| spec.program == "rust-analyzer")
+            .unwrap_or(false),
+        &mut failures,
+    );
+    let (body, rest) = lsp_core::decode_messages(&lsp_core::encode_message("{\"id\":1}"));
+    report(
+        "LSP framing round trip",
+        body == ["{\"id\":1}"] && rest.is_empty(),
+        &mut failures,
+    );
+    report(
+        "formatter selection",
+        workspace_core::format_command("Rust", "src/main.rs").is_some(),
+        &mut failures,
+    );
+
+    println!(
+        "TC-IDE self check: {checks} checks, {} failed",
+        failures.len()
+    );
+    for name in &failures {
+        println!("  FAILED: {name}");
+    }
+    if failures.is_empty() {
+        println!("state layer OK");
+        0
+    } else {
+        1
+    }
+}
+
 pub fn run() {
+    if std::env::args().any(|argument| argument == "--self-check") {
+        std::process::exit(self_check());
+    }
     unsafe {
         platform::enable_per_monitor_dpi();
         let instance = GetModuleHandleW(ptr::null());

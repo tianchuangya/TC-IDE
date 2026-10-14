@@ -73,6 +73,8 @@ jobs:
         run: cargo test --all-targets
       - name: Build and link native Win32 backend
         run: cargo build --release
+      - name: Run the scriptable state layer check
+        run: cargo run --release -- --self-check
 
   macos:
     runs-on: macos-15
