@@ -190,7 +190,7 @@ impl WindowsAppState {
         self.caret_column = snapshot.caret.column;
         self.selection_anchor = snapshot.selection_anchor;
         self.clamp_caret();
-        self.last_edit = Some(Instant::now());
+        self.edit_pulses.clear();
     }
 
     /// Rebuild the rendered lines from the piece table.
@@ -219,7 +219,6 @@ impl WindowsAppState {
         self.sync_lines();
         self.reveal_caret();
         self.update_active_index_entry();
-        self.last_edit = Some(Instant::now());
     }
 
     /// Scroll so the caret is inside the window.
@@ -328,6 +327,12 @@ impl WindowsAppState {
         self.caret_line = start.line;
         self.caret_column = start.column;
         self.selection_anchor = None;
+        self.note_edit(
+            motion_core::EditKind::Delete,
+            self.caret_line,
+            self.caret_column,
+            self.caret_column,
+        );
         true
     }
 
@@ -350,6 +355,9 @@ impl WindowsAppState {
         } else {
             value.replace("\r\n", "\n").replace('\r', "\n")
         };
+        // The highlight covers what the edit inserts: a pasted block is one
+        // animation, not one per character.
+        let (edit_line, edit_start) = (self.caret_line, self.caret_column);
         for character in value.chars() {
             if character == '\n' {
                 self.newline_raw();
@@ -361,8 +369,26 @@ impl WindowsAppState {
             }
         }
         self.finish_edit();
+        let kind = if value.chars().count() > 1 {
+            motion_core::EditKind::Paste
+        } else {
+            motion_core::EditKind::Insert
+        };
+        self.note_edit(kind, edit_line, edit_start, self.caret_column);
         self.notify_language_server();
         self.status = "Edited with Unicode-aware caret mapping".into();
+    }
+
+    /// Highlight an edit so every edit animates the same way, whether it came
+    /// from a keystroke, a paste, a deletion or an undo.
+    pub(super) fn note_edit(
+        &mut self,
+        kind: motion_core::EditKind,
+        line: usize,
+        start: usize,
+        end: usize,
+    ) {
+        self.edit_pulses.push(kind, line, start, end);
     }
 
     pub(super) fn completions(&self) -> Vec<String> {
@@ -423,6 +449,12 @@ impl WindowsAppState {
             self.record_undo();
             self.delete_selection_raw();
             self.finish_edit();
+            self.note_edit(
+                motion_core::EditKind::Delete,
+                self.caret_line,
+                self.caret_column,
+                self.caret_column,
+            );
             self.notify_language_server();
             return;
         }
@@ -444,6 +476,12 @@ impl WindowsAppState {
             self.caret_column = previous_length;
         }
         self.finish_edit();
+        self.note_edit(
+            motion_core::EditKind::Delete,
+            self.caret_line,
+            self.caret_column,
+            self.caret_column,
+        );
         self.notify_language_server();
     }
 
@@ -475,6 +513,12 @@ impl WindowsAppState {
             }
         }
         self.finish_edit();
+        self.note_edit(
+            motion_core::EditKind::Delete,
+            self.caret_line,
+            self.caret_column,
+            self.caret_column,
+        );
         self.notify_language_server();
     }
 
@@ -520,6 +564,12 @@ impl WindowsAppState {
                 self.sync_lines();
             }
             self.restore(snapshot);
+            self.note_edit(
+                motion_core::EditKind::Undo,
+                self.caret_line,
+                self.caret_column,
+                self.caret_column,
+            );
             self.status = "Undo".into();
         }
     }
@@ -532,6 +582,12 @@ impl WindowsAppState {
                 self.sync_lines();
             }
             self.restore(snapshot);
+            self.note_edit(
+                motion_core::EditKind::Redo,
+                self.caret_line,
+                self.caret_column,
+                self.caret_column,
+            );
             self.status = "Redo".into();
         }
     }

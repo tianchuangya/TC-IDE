@@ -237,6 +237,146 @@ impl RowShift {
     }
 }
 
+/// What produced an edit highlight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditKind {
+    Insert,
+    Delete,
+    Paste,
+    Undo,
+    Redo,
+}
+
+impl EditKind {
+    /// Whether an edit of this kind takes over the highlight of the previous
+    /// one, so that typing a word stays a single animation instead of one per
+    /// character.
+    fn continues(self, previous: EditKind) -> bool {
+        matches!(
+            (previous, self),
+            (EditKind::Insert, EditKind::Insert) | (EditKind::Delete, EditKind::Delete)
+        )
+    }
+}
+
+/// One span that animates after an edit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EditPulse {
+    pub kind: EditKind,
+    pub line: usize,
+    /// Byte range inside the line, in the coordinates of the edited document.
+    pub start: usize,
+    pub end: usize,
+    /// Seconds since the edit.
+    pub age: f32,
+}
+
+impl EditPulse {
+    /// Highlight amount: `1.0` right after the edit, `0.0` when it is over.
+    pub fn amount(&self) -> f32 {
+        (1.0 - self.age / EditPulses::DURATION).clamp(0.0, 1.0)
+    }
+
+    /// The same amount eased out, for drawing.
+    pub fn eased(&self) -> f32 {
+        ease_out_cubic(self.amount())
+    }
+
+    /// Whether the edit removed text instead of adding it.
+    pub fn removes(&self) -> bool {
+        self.kind == EditKind::Delete
+    }
+}
+
+/// Highlights of the edits of the last fraction of a second.
+///
+/// A paste of a whole block is one span rather than one per character, and a
+/// stream of keystrokes keeps at most [`EditPulses::LIMIT`] highlights alive, so
+/// fast typing never piles up animations that lag behind the text.
+#[derive(Clone, Debug, Default)]
+pub struct EditPulses {
+    pulses: Vec<EditPulse>,
+}
+
+impl EditPulses {
+    /// How long one highlight lasts.
+    pub const DURATION: f32 = 0.26;
+    /// How many highlights are kept at once.
+    pub const LIMIT: usize = 4;
+    /// Edits closer together than this on the same line become one highlight.
+    pub const COALESCE: f32 = 0.12;
+
+    /// No highlights yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record an edit, in the coordinates of the edited document.
+    pub fn push(&mut self, kind: EditKind, line: usize, start: usize, end: usize) {
+        let (start, end) = (start.min(end), start.max(end));
+        if let Some(last) = self.pulses.last_mut() {
+            let touching = start <= last.end.saturating_add(1) && last.start <= end + 1;
+            if last.line == line
+                && last.age <= Self::COALESCE
+                && kind.continues(last.kind)
+                && touching
+            {
+                last.start = last.start.min(start);
+                last.end = last.end.max(end);
+                last.age = 0.0;
+                return;
+            }
+        }
+        if self.pulses.len() >= Self::LIMIT {
+            self.pulses.remove(0);
+        }
+        self.pulses.push(EditPulse {
+            kind,
+            line,
+            start,
+            end,
+            age: 0.0,
+        });
+    }
+
+    /// Age the highlights and drop the finished ones.
+    ///
+    /// Unlike a spring, an age follows the real frame time: a long frame ends
+    /// the highlight instead of stretching it.
+    pub fn step(&mut self, dt: f32) {
+        let dt = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
+        for pulse in &mut self.pulses {
+            pulse.age += dt;
+        }
+        self.pulses.retain(|pulse| pulse.age < Self::DURATION);
+    }
+
+    /// The newest highlight on `line`, which is the one to draw.
+    pub fn on_line(&self, line: usize) -> Option<&EditPulse> {
+        self.pulses.iter().rev().find(|pulse| pulse.line == line)
+    }
+
+    /// Every live highlight, oldest first.
+    pub fn pulses(&self) -> &[EditPulse] {
+        &self.pulses
+    }
+
+    /// Highlights currently alive.
+    pub fn len(&self) -> usize {
+        self.pulses.len()
+    }
+
+    /// Whether no highlight is alive.
+    pub fn is_empty(&self) -> bool {
+        self.pulses.is_empty()
+    }
+
+    /// Forget every highlight, for example when another document is opened.
+    pub fn clear(&mut self) {
+        self.pulses.clear();
+    }
+}
+
 /// Cubic ease out, for one shot transitions.
 pub fn ease_out_cubic(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
@@ -472,5 +612,121 @@ mod tests {
         assert_eq!(shift.place("row", 1.0, f32::NAN), 6.0);
         assert_eq!(shift.place("row", 1.0, -1.0), 6.0);
         assert!(shift.place("row", 1.0, 10.0).is_finite());
+    }
+
+    #[test]
+    fn an_edit_highlight_fades_out_and_is_dropped() {
+        let mut pulses = EditPulses::new();
+        pulses.push(EditKind::Paste, 4, 10, 210);
+        assert_eq!(pulses.len(), 1);
+        let newest = pulses
+            .on_line(4)
+            .copied()
+            .expect("the paste is highlighted");
+        assert_eq!((newest.start, newest.end), (10, 210));
+        assert_eq!(newest.amount(), 1.0);
+        assert_eq!(newest.eased(), 1.0);
+
+        pulses.step(EditPulses::DURATION / 2.0);
+        let half = pulses.on_line(4).expect("still fading");
+        assert!((half.amount() - 0.5).abs() < 1.0e-6, "{}", half.amount());
+        assert!(half.eased() > 0.5, "the fade eases out");
+
+        for _ in 0..40 {
+            pulses.step(1.0 / 60.0);
+        }
+        assert!(pulses.is_empty(), "a finished highlight is dropped");
+        assert!(pulses.on_line(4).is_none());
+    }
+
+    #[test]
+    fn typing_a_word_stays_one_highlight_and_keeps_its_span() {
+        let mut pulses = EditPulses::new();
+        for step in 0..12 {
+            let at = 20 + step;
+            pulses.push(EditKind::Insert, 2, at, at + 1);
+            pulses.step(1.0 / 60.0);
+        }
+        assert_eq!(pulses.len(), 1, "one keystroke is not one animation");
+        let pulse = pulses.on_line(2).copied().expect("the word is highlighted");
+        assert_eq!((pulse.start, pulse.end), (20, 32));
+        assert!(
+            pulse.age <= 1.0 / 60.0 + 1.0e-6,
+            "the fade restarts with every character: age {}",
+            pulse.age
+        );
+
+        // A keystroke somewhere else on the line is a highlight of its own.
+        for _ in 0..5 {
+            pulses.step(1.0 / 60.0);
+        }
+        pulses.push(EditKind::Insert, 2, 60, 61);
+        assert_eq!(
+            pulses.len(),
+            2,
+            "a distant edit is not folded into the word"
+        );
+
+        // And once the highlight has faded, an edit starts a fresh one.
+        for _ in 0..40 {
+            pulses.step(1.0 / 60.0);
+        }
+        assert!(pulses.is_empty());
+        pulses.push(EditKind::Insert, 2, 80, 81);
+        assert_eq!(pulses.len(), 1);
+        assert_eq!(pulses.on_line(2).map(|pulse| pulse.start), Some(80));
+    }
+
+    #[test]
+    fn a_burst_of_edits_never_piles_up() {
+        let mut pulses = EditPulses::new();
+        for index in 0..50 {
+            pulses.push(EditKind::Paste, index % 7, 0, 400);
+        }
+        assert_eq!(pulses.len(), EditPulses::LIMIT);
+        assert!(
+            pulses.on_line(49 % 7).is_some(),
+            "the newest edit is always highlighted"
+        );
+        assert_eq!(pulses.pulses().len(), EditPulses::LIMIT);
+    }
+
+    #[test]
+    fn undo_and_redo_are_highlights_of_their_own() {
+        let mut pulses = EditPulses::new();
+        pulses.push(EditKind::Insert, 3, 0, 5);
+        pulses.push(EditKind::Undo, 3, 5, 5);
+        pulses.push(EditKind::Redo, 3, 5, 12);
+        assert_eq!(
+            pulses.len(),
+            3,
+            "an undo is not folded into the typing before it"
+        );
+        assert_eq!(
+            pulses.on_line(3).map(|pulse| pulse.kind),
+            Some(EditKind::Redo)
+        );
+        // A deletion collapses to the caret and is marked as a removal.
+        pulses.push(EditKind::Delete, 5, 8, 8);
+        let deletion = pulses.on_line(5).copied().expect("delete highlight");
+        assert!(deletion.removes());
+        assert_eq!((deletion.start, deletion.end), (8, 8));
+    }
+
+    #[test]
+    fn a_broken_frame_time_does_not_advance_a_highlight() {
+        let mut pulses = EditPulses::new();
+        pulses.push(EditKind::Insert, 0, 0, 3);
+        pulses.step(f32::NAN);
+        pulses.step(-1.0);
+        assert_eq!(pulses.on_line(0).map(|pulse| pulse.age), Some(0.0));
+        pulses.step(10.0);
+        assert!(
+            pulses.is_empty(),
+            "a long frame finishes the highlight instead of freezing it"
+        );
+        pulses.push(EditKind::Insert, 1, 0, 1);
+        pulses.clear();
+        assert!(pulses.is_empty());
     }
 }

@@ -147,7 +147,8 @@ pub struct WindowsScene<'a> {
     /// Rows the panel is scrolled back from the newest output.
     pub terminal_scrolled: usize,
     pub animation_seconds: f32,
-    pub edit_age: Option<f32>,
+    /// Fade of the highlight of the newest edit on the caret line.
+    pub edit_pulse: Option<f32>,
     pub create_motion: f32,
 }
 
@@ -2676,10 +2677,13 @@ impl DirectEditorRenderer {
                     },
                 )
             };
+            // The newest edit on this line lifts the code while it fades, so a
+            // keystroke, a paste, a deletion and an undo all animate the same
+            // way instead of only typing doing something.
             let edit_offset = scene
-                .edit_age
+                .edit_pulse
                 .filter(|_| index == scene.caret_line)
-                .map(|age| (1.0 - (age / 0.16).clamp(0.0, 1.0)) * 7.0 * scale)
+                .map(|amount| amount * 7.0 * scale)
                 .unwrap_or(0.0);
             let mut token_x = code_origin + 52.0 * scale + edit_offset;
             for token in editor_core::syntax_tokens(value, scene.file_name) {

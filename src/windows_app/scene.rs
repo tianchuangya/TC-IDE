@@ -305,7 +305,10 @@ pub(super) fn render_window(window: Hwnd) {
                 terminal_progress: app.terminal_motion,
                 terminal_scrolled: viewport.clamped_scroll(),
                 animation_seconds: app.started.elapsed().as_secs_f32(),
-                edit_age: app.last_edit.map(|started| started.elapsed().as_secs_f32()),
+                edit_pulse: app
+                    .edit_pulses
+                    .on_line(app.caret_line)
+                    .map(|pulse| pulse.eased()),
                 create_motion: app.create_motion,
             };
             let mut renderer = renderer_cell.borrow_mut();

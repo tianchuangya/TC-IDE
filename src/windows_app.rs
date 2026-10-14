@@ -391,7 +391,8 @@ struct WindowsAppState {
     status: String,
     started: Instant,
     last_frame: Instant,
-    last_edit: Option<Instant>,
+    /// Highlights of the edits of the last fraction of a second.
+    edit_pulses: motion_core::EditPulses,
     create_motion: f32,
     create_velocity: f32,
 }
@@ -683,7 +684,7 @@ impl WindowsAppState {
             status: "DirectWrite / Direct2D editor ready".into(),
             started: Instant::now(),
             last_frame: Instant::now(),
-            last_edit: None,
+            edit_pulses: motion_core::EditPulses::new(),
             create_motion: 0.0,
             create_velocity: 0.0,
         }

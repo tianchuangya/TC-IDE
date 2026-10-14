@@ -197,7 +197,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 ### P1：视觉与交互
 
 - [x] 文件树折叠/展开加入真正的行位置弹簧过渡，不能只旋转箭头后瞬间消失。（共享 `motion_core::RowShift`：按行的稳定标识（项目树用文件路径）保存一条弹簧，布局把行放到新位置时返回的是滑动中的小数行号。Windows 项目树已接入——`update_motion` 每帧重排行位置并放进场景，渲染器按 `scene.tree_row_positions` 绘制：折叠后下方的行滑上去、展开时再滑下来，切换项目会清空弹簧以免从上一棵树上滑过来；`tools/windows_editor_sim.py` 与 Windows 单元测试都覆盖了折叠→滑动→停稳与展开的序列。Linux 端原本就用逐行 reveal 高度累积实现同样的滑动（折叠时子行高度收到 0，下方行随之上移），因此不再改造；共享模型已可直接复用于其他会重排的列表）
-- [ ] 输入和删除动画扩展到多字符粘贴、撤销/重做，同时保证高频输入不积压动画。
+- [x] 输入和删除动画扩展到多字符粘贴、撤销/重做，同时保证高频输入不积压动画。（共享 `motion_core::EditPulses`：按编辑类型（插入/删除/粘贴/撤销/重做）记录一段高亮，同一行、120ms 内且范围相接的同类编辑会合并成一段（打一个词只有一次动画），最多保留 4 段（超过就丢掉最旧的），高亮 260ms 内淡出后自动移除，`amount()`/`eased()` 给出淡出量、`on_line()` 给出该行最新的一段、`removes()` 标记删除。Linux 编辑器改用它：输入、粘贴（含多行粘贴）、补全插入、退格、Delete、删除选区都会点亮对应区间，删除没有可抬起的文本，就改用一条随淡出收缩的竖线标记缺口；Windows 编辑器同样改用它（`insert_text` 按字符数区分插入与粘贴、退格/Delete/删除选区记为删除、撤销与重做各自成段），渲染器按该段淡出量抬起代码行。`tools/windows_editor_sim.py` 现在会验证"粘贴是一段、删除/撤销/重做都有标记、连打 40 次不会积压、最新一次仍然高亮"；新增 `--render-scene edit` 让编辑动画也能渲染成帧，CI 的 Linux job 一并渲染该帧）
 - [ ] 背景图增加可视化裁剪框、拖拽和缩放预览，而不仅是数值调节。
 - [x] 底部终端面板的鼠标选择与复制。（已实现：面板正文拖选、按单元格高亮、状态栏显示选中字符数、`Ctrl+Shift+C` 复制，`Ctrl+C` 仍中断；仍待在 Windows 实机确认高 DPI 下的对齐）
 - [~] 设置、打包与项目树等可点击行已有悬停高亮；**按钮的按下/禁用/键盘焦点状态与浅色主题对比度检查仍未完成**。
@@ -213,7 +213,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 ### P2：自动化与发布前门槛
 
 - [x] 可脚本化的状态层测试：tc-ide --self-check 覆盖共享内核断言，Windows CI 在发布构建后运行它。
-- [x] 单元测试覆盖：`graph_core`、`terminal_core`、`editor_core`、`workspace_core`（偏好设置/项目模板/打包命令与打包目标/打包报告）、`session_core`、`ai_core`、`extension_core`、`lsp_core`、`dap_core`、`text_buffer`、`index_core`、`syntax_core`、`motion_core`（含行位置弹簧）均已覆盖（本地 182 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试；Windows 侧另有编辑器与项目树行弹簧的测试）。
+- [x] 单元测试覆盖：`graph_core`、`terminal_core`、`editor_core`、`workspace_core`（偏好设置/项目模板/打包命令与打包目标/打包报告）、`session_core`、`ai_core`、`extension_core`、`lsp_core`、`dap_core`、`text_buffer`、`index_core`、`syntax_core`、`motion_core`（含行位置弹簧）均已覆盖（本地 187 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试；Windows 侧另有编辑器与项目树行弹簧的测试）。
 - [x] CI 加入 `cargo fmt --check`、Clippy（先清零现有警告）和产物结构检查。（`cargo fmt --check` 与 `windows-typecheck` 已加入；Clippy 仍待清零现有警告后接入，当前 Linux 侧仍有 18 条、Windows 侧 2 条 dead_code 类警告）
 - [x] 版本号（Cargo.toml 0.3.0）、CHANGELOG.md、docs/INSTALL.md、docs/KNOWN-ISSUES.md、docs/REAL-MACHINE-CHECKLIST.md 已就绪，均标注“未发布”。
 - [x] 未触发 release.yml、未创建标签或 Release；工作流已补齐三平台产物步骤，但仍然只能手动触发。
@@ -339,8 +339,9 @@ cargo run --release
 ```bash
 rustup run stable cargo fmt --check                          # 必须用 stable 的 rustfmt：本机 /usr/bin/rustfmt 1.7
                                                              # 与 CI 的 1.10 排版结果不同，用错版本会“本地通过、CI 失败”
-cargo test --all-targets                                   # 182 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试
-DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png --render-scene packaging   # 包装动画也可渲染成帧
+cargo test --all-targets                                   # 187 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试
+DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png --render-scene packaging   # 包装与编辑动画也可渲染成帧
+DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png --render-scene edit
 cargo clippy --all-targets -- -D warnings                   # 共享内核 + Linux 后端
 cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo check --all-targets --target x86_64-pc-windows-msvc    # Windows 类型检查

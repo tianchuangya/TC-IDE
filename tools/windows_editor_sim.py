@@ -24,7 +24,7 @@ import subprocess
 import sys
 
 METHODS = [
-    "update_tree_rows", "tree_row_position",
+    "update_tree_rows", "tree_row_position", "note_edit",
     "clamp_caret", "position", "snapshot", "restore", "sync_lines", "record_undo",
     "finish_edit", "selection_range", "selected_text", "delete_selection_raw",
     "insert_text", "newline", "newline_raw", "backspace", "delete_forward",
@@ -68,6 +68,7 @@ struct App {{
     project_entry_paths: Vec<std::path::PathBuf>,
     tree_row_shift: motion_core::RowShift,
     tree_row_positions: Vec<f32>,
+    edit_pulses: motion_core::EditPulses,
 }}
 
 impl App {{
@@ -92,6 +93,7 @@ impl App {{
             project_entry_paths: Vec::new(),
             tree_row_shift: motion_core::RowShift::new(),
             tree_row_positions: Vec::new(),
+            edit_pulses: motion_core::EditPulses::new(),
         }}
     }}
 
@@ -236,6 +238,49 @@ fn main() {{
     }}
     if app.tree_row_positions != [0.0, 1.0, 2.0, 3.0] {{
         failures.push(format!("tree rows settle after unfolding: {{:?}}", app.tree_row_positions));
+    }}
+
+    // Every edit animates, not just a single keystroke, and a burst of edits
+    // cannot pile up highlights that lag behind the text.
+    let mut app = App::new();
+    app.seed(&["let value = 1;"]);
+    app.caret_line = 0;
+    app.caret_column = 14;
+    app.insert_text("pasted block");
+    match app.edit_pulses.on_line(0) {{
+        Some(pulse)
+            if pulse.kind == motion_core::EditKind::Paste
+                && pulse.start == 14
+                && pulse.end == 26 => {{}}
+        other => failures.push(format!("a paste should be one span: {{other:?}}")),
+    }}
+    app.backspace();
+    match app.edit_pulses.on_line(0) {{
+        Some(pulse) if pulse.kind == motion_core::EditKind::Delete => {{}}
+        other => failures.push(format!("a deletion should be marked: {{other:?}}")),
+    }}
+    app.undo();
+    match app.edit_pulses.on_line(0) {{
+        Some(pulse) if pulse.kind == motion_core::EditKind::Undo => {{}}
+        other => failures.push(format!("an undo should be marked: {{other:?}}")),
+    }}
+    app.redo();
+    match app.edit_pulses.on_line(0) {{
+        Some(pulse) if pulse.kind == motion_core::EditKind::Redo => {{}}
+        other => failures.push(format!("a redo should be marked: {{other:?}}")),
+    }}
+    for _ in 0..40 {{
+        app.insert_text("x");
+        app.edit_pulses.step(1.0 / 60.0);
+    }}
+    if app.edit_pulses.len() > motion_core::EditPulses::LIMIT {{
+        failures.push(format!(
+            "edit highlights pile up: {{}}",
+            app.edit_pulses.len()
+        ));
+    }}
+    if app.edit_pulses.on_line(0).is_none() {{
+        failures.push("the newest edit should still be highlighted".to_string());
     }}
 
     if failures.is_empty() {{

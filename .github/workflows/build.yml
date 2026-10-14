@@ -44,11 +44,17 @@ jobs:
           # rendered through --render-scene instead of waiting for one.
           xvfb-run -a cargo run -- --render-frame /tmp/tc-packaging.png --render-scene packaging
           xvfb-run -a cargo run -- --render-frame /tmp/tc-emit.png --render-scene packaging-emit
+          xvfb-run -a cargo run -- --render-frame /tmp/tc-edit.png --render-scene edit
           python3 - <<'PY'
           import os
           import sys
 
-          frames = ["/tmp/tc-frame.png", "/tmp/tc-packaging.png", "/tmp/tc-emit.png"]
+          frames = [
+              "/tmp/tc-frame.png",
+              "/tmp/tc-packaging.png",
+              "/tmp/tc-emit.png",
+              "/tmp/tc-edit.png",
+          ]
           sizes = {path: os.path.getsize(path) for path in frames}
           for path, size in sizes.items():
               print("rendered frame bytes:", path, size)

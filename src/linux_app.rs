@@ -452,13 +452,6 @@ struct ParsedComment<'a> {
     content_end: usize,
 }
 
-struct EditMotion {
-    line: usize,
-    start: usize,
-    end: usize,
-    started: Instant,
-}
-
 #[derive(Clone, Copy)]
 struct UiMotion {
     value: f32,
@@ -620,7 +613,8 @@ struct App {
     project_language_menu: bool,
     project_environment_menu: bool,
     expanded_comments: BTreeSet<(usize, usize)>,
-    edit_motion: Option<EditMotion>,
+    /// Highlights of the edits of the last fraction of a second.
+    edit_pulses: motion_core::EditPulses,
     status_message: String,
     started: Instant,
 }
@@ -1046,7 +1040,12 @@ impl App {
             self.files[self.selected_file].lines[self.caret_line]
                 .insert_str(self.caret_column, suffix);
             self.caret_column += suffix.len();
-            self.start_edit_motion(self.caret_line, start, self.caret_column);
+            self.note_edit(
+                motion_core::EditKind::Insert,
+                self.caret_line,
+                start,
+                self.caret_column,
+            );
             self.status_message = format!("Completed {candidate}");
         }
     }
@@ -1374,15 +1373,10 @@ impl App {
         self.s(((1.0 - motion.value.clamp(0.0, 1.0)) * -12.0).round() as i32)
     }
 
-    fn start_edit_motion(&mut self, line: usize, start: usize, end: usize) {
-        if end > start {
-            self.edit_motion = Some(EditMotion {
-                line,
-                start,
-                end,
-                started: Instant::now(),
-            });
-        }
+    /// Highlight an edit so a paste, a deletion or a completion animates the
+    /// same way a single character does.
+    fn note_edit(&mut self, kind: motion_core::EditKind, line: usize, start: usize, end: usize) {
+        self.edit_pulses.push(kind, line, start, end);
     }
 
     fn file_tree_row(&self, wanted: usize) -> Option<i32> {
@@ -2562,21 +2556,20 @@ impl App {
                 }
             } else {
                 let _ = color;
-                if let Some(motion) = self.edit_motion.as_ref().filter(|motion| {
-                    motion.line == index
-                        && motion.start <= motion.end
-                        && motion.end <= line.len()
-                        && motion.started.elapsed() < Duration::from_millis(260)
+                if let Some(pulse) = self.edit_pulses.on_line(index).filter(|pulse| {
+                    pulse.start <= pulse.end
+                        && pulse.end <= line.len()
+                        && line.is_char_boundary(pulse.start)
+                        && line.is_char_boundary(pulse.end)
                 }) {
-                    let progress = (motion.started.elapsed().as_secs_f32() / 0.26).clamp(0.0, 1.0);
-                    let eased = 1.0 - (1.0 - progress).powi(3);
+                    let eased = pulse.eased();
                     let code_x = left + s(52);
-                    let before = &line[..motion.start];
-                    let inserted = &line[motion.start..motion.end];
-                    let after = &line[motion.end..];
+                    let before = &line[..pulse.start];
+                    let inserted = &line[pulse.start..pulse.end];
+                    let after = &line[pulse.end..];
                     self.highlighted_text(code_x, y, before, detected);
                     let insert_x = code_x + self.code_text_width(before);
-                    let lift = ((1.0 - eased) * s(9) as f32) as i32;
+                    let lift = (eased * s(9) as f32) as i32;
                     self.pango_text(self.colors.bright, insert_x, y + lift, inserted, true);
                     self.highlighted_text(
                         insert_x + self.code_text_width(inserted),
@@ -2584,14 +2577,26 @@ impl App {
                         after,
                         detected,
                     );
-                    let trail = ((1.0 - eased) * self.code_text_width(inserted) as f32) as i32;
-                    if trail > 1 {
+                    if pulse.removes() {
+                        // A deletion leaves nothing to lift, so the gap itself
+                        // is marked while the highlight fades.
+                        let height = (eased * s(16) as f32) as i32;
                         self.line(
                             self.colors.accent,
-                            1,
-                            (insert_x, y + s(7)),
-                            (insert_x + trail, y + s(7)),
+                            2,
+                            (insert_x, y - height),
+                            (insert_x, y + s(2)),
                         );
+                    } else {
+                        let trail = (eased * self.code_text_width(inserted) as f32) as i32;
+                        if trail > 1 {
+                            self.line(
+                                self.colors.accent,
+                                1,
+                                (insert_x, y + s(7)),
+                                (insert_x + trail, y + s(7)),
+                            );
+                        }
                     }
                 } else {
                     self.highlighted_text(left + s(52), y, line, detected);
@@ -3902,6 +3907,20 @@ impl App {
                 self.build_started = Some(ago(absorb + 0.9));
                 true
             }
+            "edit" => {
+                // A paste highlight halfway through its fade, so the edit
+                // animation can be inspected without typing.
+                let end = self
+                    .files
+                    .get(self.selected_file)
+                    .and_then(|file| file.lines.first())
+                    .map(|line| line.len())
+                    .unwrap_or(0);
+                self.note_edit(motion_core::EditKind::Paste, 0, 0, end);
+                self.edit_pulses
+                    .step(motion_core::EditPulses::DURATION / 2.0);
+                true
+            }
             _ => false,
         }
     }
@@ -4068,14 +4087,7 @@ impl App {
             let motion = self.folder_tree_motion.entry(folder).or_insert((1.0, 0.0));
             Self::spring_step(&mut motion.0, &mut motion.1, target, dt);
         }
-        if self
-            .edit_motion
-            .as_ref()
-            .map(|motion| motion.started.elapsed() > Duration::from_millis(260))
-            .unwrap_or(false)
-        {
-            self.edit_motion = None;
-        }
+        self.edit_pulses.step(dt);
         if let Some((index, started)) = self.downloading {
             if started.elapsed() > Duration::from_millis(900) {
                 self.languages[index].installed = true;
@@ -4363,6 +4375,12 @@ impl App {
         self.caret_column = start.1;
         self.selection_anchor = None;
         self.selection_head = None;
+        self.note_edit(
+            motion_core::EditKind::Delete,
+            self.caret_line,
+            self.caret_column,
+            self.caret_column,
+        );
         true
     }
 
@@ -4391,7 +4409,12 @@ impl App {
             self.files[self.selected_file].lines[self.caret_line]
                 .insert_str(self.caret_column, &parts[0]);
             self.caret_column += parts[0].len();
-            self.start_edit_motion(self.caret_line, start, self.caret_column);
+            self.note_edit(
+                motion_core::EditKind::Paste,
+                self.caret_line,
+                start,
+                self.caret_column,
+            );
         } else {
             let tail =
                 self.files[self.selected_file].lines[self.caret_line].split_off(self.caret_column);
@@ -4404,7 +4427,12 @@ impl App {
             self.caret_line += parts.len() - 1;
             self.caret_column = parts.last().map(|part| part.len()).unwrap_or(0);
             self.files[self.selected_file].lines[self.caret_line].push_str(&tail);
-            self.start_edit_motion(self.caret_line, 0, self.caret_column);
+            self.note_edit(
+                motion_core::EditKind::Paste,
+                self.caret_line,
+                0,
+                self.caret_column,
+            );
         }
         self.status_message = self.tr("Pasted from clipboard", "已从剪贴板粘贴").into();
     }
@@ -5766,6 +5794,12 @@ impl App {
                             self.files[self.selected_file].lines[self.caret_line].len();
                         self.files[self.selected_file].lines[self.caret_line].push_str(&current);
                     }
+                    self.note_edit(
+                        motion_core::EditKind::Delete,
+                        self.caret_line,
+                        self.caret_column,
+                        self.caret_column,
+                    );
                 }
             }
             DELETE_KEYSYM => {
@@ -5790,6 +5824,12 @@ impl App {
                             .remove(self.caret_line + 1);
                         self.files[self.selected_file].lines[self.caret_line].push_str(&next);
                     }
+                    self.note_edit(
+                        motion_core::EditKind::Delete,
+                        self.caret_line,
+                        self.caret_column,
+                        self.caret_column,
+                    );
                 }
             }
             RETURN_KEYSYM => {
@@ -5889,7 +5929,12 @@ impl App {
                     self.files[self.selected_file].lines[self.caret_line]
                         .insert_str(self.caret_column, input);
                     self.caret_column += input.len();
-                    self.start_edit_motion(line, start, self.caret_column);
+                    let kind = if input.chars().count() > 1 {
+                        motion_core::EditKind::Paste
+                    } else {
+                        motion_core::EditKind::Insert
+                    };
+                    self.note_edit(kind, line, start, self.caret_column);
                 }
             }
         }
@@ -7172,7 +7217,7 @@ pub fn run() {
             project_language_menu: false,
             project_environment_menu: false,
             expanded_comments: BTreeSet::new(),
-            edit_motion: None,
+            edit_pulses: motion_core::EditPulses::new(),
             status_message: "Ready".into(),
             started: Instant::now(),
         };
