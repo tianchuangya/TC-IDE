@@ -1605,6 +1605,23 @@ impl DirectEditorRenderer {
                         Self::text(
                             &target_base,
                             &self.small_format,
+                            &accent,
+                            &format!(
+                                "v{}",
+                                scene.language_versions.get(index).copied().unwrap_or(0) + 1
+                            ),
+                            D2D_RECT_F {
+                                left: content_left + 110.0 * scale,
+                                top: y - 9.0 * scale,
+                                right: content_left + 190.0 * scale,
+                                bottom: y + 18.0 * scale,
+                            },
+                        )
+                    };
+                    unsafe {
+                        Self::text(
+                            &target_base,
+                            &self.small_format,
                             if installed { &accent } else { &muted },
                             if installed {
                                 "INSTALLED"
@@ -1612,9 +1629,9 @@ impl DirectEditorRenderer {
                                 "BUILT-IN DETECTION"
                             },
                             D2D_RECT_F {
-                                left: content_left + 160.0 * scale,
+                                left: content_left + 240.0 * scale,
                                 top: y - 9.0 * scale,
-                                right: content_left + 300.0 * scale,
+                                right: content_left + 390.0 * scale,
                                 bottom: y + 18.0 * scale,
                             },
                         )

@@ -2044,6 +2044,96 @@ unsafe extern "system" fn window_proc(
                 invalidate(window);
                 return 0;
             }
+            let settings_open = APP.with(|cell| cell.borrow().settings_open);
+            if settings_open {
+                let left = area.right as f32 - 410.0 * scale;
+                let top = 58.0 * scale;
+                if x as f32 >= left
+                    && x as f32 <= area.right as f32 - 20.0 * scale
+                    && y as f32 >= top
+                {
+                    let row = ((y as f32 - top - 24.0 * scale) / (54.0 * scale)).floor() as i32;
+                    APP.with(|cell| {
+                        let mut app = cell.borrow_mut();
+                        match row {
+                            1 => app.ui_chinese = !app.ui_chinese,
+                            2 => app.light_theme = !app.light_theme,
+                            3 => {
+                                if x as f32 <= left + 195.0 * scale {
+                                    app.code_zoom = (app.code_zoom - 1).max(-2);
+                                } else {
+                                    app.code_zoom = (app.code_zoom + 1).min(8);
+                                }
+                            }
+                            5 => {
+                                if let Some(path) = platform::choose_background(window) {
+                                    app.background_path = Some(path);
+                                }
+                            }
+                            6 => {
+                                let local_x = (x as f32 - left) / (390.0 * scale);
+                                if local_x < 0.25 {
+                                    app.background_opacity =
+                                        (app.background_opacity - 0.05).max(0.05);
+                                } else if local_x < 0.5 {
+                                    app.background_opacity =
+                                        (app.background_opacity + 0.05).min(1.0);
+                                } else if local_x < 0.75 {
+                                    app.background_zoom = (app.background_zoom - 0.1).max(1.0);
+                                } else {
+                                    app.background_zoom = (app.background_zoom + 0.1).min(3.0);
+                                }
+                            }
+                            7 => app.background_path = None,
+                            8 => app.settings_open = false,
+                            _ => {}
+                        }
+                        app.save_preferences();
+                    });
+                    RENDERER.with(|renderer| *renderer.borrow_mut() = None);
+                    invalidate(window);
+                    return 0;
+                }
+            }
+            let extensions_open = APP.with(|cell| cell.borrow().extensions_open);
+            if extensions_open {
+                let panel_w = (920.0 * scale).min(area.right as f32 - 50.0 * scale);
+                let panel_h = (610.0 * scale).min(area.bottom as f32 - 80.0 * scale);
+                let left = (area.right as f32 - panel_w) * 0.5;
+                let top = 58.0 * scale;
+                if x as f32 >= left
+                    && x as f32 <= left + panel_w
+                    && y as f32 >= top
+                    && y as f32 <= top + panel_h
+                {
+                    APP.with(|cell| {
+                        let mut app = cell.borrow_mut();
+                        if x as f32 <= left + 184.0 * scale {
+                            let category = ((y as f32 - top - 58.0 * scale) / (44.0 * scale))
+                                .floor()
+                                .clamp(0.0, 4.0)
+                                as usize;
+                            app.extension_category = category;
+                        } else if app.extension_category == 0 {
+                            let language = ((y as f32 - top - 70.0 * scale) / (48.0 * scale))
+                                .floor()
+                                .clamp(0.0, 6.0)
+                                as usize;
+                            app.selected_language = language;
+                            if x as f32 >= left + 445.0 * scale {
+                                app.language_installed[language] =
+                                    !app.language_installed[language];
+                            } else if x as f32 >= left + 315.0 * scale {
+                                app.language_versions[language] =
+                                    (app.language_versions[language] + 1) % 3;
+                            }
+                        }
+                        app.save_preferences();
+                    });
+                    invalidate(window);
+                    return 0;
+                }
+            }
             if let Some((line, toggle)) = comment_bubble_at(window, x, y) {
                 APP.with(|cell| {
                     let mut app = cell.borrow_mut();
