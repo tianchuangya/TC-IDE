@@ -362,6 +362,8 @@ struct WindowsAppState {
     expanded_comments: HashSet<usize>,
     editing_comment: Option<usize>,
     pointer_x: i32,
+    /// Whether the left mouse button is down, for the pressed look of a control.
+    pointer_pressed: bool,
     pointer_y: i32,
     graph_scroll: usize,
     graph_search: String,
@@ -656,6 +658,7 @@ impl WindowsAppState {
             expanded_comments: HashSet::new(),
             editing_comment: None,
             pointer_x: -1,
+            pointer_pressed: false,
             pointer_y: -1,
             graph_scroll: 0,
             graph_search: String::new(),

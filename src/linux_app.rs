@@ -408,12 +408,16 @@ const POINTER_MOTION_MASK: c_long = 1 << 6;
 const EXPOSURE_MASK: c_long = 1 << 15;
 const STRUCTURE_NOTIFY_MASK: c_long = 1 << 17;
 const CONTROL_MASK: c_uint = 1 << 2;
+/// Shift is held down, in the state mask of a key event.
+const SHIFT_MASK: c_uint = 1 << 0;
 const BUTTON1_MASK: c_uint = 1 << 8;
 const ESCAPE_KEYSYM: c_ulong = 0xff1b;
 const BACKSPACE_KEYSYM: c_ulong = 0xff08;
 const DELETE_KEYSYM: c_ulong = 0xffff;
 const RETURN_KEYSYM: c_ulong = 0xff0d;
 const TAB_KEYSYM: c_ulong = 0xff09;
+/// Space, which activates the focused control like Enter does.
+const SPACE_KEYSYM: c_ulong = 0x0020;
 const LEFT_KEYSYM: c_ulong = 0xff51;
 const UP_KEYSYM: c_ulong = 0xff52;
 const RIGHT_KEYSYM: c_ulong = 0xff53;
@@ -508,6 +512,48 @@ struct Palette {
     shadow: c_ulong,
 }
 
+/// Buttons of the settings panel that answer to the pointer and the keyboard.
+///
+/// The rectangle of a control is computed in one place, so drawing, hit testing
+/// and keyboard focus can never drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsControl {
+    LanguageEnglish,
+    LanguageChinese,
+    ThemeDark,
+    ThemeLight,
+    BackgroundChoose,
+    BackgroundClear,
+    OpacityDown,
+    OpacityUp,
+    CropLeft,
+    CropRight,
+    CropUp,
+    CropDown,
+    ZoomDown,
+    ZoomUp,
+}
+
+impl SettingsControl {
+    /// Every control, in the order `Tab` walks them.
+    const ALL: [SettingsControl; 14] = [
+        SettingsControl::LanguageEnglish,
+        SettingsControl::LanguageChinese,
+        SettingsControl::ThemeDark,
+        SettingsControl::ThemeLight,
+        SettingsControl::BackgroundChoose,
+        SettingsControl::BackgroundClear,
+        SettingsControl::OpacityDown,
+        SettingsControl::OpacityUp,
+        SettingsControl::CropLeft,
+        SettingsControl::CropRight,
+        SettingsControl::CropUp,
+        SettingsControl::CropDown,
+        SettingsControl::ZoomDown,
+        SettingsControl::ZoomUp,
+    ];
+}
+
 struct App {
     display: *mut Display,
     window: Window,
@@ -537,6 +583,10 @@ struct App {
     mouse_x: i32,
     mouse_y: i32,
     hovered: Option<usize>,
+    /// Control the mouse button went down on, for the pressed look.
+    settings_pressed: Option<SettingsControl>,
+    /// Control the keyboard is on in the settings panel.
+    settings_focus: Option<SettingsControl>,
     hovered_from_code: bool,
     hovered_code_span: Option<(usize, usize, usize)>,
     selected_file: usize,
@@ -921,6 +971,207 @@ impl App {
                 self.status_message = format!("Could not open folder picker: {error}");
             }
         }
+    }
+
+    /// Rectangle of a settings control, in screen coordinates.
+    fn settings_control_rect(&self, control: SettingsControl) -> (i32, i32, i32, i32) {
+        let s = |v| self.s(v);
+        let (x, y) = self.settings_origin();
+        use SettingsControl::*;
+        match control {
+            LanguageEnglish => (x + s(16), y + s(69), s(164), s(31)),
+            LanguageChinese => (x + s(194), y + s(69), s(164), s(31)),
+            ThemeDark => (x + s(110), y + s(106), s(112), s(30)),
+            ThemeLight => (x + s(234), y + s(106), s(112), s(30)),
+            BackgroundChoose => (x + s(166), y + s(468), s(112), s(27)),
+            BackgroundClear => (x + s(286), y + s(468), s(82), s(27)),
+            OpacityDown => (x + s(166), y + s(508), s(34), s(27)),
+            OpacityUp => (x + s(300), y + s(508), s(34), s(27)),
+            CropLeft => (x + s(166), y + s(548), s(34), s(27)),
+            CropRight => (x + s(214), y + s(548), s(34), s(27)),
+            CropUp => (x + s(262), y + s(548), s(34), s(27)),
+            CropDown => (x + s(310), y + s(548), s(34), s(27)),
+            ZoomDown => (x + s(166), y + s(588), s(34), s(27)),
+            ZoomUp => (x + s(300), y + s(588), s(34), s(27)),
+        }
+    }
+
+    /// Whether a control can be used right now.
+    fn settings_control_enabled(&self, control: SettingsControl) -> bool {
+        let has_image = !self.background_surface.is_null();
+        use SettingsControl::*;
+        match control {
+            BackgroundClear => self.background_path.is_some(),
+            OpacityDown => has_image && self.background_opacity > 0.05,
+            OpacityUp => has_image && self.background_opacity < 1.0,
+            CropLeft => has_image && self.background_offset_x > -1.0,
+            CropRight => has_image && self.background_offset_x < 1.0,
+            CropUp => has_image && self.background_offset_y > -1.0,
+            CropDown => has_image && self.background_offset_y < 1.0,
+            ZoomDown => has_image && self.background_zoom > 1.0,
+            ZoomUp => has_image && self.background_zoom < 3.0,
+            _ => true,
+        }
+    }
+
+    /// Which control sits under the pointer.
+    fn settings_control_at(&self, x: i32, y: i32) -> Option<SettingsControl> {
+        SettingsControl::ALL.into_iter().find(|control| {
+            let (left, top, width, height) = self.settings_control_rect(*control);
+            x >= left && x <= left + width && y >= top && y <= top + height
+        })
+    }
+
+    /// State a control is drawn in.
+    fn settings_control_state(&self, control: SettingsControl) -> theme_core::ControlState {
+        if !self.settings_control_enabled(control) {
+            return theme_core::ControlState::Disabled;
+        }
+        if self.settings_control_at(self.mouse_x, self.mouse_y) == Some(control) {
+            if self.settings_pressed == Some(control) {
+                return theme_core::ControlState::Pressed;
+            }
+            return theme_core::ControlState::Hovered;
+        }
+        theme_core::ControlState::Normal
+    }
+
+    /// Colours a control draws with, using the palette the window already uses.
+    fn settings_control_colors(
+        &self,
+        control: SettingsControl,
+        emphasised: bool,
+    ) -> (c_ulong, c_ulong, c_ulong) {
+        use theme_core::ControlState::*;
+        match self.settings_control_state(control) {
+            Normal => (
+                if emphasised {
+                    self.colors.accent
+                } else {
+                    self.colors.line
+                },
+                self.colors.panel_2,
+                if emphasised {
+                    self.colors.accent
+                } else {
+                    self.colors.text
+                },
+            ),
+            Hovered => (self.colors.accent, self.colors.line, self.colors.bright),
+            Pressed => (self.colors.accent, self.colors.bg, self.colors.bright),
+            Disabled => (self.colors.line, self.colors.panel_2, self.colors.muted),
+        }
+    }
+
+    /// Draw a settings control, with its fill, border, label and focus ring.
+    unsafe fn draw_settings_control(
+        &self,
+        control: SettingsControl,
+        label: &str,
+        emphasised: bool,
+    ) {
+        let s = |v| self.s(v);
+        let (x, y, width, height) = self.settings_control_rect(control);
+        let (border, fill, text) = self.settings_control_colors(control, emphasised);
+        let (x, y) = if self.settings_control_state(control) == theme_core::ControlState::Pressed {
+            (x, y + s(1))
+        } else {
+            (x, y)
+        };
+        self.rect(fill, x, y, width, height);
+        self.outline(border, x, y, width, height);
+        if self.settings_focus == Some(control) {
+            self.outline(
+                self.colors.accent,
+                x - s(2),
+                y - s(2),
+                width + s(4),
+                height + s(4),
+            );
+        }
+        let text_x = x + s(9);
+        self.text(text, text_x, y + s(20), label);
+    }
+
+    /// Activate a settings control, from the pointer or the keyboard.
+    fn activate_settings_control(&mut self, control: SettingsControl) {
+        if !self.settings_control_enabled(control) {
+            self.status_message = self
+                .tr("That control is not available", "该控件当前不可用")
+                .into();
+            return;
+        }
+        use SettingsControl::*;
+        match control {
+            LanguageEnglish | LanguageChinese => {
+                self.ui_chinese = control == LanguageChinese;
+                save_ui_preferences(
+                    self.ui_chinese,
+                    self.code_font_family,
+                    self.code_zoom,
+                    self.light_theme,
+                );
+                self.status_message = if self.ui_chinese {
+                    "界面语言已切换为简体中文".into()
+                } else {
+                    "Interface language changed to English".into()
+                };
+            }
+            ThemeDark => self.set_light_theme(false),
+            ThemeLight => self.set_light_theme(true),
+            BackgroundChoose => unsafe { self.choose_background() },
+            BackgroundClear => {
+                unsafe { self.replace_background(None) };
+                save_background_preferences(
+                    None,
+                    self.background_opacity,
+                    self.background_offset_x,
+                    self.background_offset_y,
+                    self.background_zoom,
+                );
+                self.status_message = self
+                    .tr("Editor background cleared", "编辑器背景已清除")
+                    .into();
+            }
+            OpacityDown => self.nudge_background(0.0, 0.0, -0.05),
+            OpacityUp => self.nudge_background(0.0, 0.0, 0.05),
+            CropLeft => self.nudge_background(-0.1, 0.0, 0.0),
+            CropRight => self.nudge_background(0.1, 0.0, 0.0),
+            CropUp => self.nudge_background(0.0, -0.1, 0.0),
+            CropDown => self.nudge_background(0.0, 0.1, 0.0),
+            ZoomDown => {
+                self.set_background_zoom(-0.1);
+            }
+            ZoomUp => {
+                self.set_background_zoom(0.1);
+            }
+        }
+    }
+
+    /// Move the crop, change the opacity, or both, and persist the result.
+    fn nudge_background(&mut self, dx: f64, dy: f64, opacity: f64) {
+        self.background_offset_x = (self.background_offset_x + dx).clamp(-1.0, 1.0);
+        self.background_offset_y = (self.background_offset_y + dy).clamp(-1.0, 1.0);
+        self.background_opacity = (self.background_opacity + opacity).clamp(0.0, 1.0);
+        save_background_preferences(
+            self.background_path.as_deref(),
+            self.background_opacity,
+            self.background_offset_x,
+            self.background_offset_y,
+            self.background_zoom,
+        );
+    }
+
+    /// Change the image zoom and persist it.
+    fn set_background_zoom(&mut self, delta: f64) {
+        self.background_zoom = (self.background_zoom + delta).clamp(1.0, 3.0);
+        save_background_preferences(
+            self.background_path.as_deref(),
+            self.background_opacity,
+            self.background_offset_x,
+            self.background_offset_y,
+            self.background_zoom,
+        );
     }
 
     /// Origin of the settings overlay.
@@ -2387,35 +2638,17 @@ impl App {
             y + s(58),
             self.tr("Interface language", "界面语言"),
         );
-        for (index, (label, active)) in
-            [("English", !self.ui_chinese), ("简体中文", self.ui_chinese)]
-                .iter()
-                .enumerate()
-        {
-            let bx = x + s(16 + index as i32 * 178);
-            if *active {
-                self.rect(self.colors.project, bx, y + s(69), s(164), s(31));
-            }
-            self.outline(self.colors.line, bx, y + s(69), s(164), s(31));
-            self.text(
-                if *active {
-                    self.colors.bright
-                } else {
-                    self.colors.text
-                },
-                bx + s(14),
-                y + s(91),
-                label,
+        unsafe {
+            self.draw_settings_control(
+                SettingsControl::LanguageEnglish,
+                "English",
+                !self.ui_chinese,
             );
-            if *active {
-                self.circle(
-                    self.colors.accent,
-                    self.colors.accent,
-                    bx + s(148),
-                    y + s(84),
-                    s(3),
-                );
-            }
+            self.draw_settings_control(
+                SettingsControl::LanguageChinese,
+                "简体中文",
+                self.ui_chinese,
+            );
         }
         self.text(
             self.colors.muted,
@@ -2423,19 +2656,17 @@ impl App {
             y + s(127),
             self.tr("Theme", "主题"),
         );
-        for (index, (label, active)) in [
-            (self.tr("Dark", "深色"), !self.light_theme),
-            (self.tr("Light", "浅色"), self.light_theme),
-        ]
-        .iter()
-        .enumerate()
-        {
-            let bx = x + s(110 + index as i32 * 124);
-            if *active {
-                self.rect(self.colors.project, bx, y + s(106), s(112), s(30));
-            }
-            self.outline(self.colors.line, bx, y + s(106), s(112), s(30));
-            self.text(self.colors.text, bx + s(14), y + s(127), label);
+        unsafe {
+            self.draw_settings_control(
+                SettingsControl::ThemeDark,
+                self.tr("Dark", "深色"),
+                !self.light_theme,
+            );
+            self.draw_settings_control(
+                SettingsControl::ThemeLight,
+                self.tr("Light", "浅色"),
+                self.light_theme,
+            );
         }
         self.line(
             self.colors.line,
@@ -2539,46 +2770,49 @@ impl App {
             y + s(489),
             self.tr("Editor background", "编辑器背景"),
         );
-        self.outline(self.colors.line, x + s(166), y + s(468), s(112), s(27));
-        self.text(
-            self.colors.text,
-            x + s(179),
-            y + s(488),
-            self.tr("CHOOSE PNG", "选择 PNG"),
-        );
-        self.outline(self.colors.line, x + s(286), y + s(468), s(82), s(27));
-        self.text(
-            self.colors.text,
-            x + s(299),
-            y + s(488),
-            self.tr("CLEAR", "清除"),
-        );
+        unsafe {
+            self.draw_settings_control(
+                SettingsControl::BackgroundChoose,
+                self.tr("CHOOSE PNG", "选择 PNG"),
+                false,
+            );
+            self.draw_settings_control(
+                SettingsControl::BackgroundClear,
+                self.tr("CLEAR", "清除"),
+                false,
+            );
+        }
         self.text(
             self.colors.muted,
             x + s(16),
             y + s(529),
             self.tr("Opacity", "不透明度"),
         );
-        self.outline(self.colors.line, x + s(166), y + s(508), s(34), s(27));
-        self.text(self.colors.text, x + s(178), y + s(529), "-");
+        unsafe {
+            self.draw_settings_control(SettingsControl::OpacityDown, "-", false);
+            self.draw_settings_control(SettingsControl::OpacityUp, "+", false);
+        }
         self.text(
             self.colors.bright,
             x + s(218),
             y + s(529),
             &format!("{}%", (self.background_opacity * 100.0).round() as i32),
         );
-        self.outline(self.colors.line, x + s(300), y + s(508), s(34), s(27));
-        self.text(self.colors.text, x + s(312), y + s(529), "+");
         self.text(
             self.colors.muted,
             x + s(16),
             y + s(569),
             self.tr("Crop position", "取景位置"),
         );
-        for (index, label) in ["←", "→", "↑", "↓"].iter().enumerate() {
-            let bx = x + s(166 + index as i32 * 48);
-            self.outline(self.colors.line, bx, y + s(548), s(34), s(27));
-            self.text(self.colors.text, bx + s(9), y + s(569), label);
+        unsafe {
+            for (control, label) in [
+                (SettingsControl::CropLeft, "←"),
+                (SettingsControl::CropRight, "→"),
+                (SettingsControl::CropUp, "↑"),
+                (SettingsControl::CropDown, "↓"),
+            ] {
+                self.draw_settings_control(control, label, false);
+            }
         }
         self.text(
             self.colors.muted,
@@ -2586,16 +2820,16 @@ impl App {
             y + s(609),
             self.tr("Image zoom", "图片缩放"),
         );
-        self.outline(self.colors.line, x + s(166), y + s(588), s(34), s(27));
-        self.text(self.colors.text, x + s(178), y + s(609), "-");
+        unsafe {
+            self.draw_settings_control(SettingsControl::ZoomDown, "-", false);
+            self.draw_settings_control(SettingsControl::ZoomUp, "+", false);
+        }
         self.text(
             self.colors.bright,
             x + s(218),
             y + s(609),
             &format!("{:.1}x", self.background_zoom),
         );
-        self.outline(self.colors.line, x + s(300), y + s(588), s(34), s(27));
-        self.text(self.colors.text, x + s(312), y + s(609), "+");
         let background_name = self
             .background_path
             .as_ref()
@@ -4163,6 +4397,33 @@ impl App {
                 self.graph_relation = graph_core::GraphRelation::Callees;
                 true
             }
+            "settings-controls" | "settings-hover" => {
+                // Settings open on a picture: one control hovered, one pressed,
+                // one focused from the keyboard and several disabled.
+                self.settings_open = true;
+                self.settings_motion = UiMotion::new(1.0);
+                self.background_surface = unsafe {
+                    bundled_asset_path("assets/tc-ide-icon.png")
+                        .and_then(|path| CString::new(path.to_string_lossy().as_bytes()).ok())
+                        .map(|path| cairo_image_surface_create_from_png(path.as_ptr()))
+                        .unwrap_or(ptr::null_mut())
+                };
+                self.background_opacity = 0.55;
+                self.background_zoom = 1.6;
+                self.background_offset_x = 0.35;
+                self.background_offset_y = -0.25;
+                self.settings_focus = Some(SettingsControl::BackgroundChoose);
+                let target = SettingsControl::ThemeLight;
+                let (x, y, width, height) = self.settings_control_rect(target);
+                self.mouse_x = x + width / 2;
+                self.mouse_y = y + height / 2;
+                if name == "settings-controls" {
+                    // A press always comes with the pointer already over the
+                    // control, which is the state this frame shows.
+                    self.settings_pressed = Some(target);
+                }
+                true
+            }
             "background-crop" => {
                 // The preview with the crop box, as if the settings panel were
                 // open on a picture.
@@ -5276,27 +5537,12 @@ impl App {
             let menu_x = self.width - s(410);
             let menu_y = s(43);
             if button == 1 && x >= menu_x && x <= menu_x + s(390) {
-                if y >= menu_y + s(69) && y <= menu_y + s(100) {
-                    self.ui_chinese = x >= menu_x + s(194);
-                    save_ui_preferences(
-                        self.ui_chinese,
-                        self.code_font_family,
-                        self.code_zoom,
-                        self.light_theme,
-                    );
-                    self.status_message = if self.ui_chinese {
-                        "界面语言已切换为简体中文".into()
-                    } else {
-                        "Interface language changed to English".into()
-                    };
-                    return;
-                }
-                if y >= menu_y + s(106) && y <= menu_y + s(136) {
-                    if x >= menu_x + s(110) && x <= menu_x + s(222) {
-                        self.set_light_theme(false);
-                    } else if x >= menu_x + s(234) && x <= menu_x + s(346) {
-                        self.set_light_theme(true);
-                    }
+                // Every button of this panel is one control with one rectangle,
+                // so the pressed state and the click cannot disagree.
+                if let Some(control) = self.settings_control_at(x, y) {
+                    self.settings_pressed = Some(control);
+                    self.settings_focus = Some(control);
+                    self.activate_settings_control(control);
                     return;
                 }
                 if x >= menu_x + s(180)
@@ -5333,75 +5579,8 @@ impl App {
                         return;
                     }
                 }
-                if y >= menu_y + s(468) && y <= menu_y + s(495) {
-                    if x >= menu_x + s(166) && x <= menu_x + s(278) {
-                        unsafe { self.choose_background() };
-                        return;
-                    }
-                    if x >= menu_x + s(286) && x <= menu_x + s(368) {
-                        unsafe { self.replace_background(None) };
-                        self.status_message = self
-                            .tr("Editor background cleared", "编辑器背景已清除")
-                            .into();
-                        return;
-                    }
-                }
-                if y >= menu_y + s(508) && y <= menu_y + s(535) {
-                    if x >= menu_x + s(166) && x <= menu_x + s(200) {
-                        self.background_opacity = (self.background_opacity - 0.05).max(0.0);
-                    } else if x >= menu_x + s(300) && x <= menu_x + s(334) {
-                        self.background_opacity = (self.background_opacity + 0.05).min(1.0);
-                    } else {
-                        return;
-                    }
-                    save_background_preferences(
-                        self.background_path.as_deref(),
-                        self.background_opacity,
-                        self.background_offset_x,
-                        self.background_offset_y,
-                        self.background_zoom,
-                    );
-                    return;
-                }
-                if y >= menu_y + s(548)
-                    && y <= menu_y + s(575)
-                    && x >= menu_x + s(166)
-                    && x <= menu_x + s(356)
-                {
-                    let index = ((x - menu_x - s(166)) / s(48).max(1)).clamp(0, 3);
-                    match index {
-                        0 => self.background_offset_x = (self.background_offset_x - 0.1).max(-1.0),
-                        1 => self.background_offset_x = (self.background_offset_x + 0.1).min(1.0),
-                        2 => self.background_offset_y = (self.background_offset_y - 0.1).max(-1.0),
-                        _ => self.background_offset_y = (self.background_offset_y + 0.1).min(1.0),
-                    }
-                    save_background_preferences(
-                        self.background_path.as_deref(),
-                        self.background_opacity,
-                        self.background_offset_x,
-                        self.background_offset_y,
-                        self.background_zoom,
-                    );
-                    return;
-                }
-                if y >= menu_y + s(588) && y <= menu_y + s(615) {
-                    if x >= menu_x + s(166) && x <= menu_x + s(200) {
-                        self.background_zoom = (self.background_zoom - 0.1).max(1.0);
-                    } else if x >= menu_x + s(300) && x <= menu_x + s(334) {
-                        self.background_zoom = (self.background_zoom + 0.1).min(3.0);
-                    } else {
-                        return;
-                    }
-                    save_background_preferences(
-                        self.background_path.as_deref(),
-                        self.background_opacity,
-                        self.background_offset_x,
-                        self.background_offset_y,
-                        self.background_zoom,
-                    );
-                    return;
-                }
             }
+            self.settings_pressed = None;
             self.font_search_focused = false;
             self.settings_open = false;
         }
@@ -5986,6 +6165,44 @@ impl App {
                 self.create_caret += input.len();
             }
             return true;
+        }
+        if self.settings_open && !self.font_search_focused {
+            // The panel is a control grid: Tab walks it, Enter and space use the
+            // control the keyboard is on, and Esc leaves.
+            let enabled = SettingsControl::ALL
+                .into_iter()
+                .filter(|control| self.settings_control_enabled(*control))
+                .collect::<Vec<_>>();
+            if keysym == TAB_KEYSYM && !enabled.is_empty() {
+                let step = if event.state & SHIFT_MASK != 0 { -1 } else { 1 };
+                let position = self
+                    .settings_focus
+                    .and_then(|focused| enabled.iter().position(|control| *control == focused));
+                let next = match position {
+                    Some(index) => (index as i32 + step).rem_euclid(enabled.len() as i32) as usize,
+                    None => 0,
+                };
+                self.settings_focus = Some(enabled[next]);
+                let label = format!("{:?}", enabled[next]);
+                self.status_message =
+                    format!("{} {label}", self.tr("Settings control:", "设置控件："));
+                return true;
+            }
+            if (keysym == RETURN_KEYSYM || keysym == SPACE_KEYSYM) && self.settings_focus.is_some()
+            {
+                let focused = self
+                    .settings_focus
+                    .unwrap_or(SettingsControl::LanguageEnglish);
+                self.activate_settings_control(focused);
+                return true;
+            }
+            if keysym == ESCAPE_KEYSYM && self.settings_focus.is_some() {
+                self.settings_focus = None;
+                self.status_message = self
+                    .tr("Left the settings controls", "已退出设置控件")
+                    .into();
+                return true;
+            }
         }
         if keysym == ESCAPE_KEYSYM {
             if self.extensions_open
@@ -7433,6 +7650,8 @@ pub fn run() {
             mouse_x: -100,
             mouse_y: -100,
             hovered: None,
+            settings_pressed: None,
+            settings_focus: None,
             hovered_from_code: false,
             hovered_code_span: None,
             selected_file: 0,
@@ -7584,6 +7803,9 @@ pub fn run() {
                         app.mouse_y = motion.y;
                         app.update_drag_selection(motion.x, motion.y, motion.state);
                         app.update_background_drag(motion.x, motion.y, motion.state);
+                        if motion.state & BUTTON1_MASK == 0 {
+                            app.settings_pressed = None;
+                        }
                         app.update_hover();
                     }
                     CONFIGURE_NOTIFY => {

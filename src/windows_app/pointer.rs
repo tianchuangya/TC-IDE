@@ -11,6 +11,8 @@ use super::*;
 
 /// Mouse press: overlays, terminal tabs, the graph, the tree and the editor.
 pub(super) fn handle_left_button_down(window: Hwnd, l_param: Lparam) -> Lresult {
+    // A control shows the pressed look while the button stays down.
+    APP.with(|cell| cell.borrow_mut().pointer_pressed = true);
     let x = (l_param as u16 as i16) as i32;
     let y = ((l_param >> 16) as u16 as i16) as i32;
     let mut area = unsafe { std::mem::zeroed::<Rect>() };
@@ -618,6 +620,7 @@ pub(super) fn handle_left_button_down(window: Hwnd, l_param: Lparam) -> Lresult 
 
 /// Mouse release: finishes selections and drags.
 pub(super) fn handle_left_button_up(window: Hwnd) -> Lresult {
+    APP.with(|cell| cell.borrow_mut().pointer_pressed = false);
     let terminal_dragging = APP.with(|cell| {
         let mut app = cell.borrow_mut();
         let dragging = app.terminal_dragging;

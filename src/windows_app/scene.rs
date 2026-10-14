@@ -270,6 +270,7 @@ pub(super) fn render_window(window: Hwnd) {
                     .filter(|line| *line >= first_line)
                     .map(|line| line - first_line),
                 pointer_x: app.pointer_x,
+                pointer_pressed: app.pointer_pressed,
                 pointer_y: app.pointer_y,
                 project_total: app
                     .project_entries
@@ -282,6 +283,7 @@ pub(super) fn render_window(window: Hwnd) {
                 project_scroll: app.project_scroll,
                 package_motion: app.package_motion,
                 package_targets: app.package_targets,
+                msix_available: app.msix_supported(),
                 signing_certificate: &signing_certificate,
                 package_running: app.package_running,
                 package_progress: app.package_progress,

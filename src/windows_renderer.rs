@@ -119,12 +119,16 @@ pub struct WindowsScene<'a> {
     pub expanded_comments: &'a [usize],
     pub editing_comment: Option<usize>,
     pub pointer_x: i32,
+    /// Whether the left mouse button is down while a control is hovered.
+    pub pointer_pressed: bool,
     pub pointer_y: i32,
     /// Project tree totals, for its scrollbar.
     pub project_total: usize,
     pub project_scroll: usize,
     pub package_motion: f32,
     pub package_targets: [bool; 3],
+    /// Whether the project can produce the executable the MSIX target wraps.
+    pub msix_available: bool,
     /// File name of the configured MSIX signing certificate, if any.
     pub signing_certificate: &'a str,
     pub package_running: bool,
@@ -288,6 +292,35 @@ struct ScenePaint<'a, 's> {
 }
 
 impl ScenePaint<'_, '_> {
+    /// State of a control, from where the pointer is and whether it is down.
+    fn control_state(
+        &self,
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+        enabled: bool,
+    ) -> theme_core::ControlState {
+        if !enabled {
+            return theme_core::ControlState::Disabled;
+        }
+        if !hovering(
+            self.scene.pointer_x,
+            self.scene.pointer_y,
+            left,
+            top,
+            right,
+            bottom,
+        ) {
+            return theme_core::ControlState::Normal;
+        }
+        if self.scene.pointer_pressed {
+            theme_core::ControlState::Pressed
+        } else {
+            theme_core::ControlState::Hovered
+        }
+    }
+
     /// Paint the terminal panel region.
     fn draw_terminal_panel(&self) {
         if self.terminal_progress > 0.08 {
@@ -562,37 +595,51 @@ impl ScenePaint<'_, '_> {
             };
             for (index, label) in labels.iter().enumerate() {
                 let y = top + (48.0 + index as f32 * 42.0) * self.scale;
-                let hovered = hovering(
-                    self.scene.pointer_x,
-                    self.scene.pointer_y,
+                // The MSIX row is greyed out for a project that cannot produce
+                // the executable it wraps.
+                let enabled = index != 2 || self.scene.msix_available;
+                let state = self.control_state(
                     left + 10.0 * self.scale,
                     y - 6.0 * self.scale,
                     self.width - 20.0 * self.scale,
                     y + 30.0 * self.scale,
+                    enabled,
                 );
-                if hovered {
-                    unsafe {
-                        DirectEditorRenderer::rounded(
-                            self.target,
-                            &self.raised,
-                            D2D_RECT_F {
-                                left: left + 10.0 * self.scale,
-                                top: y - 6.0 * self.scale,
-                                right: self.width - 20.0 * self.scale,
-                                bottom: y + 30.0 * self.scale,
-                            },
-                            6.0 * self.scale,
-                        )
-                    };
+                let palette = theme_core::Palette::for_scheme(self.scene.light_theme);
+                let visual = palette.control(state, self.scene.package_targets[index]);
+                let (fill, label_color) = unsafe {
+                    (
+                        DirectEditorRenderer::brush(self.target, visual.fill, visual.opacity).ok(),
+                        DirectEditorRenderer::brush(self.target, visual.text, 1.0).ok(),
+                    )
+                };
+                if state != theme_core::ControlState::Normal {
+                    if let Some(fill) = fill.as_ref() {
+                        unsafe {
+                            DirectEditorRenderer::rounded(
+                                self.target,
+                                fill,
+                                D2D_RECT_F {
+                                    left: left + 10.0 * self.scale,
+                                    top: y - 6.0 * self.scale,
+                                    right: self.width - 20.0 * self.scale,
+                                    bottom: y + 30.0 * self.scale,
+                                },
+                                6.0 * self.scale,
+                            )
+                        };
+                    }
                 }
                 unsafe {
                     DirectEditorRenderer::text(
                         self.target,
                         &self.renderer.ui_format,
-                        if self.scene.package_targets[index] || hovered {
+                        if !enabled {
+                            &self.muted
+                        } else if self.scene.package_targets[index] {
                             &self.accent
                         } else {
-                            &self.text
+                            label_color.as_ref().unwrap_or(&self.text)
                         },
                         &format!(
                             "{}  {label}",

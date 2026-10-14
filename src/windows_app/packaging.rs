@@ -84,6 +84,19 @@ impl WindowsAppState {
         );
     }
 
+    /// Whether this project can produce the Windows executable an MSIX wraps.
+    ///
+    /// The panel greys the MSIX row out and the command refuses it, from this
+    /// one rule.
+    pub(super) fn msix_supported(&self) -> bool {
+        self.project_root.join("Cargo.toml").exists()
+            || self.project_root.join("go.mod").exists()
+            || matches!(
+                editor_core::language_for_file(&self.file_name),
+                "C" | "C++" | "Python"
+            )
+    }
+
     pub(super) fn start_package(&mut self) {
         if !self.package_targets.iter().any(|selected| *selected) {
             self.status = "Select at least one package target".into();
@@ -108,8 +121,7 @@ impl WindowsAppState {
         let is_rust = self.project_root.join("Cargo.toml").exists();
         let is_go = self.project_root.join("go.mod").exists();
         let language = editor_core::language_for_file(&self.file_name);
-        let supports_windows_executable =
-            is_rust || is_go || matches!(language, "C" | "C++" | "Python");
+        let supports_windows_executable = self.msix_supported();
         if self.package_targets[2] && !supports_windows_executable {
             self.status = format!(
                 "MSIX requires a Windows executable; {} packaging is not configured yet",

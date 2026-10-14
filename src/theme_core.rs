@@ -133,6 +133,98 @@ impl Palette {
     }
 }
 
+/// How a control looks while the user works with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlState {
+    Normal,
+    /// The pointer is over it.
+    Hovered,
+    /// The pointer is over it with the button held.
+    Pressed,
+    /// It cannot be used right now.
+    Disabled,
+}
+
+/// Colours and offsets a control draws with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ControlVisual {
+    pub fill: u32,
+    pub border: u32,
+    pub text: u32,
+    /// How far the label sits above its resting place, in layout units.
+    pub lift: f32,
+    /// Opacity of the whole control.
+    pub opacity: f32,
+}
+
+/// Blend two colours, `amount` in `0.0..=1.0`.
+pub fn mix(first: u32, second: u32, amount: f32) -> u32 {
+    let amount = if amount.is_finite() {
+        amount.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let blend = |shift: u32| {
+        let a = (first >> shift) & 0xff;
+        let b = (second >> shift) & 0xff;
+        let value = a as f32 + (b as f32 - a as f32) * amount;
+        (value.round() as u32).min(255) << shift
+    };
+    blend(16) | blend(8) | blend(0)
+}
+
+impl Palette {
+    /// How a control draws in a state.
+    ///
+    /// A pressed control sinks and darkens, a hovered one lifts slightly and
+    /// takes a hint of the accent in its border, and a disabled one keeps its
+    /// shape but drops to the muted text colour and fades, so it still reads as
+    /// a control without pretending to be usable.
+    pub fn control(&self, state: ControlState, emphasised: bool) -> ControlVisual {
+        // An emphasised control is outlined in the accent rather than filled
+        // with it: an accent fill would put a label on a saturated blue, which
+        // is exactly where the contrast test fails.
+        let base = self.raised;
+        let label = if emphasised { self.accent } else { self.text };
+        match state {
+            ControlState::Normal => ControlVisual {
+                fill: base,
+                border: if emphasised { self.accent } else { self.border },
+                text: label,
+                lift: 0.0,
+                opacity: 1.0,
+            },
+            ControlState::Hovered => ControlVisual {
+                // An emphasised control keeps its fill so its accent label stays
+                // readable; the border and the lift carry the hover.
+                fill: if emphasised {
+                    base
+                } else {
+                    mix(base, self.text, 0.10)
+                },
+                border: mix(self.border, self.accent, 0.45),
+                text: if emphasised { self.accent } else { self.bright },
+                lift: 1.0,
+                opacity: 1.0,
+            },
+            ControlState::Pressed => ControlVisual {
+                fill: mix(base, self.background, 0.35),
+                border: mix(self.border, self.background, 0.25),
+                text: if emphasised { self.accent } else { self.bright },
+                lift: -1.0,
+                opacity: 1.0,
+            },
+            ControlState::Disabled => ControlVisual {
+                fill: base,
+                border: mix(self.border, self.background, 0.5),
+                text: self.muted,
+                lift: 0.0,
+                opacity: 0.55,
+            },
+        }
+    }
+}
+
 /// Relative luminance of an `0xrrggbb` colour, as WCAG defines it.
 pub fn relative_luminance(rgb: u32) -> f64 {
     fn channel(value: u32) -> f64 {
@@ -296,5 +388,54 @@ mod tests {
             .iter()
             .any(|(name, value)| *name == "background" && *value == 0x000000));
         assert_ne!(Palette::light().background, dark.background);
+    }
+
+    #[test]
+    fn mixing_moves_between_the_two_colours() {
+        assert_eq!(mix(0x000000, 0xffffff, 0.0), 0x000000);
+        assert_eq!(mix(0x000000, 0xffffff, 1.0), 0xffffff);
+        assert_eq!(mix(0x102030, 0x102030, 0.5), 0x102030);
+        assert_eq!(mix(0x000000, 0xffffff, 0.5), 0x808080);
+        assert_eq!(mix(0xff0000, 0x00ff00, 0.5), 0x808000);
+        // A broken amount cannot produce a broken colour.
+        assert_eq!(mix(0x112233, 0x445566, f32::NAN), 0x112233);
+        assert_eq!(mix(0x112233, 0xffffff, 9.0), 0xffffff);
+    }
+
+    #[test]
+    fn every_control_state_is_visible_and_distinct() {
+        for (name, palette) in [("dark", Palette::dark()), ("light", Palette::light())] {
+            for emphasised in [false, true] {
+                let normal = palette.control(ControlState::Normal, emphasised);
+                let hovered = palette.control(ControlState::Hovered, emphasised);
+                let pressed = palette.control(ControlState::Pressed, emphasised);
+                let disabled = palette.control(ControlState::Disabled, emphasised);
+                // Hovering shows through the fill, the border or the lift,
+                // whichever the emphasised style leaves free.
+                assert!(
+                    hovered.fill != normal.fill
+                        || hovered.border != normal.border
+                        || hovered.lift != normal.lift,
+                    "{name}: hovering has to be visible"
+                );
+                assert_ne!(hovered.border, normal.border, "{name}: hover border");
+                assert_ne!(
+                    pressed.fill, normal.fill,
+                    "{name}: pressing has to be visible"
+                );
+                assert_ne!(pressed.fill, hovered.fill, "{name}: pressed vs hovered");
+                assert!(pressed.lift < normal.lift && hovered.lift > normal.lift);
+                assert!(disabled.opacity < normal.opacity, "{name}: disabled fades");
+                assert_eq!(disabled.text, palette.muted);
+                // A disabled control is still readable, it just stops inviting.
+                assert!(
+                    contrast_ratio(disabled.text, disabled.fill) >= 2.5,
+                    "{name}: a disabled label has to stay legible"
+                );
+                assert!(meets_contrast(normal.text, normal.fill, 3.0));
+                assert!(meets_contrast(pressed.text, pressed.fill, 3.0));
+                assert!(meets_contrast(hovered.text, hovered.fill, 3.0));
+            }
+        }
     }
 }

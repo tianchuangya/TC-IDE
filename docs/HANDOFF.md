@@ -200,7 +200,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 - [x] 输入和删除动画扩展到多字符粘贴、撤销/重做，同时保证高频输入不积压动画。（共享 `motion_core::EditPulses`：按编辑类型（插入/删除/粘贴/撤销/重做）记录一段高亮，同一行、120ms 内且范围相接的同类编辑会合并成一段（打一个词只有一次动画），最多保留 4 段（超过就丢掉最旧的），高亮 260ms 内淡出后自动移除，`amount()`/`eased()` 给出淡出量、`on_line()` 给出该行最新的一段、`removes()` 标记删除。Linux 编辑器改用它：输入、粘贴（含多行粘贴）、补全插入、退格、Delete、删除选区都会点亮对应区间，删除没有可抬起的文本，就改用一条随淡出收缩的竖线标记缺口；Windows 编辑器同样改用它（`insert_text` 按字符数区分插入与粘贴、退格/Delete/删除选区记为删除、撤销与重做各自成段），渲染器按该段淡出量抬起代码行。`tools/windows_editor_sim.py` 现在会验证"粘贴是一段、删除/撤销/重做都有标记、连打 40 次不会积压、最新一次仍然高亮"；新增 `--render-scene edit` 让编辑动画也能渲染成帧，CI 的 Linux job 一并渲染该帧）
 - [~] 背景图增加可视化裁剪框、拖拽和缩放预览，而不仅是数值调节。**Linux 端已完成、Windows 端待接**：设置面板加高到能放下预览，面板里画出整张图片的缩略预览（用共享 `placement` 把图片按 fit 缩放进去），并把"编辑器当前显示的那一块"直接画成**取景框 + 四角把手**；指针按在框内即可拖动平移、按在角或边把手即缩放，位移会在预览坐标与图片坐标之间换算后交给共享 `drag_crop`，因此拖动时缩放值与取景位置同步更新（状态栏显示取景尺寸、位置与缩放倍数），松手即结束。新增 `--render-scene background-crop` 把这一屏渲染成帧并纳入 CI 帧门槛（本地核对：预览区 641×270 内 61859 个亮点像素、1072 个强调色像素=边框与把手）。数值按钮（方向键/不透明度/缩放）仍保留。**仍缺**：Windows 设置浮层里同样需要"预览 + 取景框拖拽"，而 Windows 目前只有数值按钮（本机无法验证该 UI，已记录在实机清单第 2.6 节）。
 - [x] 底部终端面板的鼠标选择与复制。（已实现：面板正文拖选、按单元格高亮、状态栏显示选中字符数、`Ctrl+Shift+C` 复制，`Ctrl+C` 仍中断；仍待在 Windows 实机确认高 DPI 下的对齐）
-- [~] 设置、打包与项目树等可点击行已有悬停高亮；**按钮的按下/禁用/键盘焦点状态与浅色主题对比度检查仍未完成**。（**浅色主题对比度检查已完成并自动化**：新增共享 `theme_core`——深/浅两套调色板（背景/面板/抬升面/分隔线/三级文本/强调色/选区/选中文字/关键字/字面量/注释/阴影）与 WCAG 相对亮度、对比度、阈值判定（正文 4.5、装饰 3.0），两个后端都改为读同一张表（Windows 渲染器原来把颜色写死在 `render` 里，浅色主题沿用了深色的语法色——关键字在近白底上只有 **1.58** 的对比度；现已给浅色主题自己的深色关键字/字面量/注释，并把深色 muted 从 #8e8e93 提到 #94949a：它在抬升面上只有 4.27）。5 项单元测试会遍历两套调色板断言正文、次要文字与语法色在每个实际会出现的底色上都达标，Windows 的 `--self-check` 也会再走一遍这张表。Linux 侧同时改为从共享表生成 X11 颜色（含反查表），渲染帧核对只有 muted 颜色按预期变化。**仍缺**：按钮/行的按下、禁用与键盘焦点状态（需要两个后端各自补绘制与命中测试））
+- [~] 设置、打包与项目树等可点击行已有悬停高亮；**按钮的按下/禁用/键盘焦点状态与浅色主题对比度检查仍未完成**。（对比度检查已完成（见 `theme_core`）；**控件状态本轮完成大半**：共享 `theme_core::ControlState`（正常/悬停/按下/禁用）与 `ControlVisual`——按下会下沉并变暗、悬停提起并让边框沾一点强调色、禁用保持形状但文字降到 muted 并整体变淡，配 `mix()` 混色与 2 项单元测试（各状态必须彼此可辨、禁用文字仍可读、每个状态的标签与底色对比 ≥3）；Linux 设置面板的 14 个控件（语言/主题/选择 PNG/清除/不透明度 ±/取景方向/缩放 ±）现在**共用一份矩形定义**，绘制、命中测试与键盘焦点不会各写一套，并且：按下有按下态、不可用的控件（无图片或已到边界）显示禁用态并在点击时说明原因、`Tab`/`Shift+Tab` 在可用控件间移动焦点并画出强调色焦点环、`Enter`/`Space` 激活、`Esc` 退出焦点；Windows 侧新增按住状态跟踪（`pointer_pressed`），打包浮层的目标行改用共享 `control()` 呈现悬停/按下，并新增 `msix_supported()` 让"MSIX 需要 Windows 可执行文件"这条规则同时决定行的禁用态与命令的拒绝理由。新增 `--render-scene settings-hover`/`settings-controls` 两个帧并纳入 CI（本地核对：悬停填充 #38383a 且边框 255 个强调色像素、按下填充 #000000、焦点环 264 个强调色像素、禁用项为安静边框 + muted 文字）。**仍缺**：Windows 设置/扩展浮层的行与按钮还只有悬停态（没有按下/禁用/焦点环），键盘焦点环目前只有 Linux 有）
 - [x] 设置与扩展面板的完整中文文案已完成（设置各行、扩展类别、安装/检测提示、打包目标与证书行、关闭提示）。
 
 ### P2：macOS 与共享架构
@@ -213,7 +213,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 ### P2：自动化与发布前门槛
 
 - [x] 可脚本化的状态层测试：tc-ide --self-check 覆盖共享内核断言，Windows CI 在发布构建后运行它。
-- [x] 单元测试覆盖：`graph_core`、`terminal_core`、`editor_core`、`workspace_core`（偏好设置/项目模板/打包命令与打包目标/打包报告）、`session_core`、`ai_core`、`extension_core`、`lsp_core`、`dap_core`、`text_buffer`、`index_core`、`syntax_core`、`motion_core`（含行位置弹簧）均已覆盖（本地 216 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试；Windows 侧另有编辑器与项目树行弹簧的测试）。
+- [x] 单元测试覆盖：`graph_core`、`terminal_core`、`editor_core`、`workspace_core`（偏好设置/项目模板/打包命令与打包目标/打包报告）、`session_core`、`ai_core`、`extension_core`、`lsp_core`、`dap_core`、`text_buffer`、`index_core`、`syntax_core`、`motion_core`（含行位置弹簧）均已覆盖（本地 218 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试；Windows 侧另有编辑器与项目树行弹簧的测试）。
 - [x] CI 加入 `cargo fmt --check`、Clippy（先清零现有警告）和产物结构检查。（`cargo fmt --check` 与 `windows-typecheck` 已加入；Clippy 仍待清零现有警告后接入，当前 Linux 侧仍有 18 条、Windows 侧 2 条 dead_code 类警告）
 - [x] 版本号（Cargo.toml 0.3.0）、CHANGELOG.md、docs/INSTALL.md、docs/KNOWN-ISSUES.md、docs/REAL-MACHINE-CHECKLIST.md 已就绪，均标注“未发布”。
 - [x] 未触发 release.yml、未创建标签或 Release；工作流已补齐三平台产物步骤，但仍然只能手动触发。
@@ -339,7 +339,7 @@ cargo run --release
 ```bash
 rustup run stable cargo fmt --check                          # 必须用 stable 的 rustfmt：本机 /usr/bin/rustfmt 1.7
                                                              # 与 CI 的 1.10 排版结果不同，用错版本会“本地通过、CI 失败”
-cargo test --all-targets                                   # 216 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试
+cargo test --all-targets                                   # 218 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试
 DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png --render-scene packaging   # 包装与编辑动画也可渲染成帧
 DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png --render-scene edit
 DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png --render-scene background   # 连背景图位置一起渲染
