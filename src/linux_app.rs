@@ -13,6 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::editor_core;
+use crate::graph_core;
+
 type Window = c_ulong;
 type Drawable = c_ulong;
 type Colormap = c_ulong;
@@ -341,6 +344,9 @@ extern "C" {
     );
     fn cairo_surface_destroy(surface: *mut CairoSurface);
     fn cairo_image_surface_create_from_png(filename: *const c_char) -> *mut CairoSurface;
+    fn cairo_image_surface_create(format: c_int, width: c_int, height: c_int) -> *mut CairoSurface;
+    fn cairo_surface_write_to_png(surface: *mut CairoSurface, filename: *const c_char) -> c_int;
+    fn cairo_paint(context: *mut CairoContext);
     fn cairo_image_surface_get_width(surface: *mut CairoSurface) -> c_int;
     fn cairo_image_surface_get_height(surface: *mut CairoSurface) -> c_int;
     fn cairo_surface_flush(surface: *mut CairoSurface);
@@ -422,20 +428,6 @@ const CODE_FONT_FAMILIES: &[&str] = &[
     "Noto Sans Mono CJK SC",
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Level {
-    Project,
-    File,
-    Class,
-    Function,
-}
-
-struct Node {
-    label: &'static str,
-    detail: &'static str,
-    level: Level,
-}
-
 struct FileBuffer {
     name: String,
     path: PathBuf,
@@ -500,65 +492,6 @@ enum CreateKind {
     Folder,
     File,
 }
-
-const NODES: &[Node] = &[
-    Node {
-        label: "TC-IDE",
-        detail: "project",
-        level: Level::Project,
-    },
-    Node {
-        label: "graph.rs",
-        detail: "src/editor",
-        level: Level::File,
-    },
-    Node {
-        label: "workspace.rs",
-        detail: "src",
-        level: Level::File,
-    },
-    Node {
-        label: "render.rs",
-        detail: "src",
-        level: Level::File,
-    },
-    Node {
-        label: "GraphController",
-        detail: "class",
-        level: Level::Class,
-    },
-    Node {
-        label: "build_graph()",
-        detail: "fn - L42",
-        level: Level::Function,
-    },
-    Node {
-        label: "analyze_workspace()",
-        detail: "fn - L18",
-        level: Level::Function,
-    },
-    Node {
-        label: "resolve_symbols()",
-        detail: "fn - L67",
-        level: Level::Function,
-    },
-    Node {
-        label: "render_graph()",
-        detail: "fn - L12",
-        level: Level::Function,
-    },
-];
-
-const EDGES: &[(usize, usize)] = &[
-    (0, 1),
-    (0, 2),
-    (0, 3),
-    (1, 4),
-    (4, 5),
-    (2, 6),
-    (2, 7),
-    (3, 8),
-];
 
 #[derive(Clone, Copy)]
 struct Palette {
@@ -645,12 +578,14 @@ struct App {
     terminal_menu_open: bool,
     graph_current: bool,
     graph_zoom: f32,
-    graph_mode: usize,
+    graph_relation: graph_core::GraphRelation,
     graph_scope: usize,
     graph_scroll: usize,
     graph_search: String,
     graph_search_focused: bool,
-    graph_collapsed: BTreeSet<usize>,
+    graph_folded: BTreeSet<String>,
+    project_symbols: Vec<editor_core::ProjectSymbolOccurrence>,
+    hovered_symbol: Option<editor_core::SymbolOccurrence>,
     package_open: bool,
     package_targets: [bool; 4],
     build_started: Option<Instant>,
@@ -1698,103 +1633,133 @@ impl App {
         )
     }
 
-    fn node_position(&self, node: &Node) -> (i32, i32) {
-        let (x, y, _, _) = self.graph_bounds();
-        let index = NODES
-            .iter()
-            .position(|candidate| std::ptr::eq(candidate, node))
-            .unwrap_or(0);
-        let depth = match node.level {
-            Level::Project => 0,
-            Level::File => 1,
-            Level::Class | Level::Function => 2,
+    /// Relation graph of the current editor state, built by the shared model.
+    fn graph(&self) -> graph_core::Graph {
+        let file = &self.files[self.selected_file];
+        let symbols = editor_core::symbol_occurrences(&file.lines, &file.name);
+        self.graph_with(&file.lines, &symbols)
+    }
+
+    fn graph_with(
+        &self,
+        lines: &[String],
+        symbols: &[editor_core::SymbolOccurrence],
+    ) -> graph_core::Graph {
+        let current_file = self.files[self.selected_file].name.as_str();
+        let folded = self.graph_folded.iter().cloned().collect::<Vec<_>>();
+        let pinned = match self.graph_scope {
+            0 => graph_core::GraphScope::File,
+            1 => graph_core::GraphScope::Folder,
+            _ => graph_core::GraphScope::Project,
         };
-        let visible = self.graph_visible_indices();
-        let row = visible
-            .iter()
-            .position(|candidate| *candidate == index)
-            .unwrap_or(0)
-            .saturating_sub(self.graph_scroll);
+        let inputs = graph_core::GraphInputs {
+            project_name: &self.project_name,
+            current_file,
+            current_folder: graph_core::folder_of(current_file),
+            hovered: self.hovered_symbol.as_ref(),
+            file_lines: lines,
+            file_symbols: symbols,
+            project_symbols: &self.project_symbols,
+            folded: &folded,
+            relation: self.graph_relation,
+        };
+        let scope = graph_core::auto_scope(
+            self.hovered_symbol.as_ref(),
+            &self.graph_search,
+            Some(pinned),
+        );
+        graph_core::build_graph(&inputs, scope, &self.graph_search)
+    }
+
+    /// Index the project once so the graph can show cross file relations.
+    fn rebuild_project_index(&mut self) {
+        let mut sources: Vec<(String, Vec<String>)> = Vec::new();
+        if let Some(root) = self.project_path.clone() {
+            collect_project_sources(&root, &mut sources);
+        }
+        if sources.is_empty() {
+            for file in &self.files {
+                sources.push((file.name.clone(), file.lines.clone()));
+            }
+        }
+        self.project_symbols = editor_core::project_symbol_occurrences(&sources);
+        self.graph_folded.clear();
+        self.hovered = None;
+        self.hovered_symbol = None;
+        self.graph_scroll = 0;
+    }
+
+    /// Rows the graph panel can show.
+    fn graph_rows(&self, graph: &graph_core::Graph) -> usize {
+        let (_, _, _, h) = self.graph_bounds();
+        let _ = graph;
+        ((h - self.s(158)) / self.s(54).max(1)).max(1) as usize
+    }
+
+    /// Card position of a node index inside the graph panel.
+    fn node_position(&self, graph: &graph_core::Graph, index: usize) -> (i32, i32) {
+        let (x, y, _, _) = self.graph_bounds();
+        let rows = self.graph_rows(graph);
+        let first = graph.clamped_scroll(self.graph_scroll, rows);
+        let row = index.saturating_sub(first);
+        let depth = graph.nodes.get(index).map(|node| node.depth).unwrap_or(0);
         (
-            x + self.s(28 + depth * 28),
+            x + self.s(28 + depth as i32 * 28),
             y + self.s(121) + (self.s(54) as f32 * self.graph_zoom * row as f32) as i32,
         )
     }
 
-    fn graph_descends_from(index: usize, ancestor: usize) -> bool {
-        let mut current = index;
-        while let Some((parent, _)) = EDGES.iter().find(|(_, child)| *child == current) {
-            if *parent == ancestor {
-                return true;
-            }
-            current = *parent;
-        }
-        false
+    /// Node indices currently on screen.
+    fn graph_visible(&self, graph: &graph_core::Graph) -> Vec<usize> {
+        let rows = self.graph_rows(graph);
+        let first = graph.clamped_scroll(self.graph_scroll, rows);
+        let last = graph.len().min(first.saturating_add(rows));
+        (first..last).collect()
     }
 
-    fn graph_file_node(&self) -> Option<usize> {
-        let selected = &self.files[self.selected_file].name;
-        NODES.iter().position(|node| {
-            node.level == Level::File && (node.label == selected || selected.ends_with(node.label))
-        })
+    /// Focus a graph target: select the matching open file and place the caret.
+    fn focus_graph_target(&mut self, target: &graph_core::GraphTarget) -> bool {
+        let name = graph_core::file_name_of(&target.file);
+        let Some(index) = self
+            .files
+            .iter()
+            .position(|file| file.name == target.file || file.name.ends_with(name))
+        else {
+            return false;
+        };
+        self.selected_file = index;
+        self.graph_scroll = 0;
+        self.caret_line = target
+            .line
+            .min(self.files[index].lines.len().saturating_sub(1));
+        self.caret_column = target.column;
+        self.selection_anchor = None;
+        self.selection_head = None;
+        true
     }
 
-    fn graph_visible_indices(&self) -> Vec<usize> {
-        let selected_file = self.graph_file_node();
-        let selected_folder = selected_file.map(|index| NODES[index].detail);
-        let query = self.graph_search.trim().to_ascii_lowercase();
-        let mut visible = Vec::new();
-        for (index, node) in NODES.iter().enumerate() {
-            let in_scope = match self.graph_scope {
-                0 => selected_file
-                    .map(|file| index == file || Self::graph_descends_from(index, file))
-                    .unwrap_or(node.level != Level::Project),
-                1 => selected_folder
-                    .map(|folder| {
-                        NODES.iter().enumerate().any(|(file, candidate)| {
-                            candidate.level == Level::File
-                                && candidate.detail == folder
-                                && (index == file || Self::graph_descends_from(index, file))
-                        })
-                    })
-                    .unwrap_or(node.level != Level::Project),
-                _ => true,
-            };
-            if !in_scope {
-                continue;
-            }
-            let hidden_by_collapse = self
-                .graph_collapsed
-                .iter()
-                .any(|parent| index != *parent && Self::graph_descends_from(index, *parent));
-            if hidden_by_collapse {
-                continue;
-            }
-            let matches = query.is_empty()
-                || node.label.to_ascii_lowercase().contains(&query)
-                || node.detail.to_ascii_lowercase().contains(&query)
-                || NODES.iter().enumerate().any(|(child, candidate)| {
-                    Self::graph_descends_from(child, index)
-                        && (candidate.label.to_ascii_lowercase().contains(&query)
-                            || candidate.detail.to_ascii_lowercase().contains(&query))
-                });
-            if matches {
-                visible.push(index);
-            }
+    /// Focus the symbol a graph node represents.
+    fn focus_graph_node(&mut self, node: &graph_core::GraphNode) {
+        let Some(target) = node.target.as_ref() else {
+            self.hovered_symbol = None;
+            return;
+        };
+        let name = node.label.trim_end_matches("()").to_string();
+        if name.is_empty() || node.edge.is_none() {
+            self.hovered_symbol = None;
+            return;
         }
-        visible
-    }
-
-    fn is_related(&self, index: usize) -> bool {
-        match self.hovered {
-            None => true,
-            Some(active) => {
-                active == index
-                    || EDGES
-                        .iter()
-                        .any(|&(a, b)| (a == active && b == index) || (b == active && a == index))
-            }
-        }
+        self.hovered_symbol = Some(editor_core::SymbolOccurrence {
+            name: name.clone(),
+            line: target.line,
+            start: target.column,
+            end: target.column + name.len(),
+            role: if node.edge == Some(graph_core::GraphEdge::Declaration) {
+                editor_core::SymbolRole::Declaration
+            } else {
+                editor_core::SymbolRole::Reference
+            },
+        });
     }
 
     unsafe fn draw(&self) {
@@ -2620,7 +2585,7 @@ impl App {
         let modes_x = self.width - mode_w * 3 - s(12);
         for (index, label) in mode_labels.iter().enumerate() {
             let bx = modes_x + index as i32 * mode_w;
-            if self.graph_mode == index {
+            if self.graph_relation.index() == index {
                 self.rect(self.colors.project, bx, s(52), mode_w - s(4), s(25));
             }
             self.outline(self.colors.line, bx, s(52), mode_w - s(4), s(25));
@@ -2656,8 +2621,12 @@ impl App {
             );
             return;
         }
-        let active = self.hovered.or_else(|| self.graph_file_node()).unwrap_or(0);
-        let active_label = NODES[active].label;
+        let graph = self.graph();
+        let focus_label = self
+            .hovered_symbol
+            .as_ref()
+            .map(|symbol| symbol.name.clone())
+            .unwrap_or_else(|| self.files[self.selected_file].name.clone());
         let scope_labels = [
             self.tr("FILE", "当前文件"),
             self.tr("FOLDER", "当前文件夹"),
@@ -2700,65 +2669,32 @@ impl App {
             y + s(98),
             &format!(
                 "{}  /  {}  /  {}",
-                self.project_name, self.files[self.selected_file].name, active_label
+                self.project_name, self.files[self.selected_file].name, focus_label
             ),
         );
-        let visible = self.graph_visible_indices();
-        let visible_rows = ((h - s(158)) / s(54).max(1)).max(1) as usize;
-        let shown: BTreeSet<usize> = visible
-            .iter()
-            .skip(self.graph_scroll)
-            .take(visible_rows)
-            .copied()
-            .collect();
-        for &(a, b) in EDGES {
-            if !shown.contains(&a) || !shown.contains(&b) {
-                continue;
-            }
-            let related = match self.graph_mode {
-                1 => b == active,
-                2 => a == active,
-                _ => self
-                    .hovered
-                    .map(|focus| focus == a || focus == b)
-                    .unwrap_or(true),
-            };
-            let color = if related {
-                self.colors.accent
-            } else {
-                self.colors.line
-            };
-            let from = self.node_position(&NODES[a]);
-            let to = self.node_position(&NODES[b]);
-            let width = if related { 2 } else { 1 };
-            let rail_x = from.0 + s(13);
-            self.line(color, width, (rail_x, from.1 + s(8)), (rail_x, to.1));
-            self.line(color, width, (rail_x, to.1), (to.0, to.1));
+        let visible = self.graph_visible(&graph);
+        let first_y = y + s(121);
+        if let Some(last) = visible.last() {
+            let (_, last_y) = self.node_position(&graph, *last);
+            self.line(
+                self.colors.accent,
+                2,
+                (x + s(28), first_y),
+                (x + s(28), last_y),
+            );
         }
-        for index in visible
-            .iter()
-            .skip(self.graph_scroll)
-            .take(visible_rows)
-            .copied()
-        {
-            let node = &NODES[index];
-            let (nx, ny) = self.node_position(node);
-            let active = self.hovered == Some(index);
-            let related = match self.graph_mode {
-                1 => {
-                    index == self.hovered.unwrap_or(0)
-                        || EDGES
-                            .iter()
-                            .any(|&(a, b)| b == self.hovered.unwrap_or(0) && a == index)
-                }
-                2 => {
-                    index == self.hovered.unwrap_or(0)
-                        || EDGES
-                            .iter()
-                            .any(|&(a, b)| a == self.hovered.unwrap_or(0) && b == index)
-                }
-                _ => self.is_related(index),
+        for index in visible {
+            let Some(node) = graph.nodes.get(index) else {
+                continue;
             };
+            let (nx, ny) = self.node_position(&graph, index);
+            let active = self.hovered == Some(index);
+            let related = self
+                .hovered_symbol
+                .as_ref()
+                .map(|symbol| node.label.trim_end_matches("()") == symbol.name)
+                .unwrap_or(true)
+                || node.edge.is_none();
             let card_x = nx + s(12);
             let card_w = (self.width - card_x - s(16)).max(s(120));
             if active {
@@ -2775,12 +2711,6 @@ impl App {
                 card_w,
                 s(39),
             );
-            let marker = match node.level {
-                Level::Project => "P",
-                Level::File => "F",
-                Level::Class => "C",
-                Level::Function => "fn",
-            };
             self.rect(
                 if related {
                     self.colors.accent
@@ -2792,40 +2722,47 @@ impl App {
                 s(19),
                 s(17),
             );
+            let marker = match node.level {
+                graph_core::GraphLevel::Project => "P",
+                graph_core::GraphLevel::Folder => "D",
+                graph_core::GraphLevel::File => "F",
+                graph_core::GraphLevel::Class => "C",
+                _ => "fn",
+            };
             self.text(self.colors.bg, nx - s(4), ny + s(5), marker);
             let label_color = if related {
                 self.colors.bright
             } else {
                 self.colors.muted
             };
-            self.text(label_color, card_x + s(12), ny + s(5), node.label);
-            if node.level == Level::File {
+            self.text(label_color, card_x + s(12), ny + s(5), &node.caption());
+            if node.has_children() {
                 self.text(
                     self.colors.accent,
                     card_x + s(2),
                     ny + s(5),
-                    if self.graph_collapsed.contains(&index) {
-                        "+"
-                    } else {
-                        "-"
-                    },
+                    graph_core::marker_glyph(node),
                 );
             }
-            let detail_width = self.pango_text_size(node.detail, false).0;
+            let detail_width = self.pango_text_size(&node.detail, false).0;
             self.text(
                 self.colors.muted,
-                (self.width - detail_width - s(26)).max(card_x + s(120)),
+                (self.width - detail_width - s(26)).max(card_x + s(160)),
                 ny + s(5),
-                node.detail,
+                &node.detail,
             );
         }
         self.text(
             self.colors.muted,
             x + s(14),
             y + h - s(10),
-            self.tr(
-                "wheel: browse  |  click a file: fold  |  hover: focus",
-                "滚轮浏览  |  单击文件折叠  |  悬停符号聚焦",
+            &format!(
+                "{}  /  {}",
+                graph.footer(self.graph_scroll, self.graph_rows(&graph)),
+                self.tr(
+                    "hover a symbol: focus  |  click marker: fold  |  enter: jump",
+                    "悬停符号：聚焦  |  点击标记：折叠  |  回车：跳转",
+                )
             ),
         );
     }
@@ -4547,7 +4484,8 @@ impl App {
         self.selected_file = 0;
         self.caret_line = 0;
         self.caret_column = 0;
-        self.graph_current = false;
+        self.graph_current = true;
+        self.rebuild_project_index();
         self.load_project_package_targets();
         self.reset_terminals_for_project();
         self.status_message = format!(
@@ -4677,8 +4615,9 @@ impl App {
             let mode_w = s(73);
             let modes_x = self.width - mode_w * 3 - s(12);
             if x >= modes_x {
-                self.graph_mode = ((x - modes_x) / mode_w.max(1)).clamp(0, 2) as usize;
-                self.status_message = match self.graph_mode {
+                self.graph_relation = graph_core::GraphRelation::ALL
+                    [((x - modes_x) / mode_w.max(1)).clamp(0, 2) as usize];
+                self.status_message = match self.graph_relation.index() {
                     1 => self.tr(
                         "Showing callers of the focused symbol",
                         "正在显示焦点符号的调用者",
@@ -4696,7 +4635,7 @@ impl App {
                 return;
             }
         }
-        let (_, graph_y, _, graph_h) = self.graph_bounds();
+        let (_, graph_y, _, _) = self.graph_bounds();
         if button == 1 && x >= graph_left && y >= graph_y + s(8) && y <= graph_y + s(35) {
             let scope_w = ((self.width - graph_left - s(36)) / 3).max(s(72));
             self.graph_scope = ((x - graph_left - s(14)) / scope_w.max(1)).clamp(0, 2) as usize;
@@ -4721,36 +4660,63 @@ impl App {
             return;
         }
         if button == 1 && x >= graph_left && y >= graph_y + s(102) {
-            for index in self
-                .graph_visible_indices()
-                .iter()
-                .skip(self.graph_scroll)
-                .copied()
-            {
-                let (_, node_y) = self.node_position(&NODES[index]);
-                if (y - node_y).abs() <= s(20) {
-                    if NODES[index].level == Level::File {
-                        if !self.graph_collapsed.remove(&index) {
-                            self.graph_collapsed.insert(index);
-                        }
-                        self.graph_scroll = 0;
-                    }
-                    self.hovered = Some(index);
-                    return;
+            let graph = self.graph();
+            let mut action: Option<(usize, bool)> = None;
+            for index in self.graph_visible(&graph) {
+                let (nx, ny) = self.node_position(&graph, index);
+                if (y - ny).abs() <= s(20) {
+                    let marker_hit = (x - (nx + s(24))).abs() <= s(16);
+                    action = Some((index, marker_hit));
+                    break;
                 }
             }
+            if let Some((index, marker_hit)) = action {
+                self.hovered = Some(index);
+                if let Some(node) = graph.nodes.get(index) {
+                    if node.has_children()
+                        && (marker_hit || node.level == graph_core::GraphLevel::File)
+                    {
+                        let key = node.key.clone();
+                        let label = node.label.clone();
+                        if !self.graph_folded.remove(&key) {
+                            self.graph_folded.insert(key);
+                            self.status_message =
+                                format!("{} {}", self.tr("Collapsed", "已折叠"), label);
+                        } else {
+                            self.status_message =
+                                format!("{} {}", self.tr("Expanded", "已展开"), label);
+                        }
+                        self.graph_scroll = 0;
+                    } else if let Some(target) = node.target.clone() {
+                        let opened = self.focus_graph_target(&target);
+                        self.status_message = if opened {
+                            format!(
+                                "{} {}:{}",
+                                self.tr("Jumped to relation at", "已跳转到关系位置"),
+                                target.file,
+                                target.line + 1
+                            )
+                        } else {
+                            format!(
+                                "{} {}",
+                                self.tr("File is not open:", "文件未打开："),
+                                target.file
+                            )
+                        };
+                    }
+                    self.focus_graph_node(node);
+                }
+            }
+            return;
         }
         if x >= graph_left && button == 4 {
             self.graph_scroll = self.graph_scroll.saturating_sub(1);
             return;
         }
         if x >= graph_left && button == 5 {
-            let visible_rows = ((graph_h - s(158)) / s(54).max(1)).max(1) as usize;
-            let maximum = self
-                .graph_visible_indices()
-                .len()
-                .saturating_sub(visible_rows);
-            self.graph_scroll = (self.graph_scroll + 1).min(maximum);
+            let graph = self.graph();
+            let rows = self.graph_rows(&graph);
+            self.graph_scroll = (self.graph_scroll + 1).min(graph.max_scroll(rows));
             return;
         }
         if x >= s(112) && x <= s(200) && y < s(46) {
@@ -5813,9 +5779,14 @@ impl App {
                     let symbol_right = symbol_x + self.code_text_width(&line[start..end]);
                     if self.mouse_x >= symbol_x - s(3) && self.mouse_x <= symbol_right + s(3) {
                         let symbol = &line[start..end];
-                        self.hovered = NODES
-                            .iter()
-                            .position(|node| node.label.trim_end_matches("()") == symbol);
+                        self.hovered_symbol = editor_core::symbol_at(
+                            &self.files[self.selected_file].lines,
+                            &self.files[self.selected_file].name,
+                            row,
+                            start,
+                        );
+                        let _ = symbol;
+                        self.hovered = None;
                         self.hovered_from_code = true;
                         self.hovered_code_span = Some((row, start, end));
                         return;
@@ -5827,21 +5798,14 @@ impl App {
         self.hovered_code_span = None;
         if self.mouse_x < graph {
             self.hovered = None;
+            self.hovered_symbol = None;
             return;
         }
+        let graph_model = self.graph();
         let mut best = None;
         let mut distance = self.s(40) as i64 * self.s(40) as i64;
-        let (_, _, _, graph_h) = self.graph_bounds();
-        let visible_rows = ((graph_h - s(158)) / s(54).max(1)).max(1) as usize;
-        for index in self
-            .graph_visible_indices()
-            .iter()
-            .skip(self.graph_scroll)
-            .take(visible_rows)
-            .copied()
-        {
-            let node = &NODES[index];
-            let (x, y) = self.node_position(node);
+        for index in self.graph_visible(&graph_model) {
+            let (x, y) = self.node_position(&graph_model, index);
             let dx = (self.mouse_x - x) as i64;
             let dy = (self.mouse_y - y) as i64;
             let candidate = dx * dx + dy * dy;
@@ -5851,6 +5815,9 @@ impl App {
             }
         }
         self.hovered = best;
+        if let Some(node) = best.and_then(|index| graph_model.nodes.get(index)) {
+            self.focus_graph_node(node);
+        }
     }
 }
 
@@ -5870,6 +5837,53 @@ unsafe fn color(display: *mut Display, map: Colormap, value: &str) -> c_ulong {
     } else {
         screen.pixel
     }
+}
+
+/// Collect project sources for the semantic index, bounded like the Windows backend.
+fn collect_project_sources(root: &PathBuf, sources: &mut Vec<(String, Vec<String>)>) {
+    fn walk(root: &PathBuf, path: &PathBuf, sources: &mut Vec<(String, Vec<String>)>) {
+        if sources.len() >= 300 {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            if sources.len() >= 300 {
+                return;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                let ignored = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| matches!(name, ".git" | "target" | "node_modules" | ".venv"))
+                    .unwrap_or(false);
+                if !ignored {
+                    walk(root, &path, sources);
+                }
+                continue;
+            }
+            let display = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if editor_core::language_for_file(&display) == "Plain Text" {
+                continue;
+            }
+            let Ok(metadata) = path.metadata() else {
+                continue;
+            };
+            if metadata.len() > 1_000_000 {
+                continue;
+            }
+            if let Ok(content) = fs::read_to_string(&path) {
+                sources.push((display, content.lines().map(str::to_string).collect()));
+            }
+        }
+    }
+    walk(root, root, sources);
 }
 
 fn initial_files() -> Vec<FileBuffer> {
@@ -6702,6 +6716,46 @@ fn save_language_settings(languages: &[LanguagePack]) {
     let _ = fs::write(path, format!("{content}\n"));
 }
 
+/// `--render-frame <path>` renders one frame to a PNG without mapping a window.
+fn frame_export_path() -> Option<String> {
+    let mut arguments = std::env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        if argument == "--render-frame" {
+            return arguments.next();
+        }
+        if let Some(value) = argument.strip_prefix("--render-frame=") {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// Write the current pixmap frame to a PNG so CI and local runs can inspect it.
+unsafe fn export_frame(app: &App, path: &str) -> bool {
+    const CAIRO_FORMAT_ARGB32: c_int = 0;
+    let Ok(path) = CString::new(path) else {
+        return false;
+    };
+    let surface = unsafe { cairo_image_surface_create(CAIRO_FORMAT_ARGB32, app.width, app.height) };
+    if surface.is_null() {
+        return false;
+    }
+    let context = unsafe { cairo_create(surface) };
+    if context.is_null() {
+        unsafe { cairo_surface_destroy(surface) };
+        return false;
+    }
+    unsafe {
+        cairo_surface_flush(app.cairo_surface);
+        cairo_set_source_surface(context, app.cairo_surface, 0.0, 0.0);
+        cairo_paint(context);
+        let status = cairo_surface_write_to_png(surface, path.as_ptr());
+        cairo_destroy(context);
+        cairo_surface_destroy(surface);
+        status == 0
+    }
+}
+
 pub fn run() {
     unsafe {
         let locale = CString::new("").unwrap();
@@ -6742,10 +6796,13 @@ pub fn run() {
                 | EXPOSURE_MASK
                 | STRUCTURE_NOTIFY_MASK,
         );
-        let delete_name = CString::new("WM_DELETE_WINDOW").unwrap();
-        let mut delete_atom = XInternAtom(display, delete_name.as_ptr(), 0);
-        XSetWMProtocols(display, window, &mut delete_atom, 1);
-        XMapWindow(display, window);
+        let frame_export = frame_export_path();
+        if frame_export.is_none() {
+            let delete_name = CString::new("WM_DELETE_WINDOW").unwrap();
+            let mut delete_atom = XInternAtom(display, delete_name.as_ptr(), 0);
+            XSetWMProtocols(display, window, &mut delete_atom, 1);
+            XMapWindow(display, window);
+        }
         let gc = XCreateGC(display, window, 0, ptr::null_mut());
         let font_pattern = if width > 2200 {
             "-misc-fixed-medium-r-normal--24-*-*-*-*-*-iso10646-1"
@@ -6899,12 +6956,14 @@ pub fn run() {
             terminal_menu_open: false,
             graph_current: true,
             graph_zoom: 1.0,
-            graph_mode: 0,
+            graph_relation: graph_core::GraphRelation::Follow,
             graph_scope: 0,
             graph_scroll: 0,
             graph_search: String::new(),
             graph_search_focused: false,
-            graph_collapsed: BTreeSet::new(),
+            graph_folded: BTreeSet::new(),
+            project_symbols: Vec::new(),
+            hovered_symbol: None,
             package_open: false,
             package_targets: [false, false, false, false],
             build_started: None,
@@ -6936,7 +6995,43 @@ pub fn run() {
             status_message: "Ready".into(),
             started: Instant::now(),
         };
+        app.rebuild_project_index();
         let frame = Duration::from_micros(16_667);
+        if let Some(path) = frame_export {
+            app.update_background();
+            app.draw();
+            let written = export_frame(&app, &path);
+            if written {
+                println!("TC-IDE frame written to {path}");
+            } else {
+                eprintln!("TC-IDE: could not write frame {path}");
+            }
+            if !app.background_surface.is_null() {
+                cairo_surface_destroy(app.background_surface);
+            }
+            if !app.logo_surface.is_null() {
+                cairo_surface_destroy(app.logo_surface);
+            }
+            cairo_destroy(app.cairo);
+            cairo_surface_destroy(app.cairo_surface);
+            XFreePixmap(display, app.canvas);
+            if !app.font.is_null() {
+                XFreeFont(display, app.font);
+            }
+            if !app.font_set.is_null() {
+                XFreeFontSet(display, app.font_set);
+            }
+            if !app.code_font.is_null() {
+                XFreeFont(display, app.code_font);
+            }
+            XFreeGC(display, gc);
+            XDestroyWindow(display, window);
+            XCloseDisplay(display);
+            if !written {
+                std::process::exit(1);
+            }
+            return;
+        }
         let mut running = true;
         while running {
             let began = Instant::now();
@@ -7025,23 +7120,91 @@ mod tests {
         assert!((value - 1.0).abs() < 0.01);
     }
 
-    #[test]
-    fn graph_starts_at_project_scope() {
-        assert_eq!(
-            NODES.iter().filter(|n| n.level == Level::Project).count(),
-            1
-        );
-        assert!(EDGES.iter().filter(|(a, _)| *a == 0).count() >= 3);
+    fn demo_sources() -> Vec<(String, Vec<String>)> {
+        initial_files()
+            .iter()
+            .map(|file| (file.name.clone(), file.lines.clone()))
+            .collect()
+    }
+
+    fn demo_graph(scope: graph_core::GraphScope, folded: &[String]) -> graph_core::Graph {
+        let files = initial_files();
+        let sources = demo_sources();
+        let project = editor_core::project_symbol_occurrences(&sources);
+        let file = &files[0];
+        let symbols = editor_core::symbol_occurrences(&file.lines, &file.name);
+        let inputs = graph_core::GraphInputs {
+            project_name: "TC-IDE",
+            current_file: &file.name,
+            current_folder: graph_core::folder_of(&file.name),
+            hovered: None,
+            file_lines: &file.lines,
+            file_symbols: &symbols,
+            project_symbols: &project,
+            folded,
+            relation: graph_core::GraphRelation::Follow,
+        };
+        graph_core::build_graph(&inputs, scope, "")
     }
 
     #[test]
-    fn every_non_project_node_is_connected() {
-        for index in 1..NODES.len() {
-            assert!(
-                EDGES.iter().any(|(a, b)| *a == index || *b == index),
-                "node {index} is isolated"
-            );
-        }
+    fn graph_builds_a_real_hierarchy_from_the_open_files() {
+        let graph = demo_graph(graph_core::GraphScope::File, &[]);
+        let roots = graph
+            .nodes
+            .iter()
+            .filter(|node| node.level == graph_core::GraphLevel::Project)
+            .count();
+        assert_eq!(roots, 1);
+        assert_eq!(graph.nodes[0].depth, 0);
+        assert!(graph.nodes[0].children > 0);
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.level == graph_core::GraphLevel::Class));
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.caption().contains("build_graph")));
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.caption().contains("analyze_workspace") || node.edge.is_some()));
+    }
+
+    #[test]
+    fn graph_nodes_carry_targets_that_open_open_files() {
+        let graph = demo_graph(graph_core::GraphScope::File, &[]);
+        let with_target = graph
+            .nodes
+            .iter()
+            .filter(|node| node.target.is_some())
+            .count();
+        assert!(with_target >= 2, "{:?}", graph.nodes);
+        assert!(graph.nodes.iter().all(|node| !node.key.is_empty()));
+    }
+
+    #[test]
+    fn folding_a_file_hides_its_symbols() {
+        let folded = vec![graph_core::file_key("graph.rs")];
+        let graph = demo_graph(graph_core::GraphScope::File, &folded);
+        assert_eq!(graph.len(), 2);
+        assert!(graph.nodes[1].folded);
+        assert!(graph.nodes[1].children > 0);
+    }
+
+    #[test]
+    fn project_scope_groups_the_demo_files() {
+        let graph = demo_graph(graph_core::GraphScope::Project, &[]);
+        let files = graph
+            .nodes
+            .iter()
+            .filter(|node| node.level == graph_core::GraphLevel::File)
+            .map(|node| node.label.clone())
+            .collect::<Vec<_>>();
+        assert!(files.contains(&"graph.rs".to_string()));
+        assert!(files.contains(&"workspace.rs".to_string()));
+        assert!(files.contains(&"render.rs".to_string()));
     }
 
     #[test]
