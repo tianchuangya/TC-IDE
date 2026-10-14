@@ -35,6 +35,7 @@ pub const COMMAND_WORKSPACE_SEARCH: Wparam = 1019;
 pub const COMMAND_SETTINGS: Wparam = 1020;
 pub const COMMAND_EXTENSIONS: Wparam = 1021;
 pub const COMMAND_PACKAGE: Wparam = 1022;
+pub const COMMAND_REFRESH_PROJECT: Wparam = 1023;
 
 const CF_UNICODETEXT: Uint = 13;
 const GMEM_MOVEABLE: Uint = 0x0002;
@@ -96,6 +97,12 @@ struct BrowseInfo {
     image: i32,
 }
 
+#[repr(C)]
+struct Point {
+    x: i32,
+    y: i32,
+}
+
 #[link(name = "kernel32")]
 extern "system" {
     fn GlobalAlloc(flags: Uint, bytes: usize) -> Handle;
@@ -111,6 +118,8 @@ extern "system" {
     fn CloseClipboard() -> Bool;
     fn CreateMenu() -> Hmenu;
     fn CreatePopupMenu() -> Hmenu;
+    fn ClientToScreen(window: Hwnd, point: *mut Point) -> Bool;
+    fn DestroyMenu(menu: Hmenu) -> Bool;
     fn EmptyClipboard() -> Bool;
     fn GetClipboardData(format: Uint) -> Handle;
     fn GetDpiForWindow(window: Hwnd) -> Uint;
@@ -129,6 +138,15 @@ extern "system" {
         height: i32,
         flags: Uint,
     ) -> Bool;
+    fn TrackPopupMenu(
+        menu: Hmenu,
+        flags: Uint,
+        x: i32,
+        y: i32,
+        reserved: i32,
+        window: Hwnd,
+        area: *const c_void,
+    ) -> Uint;
 }
 
 #[link(name = "comdlg32")]
@@ -336,6 +354,36 @@ pub fn install_native_menu(window: Hwnd) {
             platform_label.as_ptr(),
         );
         SetMenu(window, menu);
+    }
+}
+
+pub fn workspace_context_menu(window: Hwnd, x: i32, y: i32) -> Option<Wparam> {
+    unsafe {
+        let menu = CreatePopupMenu();
+        if menu.is_null() {
+            return None;
+        }
+        let project = wide("New project...");
+        let file = wide("New file...");
+        let folder = wide("New folder...");
+        let refresh = wide("Refresh project tree");
+        AppendMenuW(menu, MF_STRING, COMMAND_NEW_PROJECT, project.as_ptr());
+        AppendMenuW(menu, MF_STRING, COMMAND_NEW_FILE, file.as_ptr());
+        AppendMenuW(menu, MF_STRING, COMMAND_NEW_FOLDER, folder.as_ptr());
+        AppendMenuW(menu, MF_STRING, COMMAND_REFRESH_PROJECT, refresh.as_ptr());
+        let mut point = Point { x, y };
+        ClientToScreen(window, &mut point);
+        let command = TrackPopupMenu(
+            menu,
+            0x0100 | 0x0002,
+            point.x,
+            point.y,
+            0,
+            window,
+            ptr::null(),
+        ) as Wparam;
+        DestroyMenu(menu);
+        (command != 0).then_some(command)
     }
 }
 

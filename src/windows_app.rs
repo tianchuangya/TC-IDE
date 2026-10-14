@@ -54,6 +54,7 @@ const WM_LBUTTONDOWN: Uint = 0x0201;
 const WM_LBUTTONUP: Uint = 0x0202;
 const WM_MOUSEMOVE: Uint = 0x0200;
 const WM_MOUSEWHEEL: Uint = 0x020a;
+const WM_RBUTTONDOWN: Uint = 0x0204;
 const WM_PAINT: Uint = 0x000f;
 const WM_SIZE: Uint = 0x0005;
 const WM_TIMER: Uint = 0x0113;
@@ -1550,6 +1551,10 @@ fn perform_command(window: Hwnd, command: Wparam) {
                 app.workspace_search_focused = true;
                 app.create_kind = None;
             }
+            platform::COMMAND_REFRESH_PROJECT => {
+                app.refresh_project();
+                app.status = "Project tree refreshed".into();
+            }
             platform::COMMAND_SETTINGS => {
                 app.settings_open = !app.settings_open;
                 app.extensions_open = false;
@@ -2390,6 +2395,19 @@ unsafe extern "system" fn window_proc(
                 }
             });
             invalidate(window);
+            0
+        }
+        WM_RBUTTONDOWN => {
+            let x = (l_param as u16 as i16) as i32;
+            let y = ((l_param >> 16) as u16 as i16) as i32;
+            let mut area = unsafe { std::mem::zeroed::<Rect>() };
+            unsafe { GetClientRect(window, &mut area) };
+            let scale = platform::dpi_for_window(window) as f32 / 96.0;
+            if x as f32 <= (area.right as f32 * 0.19).max(220.0 * scale) {
+                if let Some(command) = platform::workspace_context_menu(window, x, y) {
+                    perform_command(window, command);
+                }
+            }
             0
         }
         WM_MOUSEMOVE => {
