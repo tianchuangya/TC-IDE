@@ -15,6 +15,7 @@ use crate::graph_core;
 use crate::lsp_core;
 use crate::session_core;
 use crate::terminal_core;
+use crate::text_buffer;
 use crate::workspace_core;
 
 #[path = "windows_platform.rs"]
@@ -135,9 +136,10 @@ struct StoredBuffer {
     redo_stack: Vec<EditorSnapshot>,
 }
 
+/// Caret state recorded for undo; the text itself lives in the piece table, so
+/// an undo step no longer copies the document.
 #[derive(Clone)]
 struct EditorSnapshot {
-    lines: Vec<String>,
     caret: TextPosition,
     selection_anchor: Option<TextPosition>,
 }
@@ -233,6 +235,8 @@ struct WindowsAppState {
     project_language: usize,
     project_environment: usize,
     lines: Vec<String>,
+    /// Text of the active document, stored as a piece table.
+    buffer: text_buffer::TextBuffer,
     caret_line: usize,
     caret_column: usize,
     selection_anchor: Option<TextPosition>,
@@ -480,6 +484,9 @@ impl WindowsAppState {
                 "    }".into(),
                 "}".into(),
             ],
+            buffer: text_buffer::TextBuffer::from_text(
+                "use tc_ide::workspace::Project;\n\npub struct Editor {\n    project: Project,\n}\n\nimpl Editor {\n    pub fn render(&mut self) {\n        self.project.resolve_symbols();\n    }\n}\n",
+            ),
             caret_line: 0,
             caret_column: 0,
             selection_anchor: None,
@@ -632,6 +639,7 @@ impl WindowsAppState {
     /// Load a document into the active buffer, reading it from disk if needed.
     fn load_document(&mut self, index: usize) {
         if let Some(buffer) = self.stored_buffers.remove(&index) {
+            self.buffer = text_buffer::TextBuffer::from_lines(&buffer.lines);
             self.lines = buffer.lines;
             self.file_name = buffer.file_name;
             self.file_path = buffer.file_path;
@@ -653,9 +661,13 @@ impl WindowsAppState {
                     if lines.is_empty() {
                         lines.push(String::new());
                     }
+                    self.buffer = text_buffer::TextBuffer::from_lines(&lines);
                     lines
                 }
-                None => vec![String::new()],
+                None => {
+                    self.buffer = text_buffer::TextBuffer::default();
+                    vec![String::new()]
+                }
             };
             self.caret_line = 0;
             self.caret_column = 0;
@@ -709,6 +721,7 @@ impl WindowsAppState {
             .map(|(key, buffer)| (if key > index { key - 1 } else { key }, buffer))
             .collect();
         if self.session.is_empty() {
+            self.buffer = text_buffer::TextBuffer::default();
             self.lines = vec![String::new()];
             self.file_name = "untitled".into();
             self.file_path = None;
@@ -728,10 +741,6 @@ impl WindowsAppState {
         self.caret_column = self
             .caret_column
             .min(self.lines[self.caret_line].chars().count());
-    }
-
-    fn byte_at_caret(&self) -> usize {
-        Self::byte_at(&self.lines[self.caret_line], self.caret_column)
     }
 
     fn byte_at(value: &str, column: usize) -> usize {
@@ -770,19 +779,26 @@ impl WindowsAppState {
 
     fn snapshot(&self) -> EditorSnapshot {
         EditorSnapshot {
-            lines: self.lines.clone(),
             caret: self.position(),
             selection_anchor: self.selection_anchor,
         }
     }
 
     fn restore(&mut self, snapshot: EditorSnapshot) {
-        self.lines = snapshot.lines;
         self.caret_line = snapshot.caret.line;
         self.caret_column = snapshot.caret.column;
         self.selection_anchor = snapshot.selection_anchor;
         self.clamp_caret();
         self.last_edit = Some(Instant::now());
+    }
+
+    /// Rebuild the rendered lines from the piece table.
+    ///
+    /// The editors, the graph and the symbol index read `lines`; the piece table
+    /// owns the text so an edit never copies the document into the undo stack.
+    fn sync_lines(&mut self) {
+        self.lines = self.buffer.to_lines();
+        self.clamp_caret();
     }
 
     fn record_undo(&mut self) {
@@ -792,7 +808,15 @@ impl WindowsAppState {
             self.undo_stack.remove(0);
         }
         self.redo_stack.clear();
+        self.buffer.begin_group();
         self.mark_active_dirty();
+    }
+
+    /// Close the edit group opened by `record_undo` and refresh the view.
+    fn finish_edit(&mut self) {
+        self.buffer.end_group();
+        self.sync_lines();
+        self.last_edit = Some(Instant::now());
     }
 
     fn selection_range(&self) -> Option<(TextPosition, TextPosition)> {
@@ -830,19 +854,9 @@ impl WindowsAppState {
         let Some((start, end)) = self.selection_range() else {
             return false;
         };
-        if start.line == end.line {
-            let start_byte = Self::byte_at(&self.lines[start.line], start.column);
-            let end_byte = Self::byte_at(&self.lines[start.line], end.column);
-            self.lines[start.line].replace_range(start_byte..end_byte, "");
-        } else {
-            let prefix = self.lines[start.line]
-                [..Self::byte_at(&self.lines[start.line], start.column)]
-                .to_string();
-            let suffix = self.lines[end.line][Self::byte_at(&self.lines[end.line], end.column)..]
-                .to_string();
-            self.lines
-                .splice(start.line..=end.line, [format!("{prefix}{suffix}")]);
-        }
+        self.buffer
+            .delete((start.line, start.column), (end.line, end.column));
+        self.sync_lines();
         self.caret_line = start.line;
         self.caret_column = start.column;
         self.selection_anchor = None;
@@ -868,16 +882,18 @@ impl WindowsAppState {
         } else {
             value.replace("\r\n", "\n").replace('\r', "\n")
         };
-        for value in value.chars() {
-            if value == '\n' {
+        for character in value.chars() {
+            if character == '\n' {
                 self.newline_raw();
-            } else if !value.is_control() {
-                let byte = self.byte_at_caret();
-                self.lines[self.caret_line].insert(byte, value);
+            } else if !character.is_control() {
+                self.buffer
+                    .insert(self.caret_line, self.caret_column, &character.to_string());
                 self.caret_column += 1;
+                self.sync_lines();
             }
         }
-        self.last_edit = Some(Instant::now());
+        self.finish_edit();
+        self.notify_language_server();
         self.status = "Edited with Unicode-aware caret mapping".into();
     }
 
@@ -917,14 +933,13 @@ impl WindowsAppState {
         self.record_undo();
         self.delete_selection_raw();
         self.newline_raw();
-        self.last_edit = Some(Instant::now());
+        self.finish_edit();
+        self.notify_language_server();
     }
 
     fn newline_raw(&mut self) {
-        let byte = self.byte_at_caret();
-        let tail = self.lines[self.caret_line].split_off(byte);
+        self.buffer.insert(self.caret_line, self.caret_column, "\n");
         self.caret_line += 1;
-        self.lines.insert(self.caret_line, tail);
         self.caret_column = 0;
     }
 
@@ -939,7 +954,8 @@ impl WindowsAppState {
         if self.selection_range().is_some() {
             self.record_undo();
             self.delete_selection_raw();
-            self.last_edit = Some(Instant::now());
+            self.finish_edit();
+            self.notify_language_server();
             return;
         }
         if self.caret_column == 0 && self.caret_line == 0 {
@@ -947,17 +963,20 @@ impl WindowsAppState {
         }
         self.record_undo();
         if self.caret_column > 0 {
-            let end = self.byte_at_caret();
+            self.buffer.delete(
+                (self.caret_line, self.caret_column - 1),
+                (self.caret_line, self.caret_column),
+            );
             self.caret_column -= 1;
-            let start = self.byte_at_caret();
-            self.lines[self.caret_line].replace_range(start..end, "");
         } else if self.caret_line > 0 {
-            let current = self.lines.remove(self.caret_line);
+            let previous_length = self.buffer.line_chars(self.caret_line - 1);
+            self.buffer
+                .delete((self.caret_line - 1, previous_length), (self.caret_line, 0));
             self.caret_line -= 1;
-            self.caret_column = self.lines[self.caret_line].chars().count();
-            self.lines[self.caret_line].push_str(&current);
+            self.caret_column = previous_length;
         }
-        self.last_edit = Some(Instant::now());
+        self.finish_edit();
+        self.notify_language_server();
     }
 
     fn delete_forward(&mut self) {
@@ -972,21 +991,23 @@ impl WindowsAppState {
             self.record_undo();
             self.delete_selection_raw();
         } else {
-            let line_len = self.lines[self.caret_line].chars().count();
+            let line_len = self.buffer.line_chars(self.caret_line);
             if self.caret_column < line_len {
                 self.record_undo();
-                let start = self.byte_at_caret();
-                let end = Self::byte_at(&self.lines[self.caret_line], self.caret_column + 1);
-                self.lines[self.caret_line].replace_range(start..end, "");
-            } else if self.caret_line + 1 < self.lines.len() {
+                self.buffer.delete(
+                    (self.caret_line, self.caret_column),
+                    (self.caret_line, self.caret_column + 1),
+                );
+            } else if self.caret_line + 1 < self.buffer.line_count() {
                 self.record_undo();
-                let next = self.lines.remove(self.caret_line + 1);
-                self.lines[self.caret_line].push_str(&next);
+                self.buffer
+                    .delete((self.caret_line, line_len), (self.caret_line + 1, 0));
             } else {
                 return;
             }
         }
-        self.last_edit = Some(Instant::now());
+        self.finish_edit();
+        self.notify_language_server();
     }
 
     fn move_left(&mut self) {
@@ -1026,6 +1047,9 @@ impl WindowsAppState {
         self.mark_active_dirty();
         if let Some(snapshot) = self.undo_stack.pop() {
             self.redo_stack.push(self.snapshot());
+            if self.buffer.undo() {
+                self.sync_lines();
+            }
             self.restore(snapshot);
             self.status = "Undo".into();
         }
@@ -1035,6 +1059,9 @@ impl WindowsAppState {
         self.mark_active_dirty();
         if let Some(snapshot) = self.redo_stack.pop() {
             self.undo_stack.push(self.snapshot());
+            if self.buffer.redo() {
+                self.sync_lines();
+            }
             self.restore(snapshot);
             self.status = "Redo".into();
         }
@@ -1058,7 +1085,7 @@ impl WindowsAppState {
             self.status = "Open a file before saving".into();
             return;
         };
-        match fs::write(path, self.lines.join("\r\n")) {
+        match fs::write(path, self.buffer.to_text().replace('\n', "\r\n")) {
             Ok(()) => {
                 self.status = format!("Saved {}", path.display());
                 self.request_project_index();
@@ -1081,6 +1108,7 @@ impl WindowsAppState {
                 if self.lines.is_empty() {
                     self.lines.push(String::new());
                 }
+                self.buffer = text_buffer::TextBuffer::from_lines(&self.lines);
                 self.file_name = path
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
@@ -1260,6 +1288,8 @@ impl WindowsAppState {
         self.request_project_index();
         self.file_path = None;
         self.file_name = "Select a file".into();
+        self.buffer =
+            text_buffer::TextBuffer::from_text("// Choose a source file from the project tree\n");
         self.lines = vec!["// Choose a source file from the project tree".into()];
         self.caret_line = 0;
         self.caret_column = 0;
@@ -2371,6 +2401,7 @@ impl WindowsAppState {
                 if lines.is_empty() {
                     lines.push(String::new());
                 }
+                self.buffer = text_buffer::TextBuffer::from_lines(&lines);
                 self.lines = lines;
                 self.clamp_caret();
                 self.status = format!("Formatted {} with {command}", path.display());
@@ -5883,6 +5914,42 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{TextPosition, WindowsAppState};
+    use crate::text_buffer;
+
+    #[test]
+    fn the_piece_table_keeps_edits_and_undo_in_step() {
+        let mut app = WindowsAppState::new();
+        app.lines = vec!["one".into(), "two".into()];
+        app.buffer = text_buffer::TextBuffer::from_lines(&app.lines);
+        app.caret_line = 0;
+        app.caret_column = 3;
+
+        app.insert_text("!");
+        assert_eq!(app.lines, ["one!", "two"]);
+        app.newline();
+        app.insert_text("inserted");
+        assert_eq!(app.lines, ["one!", "inserted", "two"]);
+        assert_eq!(app.buffer.to_lines(), app.lines);
+
+        app.backspace();
+        assert_eq!(app.lines, ["one!", "inserte", "two"]);
+        app.undo();
+        assert_eq!(app.lines, ["one!", "inserted", "two"]);
+        app.undo();
+        assert_eq!(app.lines, ["one!", "two"]);
+        app.undo();
+        assert_eq!(app.lines, ["one", "two"]);
+        app.redo();
+        assert_eq!(app.lines, ["one!", "two"]);
+
+        // A paste is one undo step and keeps unicode intact.
+        app.caret_line = 1;
+        app.caret_column = 3;
+        app.insert_text(" 你好");
+        assert_eq!(app.lines, ["one!", "two 你好"]);
+        app.undo();
+        assert_eq!(app.lines, ["one!", "two"]);
+    }
 
     #[test]
     fn multiline_selection_cut_and_undo_are_lossless() {
