@@ -49,7 +49,7 @@ TC-IDE/
 │   ├── main.rs                # 按目标系统选择平台入口
 │   ├── editor_core.rs         # 共享语言识别、注释、语法 token、补全、符号关系与声明分类
 │   ├── graph_core.rs          # 共享关系图范围、搜索、层级、视口裁剪和节点预算
-│   ├── terminal_core.rs       # 共享终端网格换算、滚动历史、选区和文本提取
+│   ├── terminal_core.rs       # 共享终端网格换算、滚动历史、选区、文本提取与 VT 解析器
 │   ├── linux_app.rs           # X11/Cairo/Pango Linux 实现，文件较大
 │   ├── windows_app.rs         # Win32 状态、事件、编辑、项目、终端和流程编排
 │   ├── windows_platform.rs    # Windows 文件对话框、菜单、剪贴板、Shell/DPI API
@@ -122,7 +122,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 ### 4.6 Windows 终端、运行与打包
 
 - 多个真实 ConPTY 会话；Build、Run、Output 和用户新增终端。
-- 终端输入输出、VT/CSI/OSC 基础解析、方向键、Home/End/Delete/Tab。
+- 终端输入输出、VT/CSI/OSC 基础解析、方向键、Home/End/Delete/Tab；解析器已下沉到共享 `terminal_core`（`TerminalParser`/`TerminalView`），在 Linux 上也有 7 项单元测试覆盖 OSC 跳过、CSI 光标与擦除、退格改写、清屏、800 行滚动上限和视图发布。
 - `Ctrl+C/V/A/L` 交给终端；`Ctrl+Tab`/`Ctrl+Shift+Tab` 切换终端。
 - 终端网格由窗口尺寸换算：底部面板使用共享的 `terminal_core::panel_metrics` 几何与 `GridSize`，弹出窗口用 GDI 实测等宽字体字宽/行高；`WM_TIMER`/`WM_SIZE` 上的签名比较保证窗口缩放、DPI 变化、字号变化和新增会话都会同步 `ConPtySession::resize`。
 - 底部面板保留滚动历史：滚轮在面板正文上翻看输出、输入时自动回到底部，标题显示偏移行数；面板正文支持鼠标拖选、按等宽单元格高亮显示，状态栏报告选中字符数，`Ctrl+Shift+C` 复制（`Ctrl+C` 仍是中断）。
@@ -200,7 +200,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 ### P2：自动化与发布前门槛
 
 - [ ] 添加 Windows GUI smoke test 或可脚本化的状态层测试。
-- [ ] 对偏好设置解析、项目模板、打包命令、语言注册表、VT 解析、关系图过滤增加单元测试。（`graph_core` 范围/搜索/层级/视口、`terminal_core` 网格/滚动/选区、`editor_core` 声明分类已覆盖；VT 解析仍在 `windows_terminal.rs` 内，需要 Windows job 或抽出纯解析器）
+- [x] 对偏好设置解析、项目模板、打包命令、语言注册表、VT 解析、关系图过滤增加单元测试。（`graph_core` 范围/搜索/层级/视口、`terminal_core` 网格/滚动/选区/VT 解析、`editor_core` 声明分类已覆盖；偏好设置解析、项目模板和打包命令仍在 `windows_app.rs`/`windows_preferences.rs` 里，可继续下沉）
 - [x] CI 加入 `cargo fmt --check`、Clippy（先清零现有警告）和产物结构检查。（`cargo fmt --check` 与 `windows-typecheck` 已加入；Clippy 仍待清零现有警告后接入，当前 Linux 侧仍有 18 条、Windows 侧 2 条 dead_code 类警告）
 - [ ] 正式发布前准备清晰的版本号、变更记录、安装/卸载说明和已知问题。
 - [ ] 只有用户明确说“正式开始”后，才允许触发 `release.yml` 或创建 GitHub Release。
@@ -212,7 +212,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 1. 在 Windows 实机验收本批次：高 DPI、多显示器、弹出终端滚动与选择、`Ctrl+Shift+C` 与 `Ctrl+C` 的区别、IME、终端网格换行是否正确。
 2. 关系图折叠：类/文件夹节点可折叠，并与当前文件切换保持一致。
 3. 把 Linux 关系图迁移到 `graph_core`，删除 `linux_app.rs` 里重复的范围/搜索实现。
-4. 抽出 `windows_terminal.rs` 的 VT 解析器为纯函数并补单元测试（现在只能在 Windows job 里跑）。
+4. 把偏好设置解析、项目模板和打包命令下沉为共享纯函数并补单元测试（现在只能在 Windows job 或实机上验证）。
 5. 每完成一个批次执行本地测试、`cargo fmt --check`、Windows 类型检查、推送并等待 Windows job 成功。
 
 不要先做新的视觉概念页。
