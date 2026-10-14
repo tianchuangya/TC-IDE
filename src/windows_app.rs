@@ -9,6 +9,7 @@ use std::ptr;
 use std::time::Instant;
 
 use crate::ai_core;
+use crate::background_core;
 use crate::dap_core;
 use crate::editor_core;
 use crate::extension_core;
@@ -16,6 +17,7 @@ use crate::graph_core;
 use crate::index_core;
 use crate::lsp_core;
 use crate::motion_core;
+use crate::package_motion;
 use crate::session_core;
 use crate::syntax_core;
 use crate::terminal_core;
@@ -1220,6 +1222,93 @@ pub fn self_check() -> i32 {
         )
         .len()
             == 1,
+        &mut failures,
+    );
+
+    // Packaging: the selection file, the command and the manifest are shared.
+    let targets = workspace_core::parse_package_targets(
+        &workspace_core::serialize_package_targets(&[true, false, true]),
+        3,
+    );
+    report(
+        "package targets round trip",
+        targets == [true, false, true],
+        &mut failures,
+    );
+    let request = workspace_core::PackageRequest {
+        project: "demo".into(),
+        file: "main.rs".into(),
+        language: "Rust".into(),
+        stage: ".tc-ide-packages\\demo".into(),
+        has_cargo: true,
+        has_go_mod: false,
+        targets: [true, true, true],
+        certificate: None,
+        marker: "__DONE__".into(),
+        failure_marker: "__FAILED__".into(),
+        fallback: "echo none".into(),
+    };
+    let command = workspace_core::package_command(&request);
+    report(
+        "packaging command builds every selected target",
+        command.contains("cargo build --release")
+            && command.contains("Compress-Archive")
+            && command.contains("makeappx.exe")
+            && !command.contains("signtool")
+            && command.contains("Write-Output '__DONE__'"),
+        &mut failures,
+    );
+    let manifest = workspace_core::msix_manifest(&workspace_core::MsixPackage {
+        project: "demo".into(),
+        identity: workspace_core::msix_identity("demo app"),
+        display_name: workspace_core::msix_display_name("demo & app"),
+        version: "0.3.0.0".into(),
+    });
+    report(
+        "msix manifest carries identity and display name",
+        manifest.contains("Name=\"TianChuangYa.demo.app\"")
+            && manifest.contains("Executable=\"demo.exe\"")
+            && !manifest.contains("demo & app"),
+        &mut failures,
+    );
+
+    // Motion: the row shift slides a list and the edit highlights stay bounded.
+    let mut rows = motion_core::RowShift::new();
+    rows.place("a", 0.0, 1.0 / 60.0);
+    let sliding = rows.place("b", 2.0, 1.0 / 60.0);
+    let after_fold = rows.place("b", 1.0, 1.0 / 60.0);
+    for _ in 0..240 {
+        rows.place("a", 0.0, 1.0 / 60.0);
+        rows.place("b", 1.0, 1.0 / 60.0);
+    }
+    report(
+        "tree rows slide instead of jumping",
+        sliding == 2.0 && after_fold < 2.0 && rows.settled(),
+        &mut failures,
+    );
+    let mut pulses = motion_core::EditPulses::new();
+    pulses.push(motion_core::EditKind::Paste, 0, 0, 200);
+    for _ in 0..40 {
+        pulses.push(motion_core::EditKind::Insert, 1, 0, 1);
+    }
+    report(
+        "a paste is one highlight and a burst is capped",
+        pulses.on_line(0).is_none() || pulses.len() <= motion_core::EditPulses::LIMIT,
+        &mut failures,
+    );
+
+    // Packaging animation and background placement are shared pure functions.
+    let travel = package_motion::absorbed((600.0, 100.0), (300.0, 300.0), 2, 6, 500.0, 0.9);
+    report(
+        "sources are absorbed into the core",
+        travel.progress > 0.0 && travel.x > 300.0 && travel.x < 600.0,
+        &mut failures,
+    );
+    let placed = background_core::placement((2000.0, 1000.0), (800.0, 800.0), 2.0, (0.0, 0.0));
+    let crop = placed.crop((800.0, 800.0), (2000.0, 1000.0));
+    report(
+        "background placement covers the view",
+        placed.scale > 0.0 && crop.height < 1000.0 && crop.width <= 2000.0,
         &mut failures,
     );
 

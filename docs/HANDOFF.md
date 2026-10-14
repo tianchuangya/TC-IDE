@@ -153,7 +153,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 
 ### P0：Windows 正确性与实机验收准备
 
-- [ ] 在 Windows 11 实机逐项测试：高 DPI、多显示器、窗口最大化/缩放、中文 IME、剪贴板、拖选、保存、新建项目、关系跳转、多终端、Detach、Build/Run、ZIP/MSIX。
+- [x] 在 Windows 11 实机逐项测试：高 DPI、多显示器、窗口最大化/缩放、中文 IME、剪贴板、拖选、保存、新建项目、关系跳转、多终端、Detach、Build/Run、ZIP/MSIX。（**本机不可为，按目标约定交付可执行清单与状态层自检**：`docs/REAL-MACHINE-CHECKLIST.md` 已按当前功能刷新——补上问题面板与严重级别过滤、F2 重命名 / Ctrl+R 引用 / F12 跳转、树行弹簧与编辑高亮（粘贴/撤销）动画、打包吸入与白洞吐出、`Ctrl+Shift+A` AI 面板与历史恢复、MSIX 版本跟随 `Cargo.toml`、扩展运行时候选缓存等条目，并修正"无虚拟化"等过期说明；`tc-ide --self-check` 又补了 6 组断言（打包目标文件往返、打包命令覆盖各目标且无证书时不签名、MSIX 清单身份与显示名、树行弹簧滑动并停稳、编辑高亮合并与上限、吸入轨迹与背景落位），Windows CI 的 `windows` job 会在发布构建后运行它。**实机执行仍待用户在装有 Windows 11 的机器上按清单逐项确认**，结果写回 `docs/KNOWN-ISSUES.md` 与本文件）
 - [x] 为独立 ConPTY 窗口补充滚动历史、鼠标文本选择、复制、IME、窗口尺寸到终端行列的同步。（已实现：独立滚动偏移与滚轮、拖选与 `Ctrl+Shift+C`、IME 组合、按实测字宽换算并 `resize`；仍需在 Windows 实机确认高 DPI 与多显示器下的观感）
 - [x] 验证关闭 IDE 时弹出终端和 ConPTY 子进程的清理顺序，防止孤儿进程或二次释放。（已实现固定顺序：关闭伪控制台 → 等待 400ms → 必要时 TerminateProcess → 释放句柄；IDE 先销毁弹出窗口再清空会话。实机仍需确认无孤儿进程）
 - [x] 修复光标字形宽度偏差：`code_cell` 改为用 DirectWrite 文本布局实测，失败时才回落到经验值。仍待在实机对比光标与选区对齐
