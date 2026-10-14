@@ -8,6 +8,17 @@ permissions:
   contents: read
 
 jobs:
+  format:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --check
+
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -22,6 +33,17 @@ jobs:
         run: cargo check --all-targets
       - name: Test
         run: cargo test --all-targets
+
+  windows-typecheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Type check the Win32 backend without linking
+        run: cargo check --all-targets --target x86_64-pc-windows-msvc
 
   windows:
     runs-on: windows-2025
