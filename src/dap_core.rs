@@ -579,7 +579,7 @@ impl Drop for DebugSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lsp_core::executable_available;
+    use crate::lsp_core::{executable_available, program_runs};
 
     #[test]
     fn adapters_are_chosen_per_language() {
@@ -754,7 +754,8 @@ while True:
         break
 "#;
         let python = if cfg!(windows) { "python" } else { "python3" };
-        if !executable_available(python) {
+        if !program_runs(python, &["-c", "print(1)"]) {
+            // The adapter test needs a real interpreter, not a Store stub.
             return;
         }
         let directory = std::env::temp_dir().join("tc-ide-dap-test");

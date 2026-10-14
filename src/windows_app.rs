@@ -6637,6 +6637,12 @@ pub fn self_check() -> i32 {
         &mut failures,
     );
     report(
+        "interpreter probe is behavioural",
+        // A missing program must report false rather than a file name match.
+        !lsp_core::program_runs("tc-ide-missing-interpreter", &["-c", "print(1)"]),
+        &mut failures,
+    );
+    report(
         "language id mapping",
         lsp_core::language_id("app.py") == "python",
         &mut failures,

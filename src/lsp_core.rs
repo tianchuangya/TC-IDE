@@ -398,6 +398,22 @@ pub fn executable_available(program: &str) -> bool {
     false
 }
 
+/// Whether a program is on `PATH` *and* actually runs.
+///
+/// Windows ships a `python.exe` stub that only opens the Store, so a test that
+/// needs a real interpreter must check the behaviour, not just the file name.
+pub fn program_runs(program: &str, arguments: &[&str]) -> bool {
+    if !executable_available(program) {
+        return false;
+    }
+    std::process::Command::new(program)
+        .args(arguments)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map(|output| output.status.success() && !output.stdout.is_empty())
+        .unwrap_or(false)
+}
+
 /// Server for a file together with whether it is installed.
 pub fn server_status(name: &str) -> Option<(ServerSpec, bool)> {
     let spec = server_for_file(name)?;
@@ -1330,8 +1346,8 @@ while True:
         let script_path = directory.join("fake_server.py");
         std::fs::write(&script_path, script).expect("write fake server");
         let python = if cfg!(windows) { "python" } else { "python3" };
-        if !executable_available(python) {
-            // Without a python interpreter this test cannot spawn a server.
+        if !program_runs(python, &["-c", "print(1)"]) {
+            // Without a working python interpreter this test cannot spawn a server.
             return;
         }
         let spec = ServerSpec {
