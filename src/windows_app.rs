@@ -2047,6 +2047,25 @@ fn handle_character(window: Hwnd, value: char) {
 }
 
 fn handle_terminal_control(window: Hwnd, key: u32) -> bool {
+    if key == VK_TAB {
+        APP.with(|cell| {
+            let mut app = cell.borrow_mut();
+            if !app.terminals.is_empty() {
+                app.active_terminal = if platform::shift_pressed() {
+                    app.active_terminal
+                        .checked_sub(1)
+                        .unwrap_or(app.terminals.len() - 1)
+                } else {
+                    (app.active_terminal + 1) % app.terminals.len()
+                };
+                app.status = format!(
+                    "Active terminal: {}",
+                    app.terminals[app.active_terminal].name
+                );
+            }
+        });
+        return true;
+    }
     let paste = if key == 0x56 {
         platform::read_clipboard(window).ok()
     } else {
