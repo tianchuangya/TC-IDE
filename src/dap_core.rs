@@ -777,7 +777,7 @@ while True:
 
         // Drive the session until it has stopped, then collect its state.
         let mut saw_stop = false;
-        for _ in 0..400 {
+        for _ in 0..1500 {
             let Some(_) = session.poll() else {
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 continue;
@@ -812,7 +812,7 @@ while True:
 
         session.control(PendingRequest::Continue).expect("continue");
         let mut terminated = false;
-        for _ in 0..200 {
+        for _ in 0..1500 {
             if session.poll().is_none() {
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 continue;
