@@ -8,6 +8,8 @@
 //! behaviour and one place to tune it.
 #![allow(dead_code)] // The backends adopt the pieces they need as they migrate.
 
+use std::collections::BTreeMap;
+
 /// A damped spring driven by a fixed frame step.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Spring {
@@ -135,6 +137,104 @@ pub fn step(value: &mut f32, velocity: &mut f32, target: f32, dt: f32, profile: 
     }
     *value = spring.value;
     *velocity = spring.velocity;
+}
+
+/// Where one row of a list is drawn while the list is changing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RowSpring {
+    /// Fractional row index the row is drawn at.
+    pub position: f32,
+    pub velocity: f32,
+    /// Fractional row index the layout gave the row this frame.
+    pub target: f32,
+    /// Whether the layout placed the row during the last frame.
+    pub seen: bool,
+}
+
+/// Slides rows to the place the layout gives them.
+///
+/// Folding a folder removes the rows below it from the list, and a list drawn
+/// from row indices alone snapped those rows up by a whole row height. The
+/// shift keeps one spring per row key, so a row that keeps its identity slides
+/// to its new place while the rows around it do the same. A row the layout did
+/// not place for a frame is forgotten by [`RowShift::prune`], so a long session
+/// only carries springs for the rows on screen.
+#[derive(Clone, Debug, Default)]
+pub struct RowShift {
+    rows: BTreeMap<String, RowSpring>,
+}
+
+impl RowShift {
+    /// An empty shift.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Point `key` at `target` and return the position to draw it at.
+    ///
+    /// A key seen for the first time starts on its target: a row that appears
+    /// because a folder opened should not fly in from somewhere else.
+    pub fn place(&mut self, key: &str, target: f32, dt: f32) -> f32 {
+        let row = self.rows.entry(key.to_string()).or_insert(RowSpring {
+            position: target,
+            velocity: 0.0,
+            target,
+            seen: true,
+        });
+        row.target = target;
+        row.seen = true;
+        let dt = if dt.is_finite() && dt > 0.0 {
+            dt.min(0.1)
+        } else {
+            0.0
+        };
+        row.velocity += (target - row.position) * DRAWER.stiffness * dt;
+        row.velocity *= (-DRAWER.damping * dt).exp();
+        row.position += row.velocity * dt;
+        if (target - row.position).abs() < DRAWER.settle_distance
+            && row.velocity.abs() < DRAWER.settle_speed
+        {
+            row.position = target;
+            row.velocity = 0.0;
+        }
+        row.position
+    }
+
+    /// The position `key` was last placed at, without stepping it.
+    pub fn position(&self, key: &str) -> Option<f32> {
+        self.rows.get(key).map(|row| row.position)
+    }
+
+    /// Drop every row the layout did not place during the last frame.
+    pub fn prune(&mut self) {
+        self.rows.retain(|_, row| {
+            let seen = row.seen;
+            row.seen = false;
+            seen
+        });
+    }
+
+    /// Whether every followed row sits on the place the layout gave it.
+    pub fn settled(&self) -> bool {
+        self.rows
+            .values()
+            .all(|row| row.position == row.target && row.velocity == 0.0)
+    }
+
+    /// Rows currently followed.
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Whether no row is followed.
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// Forget every row, for example when the project changes.
+    pub fn clear(&mut self) {
+        self.rows.clear();
+    }
 }
 
 /// Cubic ease out, for one shot transitions.
@@ -286,5 +386,91 @@ mod tests {
         }
         assert!(value > 0.99);
         assert_eq!(approach(0.0, 1.0, 0.0, 12.0), 0.0);
+    }
+
+    #[test]
+    fn a_row_starts_on_its_place_and_slides_when_the_layout_moves_it() {
+        let mut shift = RowShift::new();
+        assert_eq!(shift.place("src/main.rs", 4.0, frames(1)), 4.0);
+        assert!(shift.settled());
+
+        // The folder above the row folded, so the layout now puts it at row 1.
+        let first = shift.place("src/main.rs", 1.0, frames(1));
+        assert!(
+            first < 4.0 && first > 1.0,
+            "the row should slide, not jump: {first}"
+        );
+        for _ in 0..120 {
+            shift.place("src/main.rs", 1.0, frames(1));
+        }
+        assert_eq!(shift.position("src/main.rs"), Some(1.0));
+        assert!(shift.settled());
+    }
+
+    #[test]
+    fn rows_keep_their_own_spring_and_never_lag_for_long() {
+        let mut shift = RowShift::new();
+        shift.place("a", 0.0, frames(1));
+        shift.place("b", 5.0, frames(1));
+        // A fold removes two rows above `b`, and a search box scrolls `a` down.
+        let mut last = 0.0;
+        for _ in 0..30 {
+            last = shift.place("a", 3.0, frames(1));
+            shift.place("b", 2.0, frames(1));
+        }
+        assert!(
+            (last - 3.0).abs() < 0.35,
+            "half a second should be enough to travel three rows: {last}"
+        );
+        assert!(shift
+            .position("b")
+            .is_some_and(|value| (value - 2.0).abs() < 0.35));
+        for _ in 0..120 {
+            shift.place("a", 3.0, frames(1));
+            shift.place("b", 2.0, frames(1));
+        }
+        assert_eq!(shift.position("a"), Some(3.0));
+        assert_eq!(shift.position("b"), Some(2.0));
+        assert!(shift.settled());
+    }
+
+    #[test]
+    fn forgetting_rows_forgets_only_the_ones_the_layout_dropped() {
+        let mut shift = RowShift::new();
+        shift.place("kept", 0.0, frames(1));
+        shift.place("folded", 1.0, frames(1));
+        assert_eq!(shift.len(), 2);
+        shift.prune();
+        assert_eq!(shift.len(), 2, "a row that was placed stays known");
+
+        shift.place("kept", 0.0, frames(1));
+        shift.prune();
+        assert_eq!(shift.len(), 1, "the folded row is forgotten");
+        assert_eq!(shift.position("kept"), Some(0.0));
+        assert_eq!(shift.position("folded"), None);
+
+        shift.clear();
+        assert!(shift.is_empty());
+    }
+
+    #[test]
+    fn a_row_that_comes_back_starts_where_it_is_drawn() {
+        let mut shift = RowShift::new();
+        shift.place("a", 0.0, frames(1));
+        shift.prune();
+        shift.place("a", 0.0, frames(1));
+        shift.place("b", 1.0, frames(1));
+        shift.prune();
+        // `b` disappeared with the folded folder and comes back when it opens.
+        assert_eq!(shift.place("b", 1.0, frames(1)), 1.0);
+    }
+
+    #[test]
+    fn a_broken_frame_time_leaves_the_rows_where_they_are() {
+        let mut shift = RowShift::new();
+        shift.place("row", 6.0, frames(1));
+        assert_eq!(shift.place("row", 1.0, f32::NAN), 6.0);
+        assert_eq!(shift.place("row", 1.0, -1.0), 6.0);
+        assert!(shift.place("row", 1.0, 10.0).is_finite());
     }
 }

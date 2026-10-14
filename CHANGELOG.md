@@ -88,6 +88,9 @@
 
 ### 工程与 CI
 
+- 新增共享的行位置弹簧 `motion_core::RowShift`：折叠文件夹时，树里保留下来的行滑到新位置，
+  展开时再滑回来，不再是“箭头一转、下面的行瞬间跳上去”；切换项目会清空弹簧。
+
 - 打包命令与打包目标下沉为共享纯函数：`workspace_core::PackageRequest` / `package_command`
   负责 Rust、Go、C、C++、Python、Java 的构建步骤以及 ZIP、`MakeAppx`、`signtool` 签名与结束/失败标记，
   `parse_package_targets` / `serialize_package_targets` 统一了两个后端写入 `.tc-ide-package-targets`

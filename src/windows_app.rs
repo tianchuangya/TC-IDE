@@ -251,6 +251,10 @@ struct WindowsAppState {
     project_entries: Vec<String>,
     project_entry_paths: Vec<PathBuf>,
     project_entry_is_dir: Vec<bool>,
+    /// Where each project tree row is drawn while the list is changing.
+    tree_row_shift: motion_core::RowShift,
+    /// Row positions of the last frame, in the order the rows are listed.
+    tree_row_positions: Vec<f32>,
     collapsed_directories: HashSet<PathBuf>,
     project_scroll: usize,
     project_symbols: Vec<editor_core::ProjectSymbolOccurrence>,
@@ -520,6 +524,8 @@ impl WindowsAppState {
             project_entries,
             project_entry_paths,
             project_entry_is_dir,
+            tree_row_shift: motion_core::RowShift::new(),
+            tree_row_positions: Vec::new(),
             collapsed_directories,
             project_scroll: 0,
             project_symbols,
@@ -1277,6 +1283,7 @@ pub fn run() {
 mod tests {
     use super::{TextPosition, WindowsAppState};
     use crate::text_buffer;
+    use std::path::PathBuf;
 
     #[test]
     fn the_piece_table_keeps_edits_and_undo_in_step() {
@@ -1355,5 +1362,35 @@ mod tests {
         assert_eq!((app.caret_line, app.caret_column), (0, 3));
         app.move_right();
         assert_eq!((app.caret_line, app.caret_column), (1, 0));
+    }
+
+    #[test]
+    fn folding_a_folder_slides_the_rows_below_it() {
+        let mut app = WindowsAppState::new();
+        app.project_entries = ["src", "src/a.rs", "src/b.rs", "README.md"]
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect();
+        app.project_entry_paths = app.project_entries.iter().map(PathBuf::from).collect();
+        app.update_tree_rows(1.0 / 60.0);
+        assert_eq!(app.tree_row_positions, [0.0, 1.0, 2.0, 3.0]);
+
+        // `src` folds: its children leave the list and the last row slides up.
+        app.project_entries = ["src", "README.md"]
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect();
+        app.project_entry_paths = app.project_entries.iter().map(PathBuf::from).collect();
+        app.update_tree_rows(1.0 / 60.0);
+        let sliding = app.tree_row_position(1);
+        assert!(
+            sliding > 1.0 && sliding < 3.0,
+            "the row below the fold should slide, not jump: {sliding}"
+        );
+        for _ in 0..240 {
+            app.update_tree_rows(1.0 / 60.0);
+        }
+        assert_eq!(app.tree_row_positions, [0.0, 1.0]);
+        assert!(app.tree_row_shift.settled());
     }
 }

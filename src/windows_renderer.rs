@@ -35,6 +35,9 @@ pub struct WindowsScene<'a> {
     pub file_name: &'a str,
     pub project_name: &'a str,
     pub project_entries: &'a [String],
+    /// Row index each project entry is drawn at, so rows slide when a folder
+    /// folds instead of jumping.
+    pub tree_row_positions: &'a [f32],
     pub workspace_search: &'a str,
     pub workspace_search_focused: bool,
     pub create_kind: Option<&'a str>,
@@ -2525,7 +2528,17 @@ impl DirectEditorRenderer {
             let delay = index as f32 * 0.045;
             let local = ((scene.animation_seconds - delay) / 0.28).clamp(0.0, 1.0);
             let eased = 1.0 - (1.0 - local).powi(3);
-            let y = header_h + (58.0 + index as f32 * 35.0) * scale;
+            let row = index.saturating_sub(2);
+            let position = if index < 2 {
+                index as f32
+            } else {
+                scene
+                    .tree_row_positions
+                    .get(row)
+                    .copied()
+                    .unwrap_or(row as f32)
+            };
+            let y = header_h + (58.0 + position * 35.0) * scale;
             let x = 18.0 * scale - (1.0 - eased) * 18.0 * scale;
             unsafe {
                 Self::text(

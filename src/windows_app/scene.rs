@@ -139,13 +139,29 @@ pub(super) fn render_window(window: Hwnd) {
             let query = app.workspace_search.to_ascii_lowercase();
             let visible_row_count =
                 ((height as f32 / (dpi as f32 / 96.0) - 132.0) / 35.0).max(1.0) as usize;
-            let visible_entries = app
+            let listed_rows = app
                 .project_entries
                 .iter()
-                .filter(|entry| query.is_empty() || entry.to_ascii_lowercase().contains(&query))
+                .enumerate()
+                .filter(|(_, entry)| {
+                    query.is_empty() || entry.to_ascii_lowercase().contains(&query)
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let visible_entries = listed_rows
+                .iter()
                 .skip(app.project_scroll)
                 .take(visible_row_count)
-                .cloned()
+                .map(|index| app.project_entries[*index].clone())
+                .collect::<Vec<_>>();
+            // The rows slide while a folder folds, so the row the tree draws is
+            // the position the app's row shift reports, not the list index.
+            let tree_row_positions = listed_rows
+                .iter()
+                .skip(app.project_scroll)
+                .take(visible_row_count)
+                .enumerate()
+                .map(|(row, index)| app.tree_row_position(*index) - row as f32)
                 .collect::<Vec<_>>();
             let scene = WindowsScene {
                 file_name: &app.file_name,
@@ -155,6 +171,7 @@ pub(super) fn render_window(window: Hwnd) {
                     .and_then(|name| name.to_str())
                     .unwrap_or("PROJECT"),
                 project_entries: &visible_entries,
+                tree_row_positions: &tree_row_positions,
                 workspace_search: &app.workspace_search,
                 workspace_search_focused: app.workspace_search_focused,
                 create_kind: app.create_kind.map(|kind| match kind {

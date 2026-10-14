@@ -7,6 +7,7 @@ impl WindowsAppState {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.04);
         self.last_frame = now;
+        self.update_tree_rows(dt);
         let target = if self.terminal_open { 1.0 } else { 0.0 };
         self.terminal_velocity += (target - self.terminal_motion) * 235.0 * dt;
         self.terminal_velocity *= (-17.0 * dt).exp();
@@ -96,6 +97,38 @@ impl WindowsAppState {
             self.package_progress = 0.0;
             self.package_started = None;
         }
+    }
+
+    /// Slide the project tree rows to the place the current list gives them.
+    ///
+    /// Folding a folder drops the rows below it, and a list drawn straight from
+    /// row indices would snap them up. The shared row shift keeps one spring per
+    /// entry path, so the rows that survive the fold slide into place and the
+    /// rows of an unfolded folder push the list down again.
+    pub(super) fn update_tree_rows(&mut self, dt: f32) {
+        let query = self.workspace_search.to_ascii_lowercase();
+        let mut positions = Vec::with_capacity(self.project_entries.len());
+        let mut row = 0usize;
+        for (index, entry) in self.project_entries.iter().enumerate() {
+            if !query.is_empty() && !entry.to_ascii_lowercase().contains(&query) {
+                continue;
+            }
+            let key = self.project_entry_paths[index]
+                .to_string_lossy()
+                .into_owned();
+            positions.push(self.tree_row_shift.place(&key, row as f32, dt));
+            row += 1;
+        }
+        self.tree_row_shift.prune();
+        self.tree_row_positions = positions;
+    }
+
+    /// Position the project tree rows are drawn at, or their list index.
+    pub(super) fn tree_row_position(&self, row: usize) -> f32 {
+        self.tree_row_positions
+            .get(row)
+            .copied()
+            .unwrap_or(row as f32)
     }
 
     /// Shared spring step, so overlays move the same way on every backend.

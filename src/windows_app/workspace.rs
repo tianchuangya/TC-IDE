@@ -174,6 +174,10 @@ impl WindowsAppState {
         self.project_root = root;
         self.package_targets = Self::load_package_targets(&self.project_root);
         self.project_scroll = 0;
+        // A different project has different rows: nothing should slide over
+        // from the tree that was on screen before.
+        self.tree_row_shift.clear();
+        self.tree_row_positions.clear();
         self.collapsed_directories.clear();
         (
             self.project_entries,
@@ -232,6 +236,10 @@ impl WindowsAppState {
         });
     }
 
+    /// Re-read the tree after a fold or a change on disk.
+    ///
+    /// The rows keep their identity by path, so the ones the fold did not touch
+    /// slide to their new place instead of jumping.
     pub(super) fn refresh_project(&mut self) {
         (
             self.project_entries,

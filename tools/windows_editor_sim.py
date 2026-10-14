@@ -24,6 +24,7 @@ import subprocess
 import sys
 
 METHODS = [
+    "update_tree_rows", "tree_row_position",
     "clamp_caret", "position", "snapshot", "restore", "sync_lines", "record_undo",
     "finish_edit", "selection_range", "selected_text", "delete_selection_raw",
     "insert_text", "newline", "newline_raw", "backspace", "delete_forward",
@@ -36,6 +37,8 @@ HARNESS = '''#[path = "{buffer}"]
 mod text_buffer;
 #[path = "{editor_core}"]
 mod editor_core;
+#[path = "{motion_core}"]
+mod motion_core;
 
 use std::time::Instant;
 
@@ -60,6 +63,11 @@ struct App {{
     lsp_completions: Vec<String>,
     editing_comment: Option<usize>,
     viewport: text_buffer::Viewport,
+    workspace_search: String,
+    project_entries: Vec<String>,
+    project_entry_paths: Vec<std::path::PathBuf>,
+    tree_row_shift: motion_core::RowShift,
+    tree_row_positions: Vec<f32>,
 }}
 
 impl App {{
@@ -79,6 +87,11 @@ impl App {{
             lsp_completions: Vec::new(),
             editing_comment: None,
             viewport: text_buffer::Viewport::new(24, 96),
+            workspace_search: String::new(),
+            project_entries: Vec::new(),
+            project_entry_paths: Vec::new(),
+            tree_row_shift: motion_core::RowShift::new(),
+            tree_row_positions: Vec::new(),
         }}
     }}
 
@@ -180,6 +193,51 @@ fn main() {{
     app.undo();
     check("completion undo", &app.lines, &["fn main() {{", "    cons", "}}"], &mut failures);
 
+    let mut app = App::new();
+    app.project_entries = ["src", "src/a.rs", "src/b.rs", "README.md"]
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect();
+    app.project_entry_paths = app
+        .project_entries
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    app.update_tree_rows(1.0 / 60.0);
+    if app.tree_row_positions != [0.0, 1.0, 2.0, 3.0] {{
+        failures.push(format!("tree rows start on their place: {{:?}}", app.tree_row_positions));
+    }}
+    // `src` folds, so its two children leave the list and the last row slides up.
+    app.project_entries = ["src", "README.md"].iter().map(|value| (*value).to_string()).collect();
+    app.project_entry_paths = app.project_entries.iter().map(std::path::PathBuf::from).collect();
+    app.update_tree_rows(1.0 / 60.0);
+    let sliding = app.tree_row_position(1);
+    if !(sliding > 1.0 && sliding < 3.0) {{
+        failures.push(format!("the row below the fold should slide, got {{sliding}}"));
+    }}
+    for _ in 0..240 {{
+        app.update_tree_rows(1.0 / 60.0);
+    }}
+    if app.tree_row_positions != [0.0, 1.0] {{
+        failures.push(format!("tree rows settle after the fold: {{:?}}", app.tree_row_positions));
+    }}
+    // Unfolding pushes the same row back down.
+    app.project_entries = ["src", "src/a.rs", "src/b.rs", "README.md"]
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect();
+    app.project_entry_paths = app.project_entries.iter().map(std::path::PathBuf::from).collect();
+    app.update_tree_rows(1.0 / 60.0);
+    if app.tree_row_position(1) >= 3.0 {{
+        failures.push("an unfolded row should slide down, not jump".to_string());
+    }}
+    for _ in 0..240 {{
+        app.update_tree_rows(1.0 / 60.0);
+    }}
+    if app.tree_row_positions != [0.0, 1.0, 2.0, 3.0] {{
+        failures.push(format!("tree rows settle after unfolding: {{:?}}", app.tree_row_positions));
+    }}
+
     if failures.is_empty() {{
         println!("all editor sequences behave as expected");
     }} else {{
@@ -244,6 +302,7 @@ def main() -> int:
             HARNESS.format(
                 buffer=os.path.join(arguments.repo, "src", "text_buffer.rs"),
                 editor_core=os.path.join(arguments.repo, "src", "editor_core.rs"),
+                motion_core=os.path.join(arguments.repo, "src", "motion_core.rs"),
                 methods=methods,
             )
         )
