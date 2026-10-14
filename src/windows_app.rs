@@ -259,6 +259,11 @@ struct WindowsAppState {
     ai_prompt_focused: bool,
     ai_terminal: Option<usize>,
     ai_last_report: String,
+    index_request:
+        Option<std::sync::mpsc::Sender<(PathBuf, Vec<editor_core::ProjectSymbolOccurrence>)>>,
+    index_result:
+        Option<std::sync::mpsc::Receiver<(PathBuf, Vec<editor_core::ProjectSymbolOccurrence>)>>,
+    index_pending: Option<PathBuf>,
     runtime_cache: extension_core::RuntimeCache,
     pending_extension: Option<extension_core::ExtensionSource>,
     hovered_symbol: Option<editor_core::SymbolOccurrence>,
@@ -511,6 +516,9 @@ impl WindowsAppState {
             ai_prompt_focused: false,
             ai_terminal: None,
             ai_last_report: String::new(),
+            index_request: None,
+            index_result: None,
+            index_pending: None,
             runtime_cache: load_runtime_cache(),
             pending_extension: None,
             hovered_symbol: None,
@@ -1024,7 +1032,7 @@ impl WindowsAppState {
         match fs::write(path, self.lines.join("\r\n")) {
             Ok(()) => {
                 self.status = format!("Saved {}", path.display());
-                self.project_symbols = Self::index_project(&self.project_root);
+                self.request_project_index();
                 if let Some(index) = self.active_document() {
                     self.session.mark_dirty(index, false);
                 }
@@ -1070,7 +1078,7 @@ impl WindowsAppState {
                 self.expanded_comments.clear();
                 self.editing_comment = None;
                 self.started = Instant::now();
-                self.project_symbols = Self::index_project(&self.project_root);
+                self.request_project_index();
                 self.session.remember_project(&self.project_root.clone());
                 save_session(&self.session);
                 self.status = format!(
@@ -1571,7 +1579,52 @@ impl WindowsAppState {
         }
     }
 
-    /// Progress the packaging output has actually reached.
+    /// Start indexing the project on a background thread.
+    ///
+    /// Scanning a large project must never block the UI thread, so the scan runs
+    /// on its own thread and the result is collected by `poll_project_index`.
+    fn request_project_index(&mut self) {
+        let root = self.project_root.clone();
+        let (request, receive) =
+            std::sync::mpsc::channel::<(PathBuf, Vec<editor_core::ProjectSymbolOccurrence>)>();
+        let sender = request.clone();
+        let scan_root = root.clone();
+        std::thread::spawn(move || {
+            let symbols = WindowsAppState::index_project(&scan_root);
+            let _ = sender.send((scan_root, symbols));
+        });
+        self.index_request = Some(request);
+        self.index_result = Some(receive);
+        self.index_pending = Some(root);
+        self.status = "Indexing the project in the background".into();
+    }
+
+    /// Collect a finished background index, if one is ready.
+    fn poll_project_index(&mut self) {
+        let Some(receiver) = self.index_result.as_ref() else {
+            return;
+        };
+        let Ok((root, symbols)) = receiver.try_recv() else {
+            return;
+        };
+        self.index_result = None;
+        self.index_request = None;
+        if root != self.project_root {
+            // The project changed while the scan was running; drop the result.
+            self.index_pending = None;
+            return;
+        }
+        let files = symbols
+            .iter()
+            .map(|entry| entry.file.clone())
+            .collect::<HashSet<_>>()
+            .len();
+        self.project_symbols = symbols;
+        self.index_pending = None;
+        self.status = format!("Indexed {files} files in the background");
+    }
+
+    /// Progress the packaging output has actually reached.    /// Progress the packaging output has actually reached.
     fn package_output_progress(&self) -> Option<f32> {
         let index = self.terminals.iter().position(|tab| tab.name == "Build")?;
         let output = self.terminals.get(index).and_then(|tab| {
@@ -5209,6 +5262,7 @@ unsafe extern "system" fn window_proc(
                 let mut app = cell.borrow_mut();
                 app.poll_ai_terminal();
                 app.confirm_pending_extension();
+                app.poll_project_index();
             });
             invalidate(window);
             0

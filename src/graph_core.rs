@@ -202,6 +202,8 @@ const MAX_CALL_CHILDREN: usize = 3;
 const MAX_MEMBER_CHILDREN: usize = 8;
 /// Files listed under a folder or the project root.
 const MAX_FILE_CHILDREN: usize = 12;
+/// Files a project scope lists before it clusters the rest.
+const CLUSTER_THRESHOLD: usize = 24;
 
 /// Range the graph covers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1027,10 +1029,17 @@ fn add_folder_nodes(nodes: &mut Vec<GraphNode>, inputs: &GraphInputs<'_>, trunca
     );
 }
 
-fn add_project_nodes(nodes: &mut Vec<GraphNode>, inputs: &GraphInputs<'_>, truncated: &mut bool) {
-    let files = project_files(inputs);
-    let mut folders = Vec::<String>::new();
-    for (file, _) in &files {
+/// Aggregate folders whose file count exceeds a budget into one cluster node.
+///
+/// A large project would otherwise paint hundreds of rows; instead the graph
+/// keeps the files the user is working with and folds the rest into a counted
+/// node.
+pub fn cluster_folders(
+    files: &[(String, usize)],
+    budget: usize,
+) -> Vec<(String, Vec<(String, usize)>)> {
+    let mut folders: Vec<String> = Vec::new();
+    for (file, _) in files {
         let folder = folder_of(file);
         let folder = if folder.is_empty() {
             "project root"
@@ -1041,24 +1050,55 @@ fn add_project_nodes(nodes: &mut Vec<GraphNode>, inputs: &GraphInputs<'_>, trunc
             folders.push(folder.to_string());
         }
     }
-    if folders.is_empty() {
-        folders.push("project root".to_string());
-    }
-    let mut children = Vec::new();
-    for folder in folders.into_iter().take(MAX_FILE_CHILDREN) {
+    let mut groups = Vec::new();
+    for folder in folders {
         let wanted = if folder == "project root" {
             ""
         } else {
             folder.as_str()
         };
-        let in_folder = files
+        let mut listed = files
             .iter()
             .filter(|(file, _)| folder_of(file) == wanted)
+            .cloned()
             .collect::<Vec<_>>();
-        let folder_children = in_folder
+        listed.sort_by(|left, right| left.0.cmp(&right.0));
+        if listed.len() > budget {
+            let remaining = listed.len() - budget;
+            listed.truncate(budget);
+            listed.push((format!("+{remaining} more files"), 0));
+        }
+        groups.push((folder, listed));
+    }
+    groups
+}
+
+fn add_project_nodes(nodes: &mut Vec<GraphNode>, inputs: &GraphInputs<'_>, truncated: &mut bool) {
+    let files = project_files(inputs);
+    let budget = if files.len() > CLUSTER_THRESHOLD {
+        MAX_FILE_CHILDREN
+    } else {
+        MAX_FILE_CHILDREN * 2
+    };
+    let folders = cluster_folders(&files, budget);
+    let mut children = Vec::new();
+    for (folder, listed) in folders {
+        let wanted = if folder == "project root" {
+            ""
+        } else {
+            folder.as_str()
+        };
+        let total = files
             .iter()
-            .take(MAX_FILE_CHILDREN)
+            .filter(|(file, _)| folder_of(file) == wanted)
+            .count();
+        let folder_children = listed
+            .iter()
             .map(|(file, count)| {
+                if file.starts_with('+') {
+                    return GraphNode::new(GraphLevel::File, file.clone(), "clustered".to_string())
+                        .nested(GraphLevel::Folder.depth());
+                }
                 let is_current = file == inputs.current_file;
                 GraphNode::new(
                     GraphLevel::File,
@@ -1076,12 +1116,8 @@ fn add_project_nodes(nodes: &mut Vec<GraphNode>, inputs: &GraphInputs<'_>, trunc
             .collect::<Vec<_>>();
         append_group(
             &mut children,
-            GraphNode::new(
-                GraphLevel::Folder,
-                folder.clone(),
-                format!("{} files", in_folder.len()),
-            )
-            .keyed(folder_key(&folder)),
+            GraphNode::new(GraphLevel::Folder, folder.clone(), format!("{total} files"))
+                .keyed(folder_key(&folder)),
             folder_children,
             inputs,
         );
@@ -1498,14 +1534,16 @@ mod tests {
         assert!(graph.truncated);
         assert!(graph.summary().contains("truncated"));
         let folders = build_graph(&inputs, GraphScope::Project, "");
+        let file_nodes = folders
+            .nodes
+            .iter()
+            .filter(|node| node.level == GraphLevel::File)
+            .count();
         assert!(
-            folders
-                .nodes
-                .iter()
-                .filter(|node| node.level == GraphLevel::File)
-                .count()
-                <= MAX_FILE_CHILDREN
+            file_nodes <= MAX_FILE_CHILDREN + 1,
+            "{file_nodes} file nodes"
         );
+        assert!(folders.nodes.iter().any(|node| node.detail == "clustered"));
     }
 
     #[test]
@@ -1818,6 +1856,43 @@ mod tests {
         let inputs = inputs_folded(&lines, &symbols, &[], None, &folded);
         let graph = build_graph(&inputs, GraphScope::File, "");
         assert!(graph.nodes.iter().all(|node| !node.folded));
+    }
+
+    #[test]
+    fn large_folders_are_clustered_instead_of_listed() {
+        let files = (0..60)
+            .map(|index| (format!("src/file{index:02}.rs"), index % 5))
+            .collect::<Vec<_>>();
+        let groups = cluster_folders(&files, 12);
+        assert_eq!(groups.len(), 1);
+        let (folder, listed) = &groups[0];
+        assert_eq!(folder, "src");
+        assert_eq!(listed.len(), 13);
+        assert_eq!(
+            listed.last().map(|(name, _)| name.as_str()),
+            Some("+48 more files")
+        );
+        assert_eq!(listed[0].0, "src/file00.rs");
+
+        // A small project keeps every file and gets no cluster marker.
+        let small = files[..5].to_vec();
+        let groups = cluster_folders(&small, 12);
+        assert_eq!(groups[0].1.len(), 5);
+        assert!(groups[0].1.iter().all(|(name, _)| !name.starts_with('+')));
+
+        // Several folders are grouped separately.
+        let mixed = vec![
+            ("src/a.rs".to_string(), 1),
+            ("tests/b.rs".to_string(), 1),
+            ("README.md".to_string(), 0),
+        ];
+        let groups = cluster_folders(&mixed, 12);
+        let names = groups
+            .iter()
+            .map(|(folder, _)| folder.clone())
+            .collect::<Vec<_>>();
+        // Folders keep the order the index reports them in.
+        assert_eq!(names, ["src", "tests", "project root"]);
     }
 
     #[test]
