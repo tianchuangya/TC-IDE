@@ -579,7 +579,7 @@ impl Drop for DebugSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lsp_core::{executable_available, program_runs};
+    use crate::lsp_core::program_runs;
 
     #[test]
     fn adapters_are_chosen_per_language() {
