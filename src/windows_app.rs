@@ -6834,6 +6834,8 @@ pub fn self_check() -> i32 {
         &mut failures,
     );
     let mut panel_state = WindowsAppState::new();
+    // A jump target only exists once the panel knows which file is active.
+    panel_state.file_path = Some(PathBuf::from("C:/demo/src/main.rs"));
     panel_state.lsp_diagnostics = vec![lsp_core::Diagnostic {
         path: "src/main.rs".into(),
         line: 3,
