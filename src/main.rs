@@ -7,6 +7,7 @@ mod macos_app;
 mod terminal_core;
 #[cfg(target_os = "windows")]
 mod windows_app;
+mod workspace_core;
 
 #[cfg(target_os = "linux")]
 fn main() {

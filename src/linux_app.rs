@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::editor_core;
 use crate::graph_core;
+use crate::workspace_core;
 
 type Window = c_ulong;
 type Drawable = c_ulong;
@@ -5975,17 +5976,8 @@ fn ai_settings_path() -> PathBuf {
 
 fn load_ai_preferences() -> (String, String) {
     let content = fs::read_to_string(ai_settings_path()).unwrap_or_default();
-    let value = |key: &str| {
-        content.lines().find_map(|line| {
-            line.split_once('=')
-                .filter(|(name, _)| *name == key)
-                .map(|(_, value)| value.to_string())
-        })
-    };
-    (
-        value("endpoint").unwrap_or_else(|| "https://api.openai.com/v1".into()),
-        value("model").unwrap_or_else(|| "gpt-5.1".into()),
-    )
+    let preferences = workspace_core::parse_preferences(&content);
+    (preferences.ai_endpoint, preferences.ai_model)
 }
 
 fn save_ai_preferences(endpoint: &str, model: &str) {
@@ -6008,37 +6000,15 @@ struct BackgroundPreferences {
 
 fn load_background_preferences() -> BackgroundPreferences {
     let content = fs::read_to_string(background_settings_path()).unwrap_or_default();
-    let value = |key: &str| {
-        content.lines().find_map(|line| {
-            line.split_once('=')
-                .filter(|(name, _)| *name == key)
-                .map(|(_, value)| value)
-        })
-    };
+    let preferences = workspace_core::parse_preferences(&content);
     BackgroundPreferences {
         path: env::var_os("TC_IDE_BACKGROUND")
             .map(PathBuf::from)
-            .or_else(|| {
-                value("path")
-                    .filter(|value| !value.is_empty())
-                    .map(PathBuf::from)
-            }),
-        opacity: value("opacity")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0.22_f64)
-            .clamp(0.0, 1.0),
-        offset_x: value("offset_x")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0.0_f64)
-            .clamp(-1.0, 1.0),
-        offset_y: value("offset_y")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0.0_f64)
-            .clamp(-1.0, 1.0),
-        zoom: value("zoom")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(1.0_f64)
-            .clamp(1.0, 3.0),
+            .or_else(|| preferences.background_path.map(PathBuf::from)),
+        opacity: preferences.background_opacity as f64,
+        offset_x: preferences.background_offset_x as f64,
+        offset_y: preferences.background_offset_y as f64,
+        zoom: preferences.background_zoom as f64,
     }
 }
 
@@ -6077,30 +6047,19 @@ struct UiPreferences {
 
 fn load_ui_preferences() -> UiPreferences {
     let content = fs::read_to_string(ui_settings_path()).unwrap_or_default();
-    let value = |key: &str| {
-        content.lines().find_map(|line| {
-            line.split_once('=')
-                .filter(|(name, _)| *name == key)
-                .map(|(_, value)| value)
-        })
-    };
-    let configured = value("language") == Some("zh-CN");
+    let preferences = workspace_core::parse_preferences(&content);
     let chinese = match env::var("TC_IDE_LANGUAGE").ok().as_deref() {
         Some("zh-CN") | Some("zh") => true,
         Some("en") | Some("en-US") => false,
-        _ => configured,
+        _ => preferences.ui_chinese,
     };
     UiPreferences {
         chinese,
-        font_family: value("font_family")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0)
+        font_family: preferences
+            .code_font_family
             .min(CODE_FONT_FAMILIES.len() - 1),
-        code_zoom: value("code_zoom")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0)
-            .clamp(-2, 8),
-        light_theme: value("theme") == Some("light"),
+        code_zoom: preferences.code_zoom,
+        light_theme: preferences.light_theme,
     }
 }
 

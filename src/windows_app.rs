@@ -11,6 +11,7 @@ use std::time::Instant;
 use crate::editor_core;
 use crate::graph_core;
 use crate::terminal_core;
+use crate::workspace_core;
 
 #[path = "windows_platform.rs"]
 mod platform;
@@ -463,7 +464,7 @@ impl WindowsAppState {
             graph_relation: graph_core::GraphRelation::Follow,
             graph_selected: None,
             graph_keyboard_active: false,
-            background_path: preferences.background_path,
+            background_path: preferences.background_path.clone().map(PathBuf::from),
             background_opacity: preferences.background_opacity,
             background_offset_x: preferences.background_offset_x,
             background_offset_y: preferences.background_offset_y,
@@ -1049,7 +1050,10 @@ impl WindowsAppState {
             project_environment: self.project_environment,
             language_installed: self.language_installed.clone(),
             language_versions: self.language_versions.clone(),
-            background_path: self.background_path.clone(),
+            background_path: self
+                .background_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
             background_opacity: self.background_opacity,
             background_offset_x: self.background_offset_x,
             background_offset_y: self.background_offset_y,
@@ -1116,35 +1120,30 @@ impl WindowsAppState {
     fn create_project_template(&self, target: &std::path::Path) -> std::io::Result<()> {
         let language = self.project_language_name();
         fs::create_dir_all(target)?;
-        match language {
-            "Rust" => {
-                fs::create_dir_all(target.join("src"))?;
-                fs::write(target.join("Cargo.toml"), "[package]\nname = \"tc-project\"\nversion = \"0.1.0\"\nedition = \"2024\"\n")?;
-                fs::write(target.join("src/main.rs"), "fn main() {\n    println!(\"Hello from TC-IDE\");\n}\n")?;
+        let template = workspace_core::project_template(
+            &self.project_root_name(),
+            language,
+            self.project_version_name(),
+            self.project_environments()[self
+                .project_environment
+                .min(self.project_environments().len() - 1)],
+        );
+        for file in &template.files {
+            let path = target.join(file.path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
             }
-            "Python" => {
-                fs::write(target.join("main.py"), "print(\"Hello from TC-IDE\")\n")?;
-                fs::write(target.join(".gitignore"), ".venv/\n__pycache__/\n*.pyc\n")?;
-            }
-            "C" => fs::write(target.join("main.c"), "#include <stdio.h>\n\nint main(void) {\n    puts(\"Hello from TC-IDE\");\n    return 0;\n}\n")?,
-            "C++" => fs::write(target.join("main.cpp"), "#include <iostream>\n\nint main() {\n    std::cout << \"Hello from TC-IDE\\n\";\n}\n")?,
-            "Java" => fs::write(target.join("Main.java"), "public class Main {\n    public static void main(String[] args) {\n        System.out.println(\"Hello from TC-IDE\");\n    }\n}\n")?,
-            "Go" => {
-                fs::write(target.join("go.mod"), "module tc-project\n\ngo 1.24\n")?;
-                fs::write(target.join("main.go"), "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"Hello from TC-IDE\") }\n")?;
-            }
-            _ => fs::write(target.join("index.html"), "<!doctype html>\n<title>TC-IDE Project</title>\n<h1>Hello from TC-IDE</h1>\n")?,
+            fs::write(path, &file.contents)?;
         }
         fs::write(
-            target.join(".tc-ide-project"),
-            format!(
-                "language={language}\nversion={}\nenvironment={}\n",
-                self.project_version_name(),
-                self.project_environments()[self
-                    .project_environment
-                    .min(self.project_environments().len() - 1)]
-            ),
+            target.join(workspace_core::PROJECT_METADATA_FILE),
+            &template.metadata,
         )
+    }
+
+    /// Folder name a new project is created under.
+    fn project_root_name(&self) -> String {
+        self.create_name.trim().to_string()
     }
 
     fn start_project_environment_setup(&mut self) {
@@ -1401,66 +1400,26 @@ impl WindowsAppState {
     }
 
     fn task_command(&self, build: bool) -> String {
-        let quoted_file = self
-            .file_path
-            .as_ref()
-            .and_then(|path| path.file_name())
-            .map(|name| format!("\"{}\"", name.to_string_lossy().replace('"', "\\\"")))
-            .unwrap_or_else(|| "\"main\"".into());
-        if self.project_root.join("Cargo.toml").exists() {
-            return if build { "cargo build" } else { "cargo run" }.into();
-        }
-        if self.project_root.join("package.json").exists() {
-            return if build {
-                "npm run build"
-            } else {
-                "npm run dev"
-            }
-            .into();
-        }
-        if self.project_root.join("go.mod").exists() {
-            return if build { "go build ./..." } else { "go run ." }.into();
-        }
-        match editor_core::language_for_file(&self.file_name) {
-            "Python" => {
-                if build {
-                    "python -m compileall .".into()
-                } else {
-                    format!("python {quoted_file}")
-                }
-            }
-            "C" => {
-                if build {
-                    format!("gcc {quoted_file} -o .\\tc-ide-build.exe")
-                } else {
-                    ".\\tc-ide-build.exe".into()
-                }
-            }
-            "C++" => {
-                if build {
-                    format!("g++ {quoted_file} -o .\\tc-ide-build.exe")
-                } else {
-                    ".\\tc-ide-build.exe".into()
-                }
-            }
-            "Java" => {
-                if build {
-                    format!("javac {quoted_file}")
-                } else {
-                    let class = self
-                        .file_path
-                        .as_ref()
-                        .and_then(|path| path.file_stem())
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "Main".into());
-                    format!("java {class}")
-                }
-            }
-            _ => format!(
-                "Write-Host 'No {} task configured for this project'",
-                if build { "build" } else { "run" }
-            ),
-        }
+        let facts = workspace_core::ProjectFacts {
+            has_cargo: self.project_root.join("Cargo.toml").exists(),
+            has_package_json: self.project_root.join("package.json").exists(),
+            has_go_mod: self.project_root.join("go.mod").exists(),
+            language: editor_core::language_for_file(&self.file_name).to_string(),
+            file_name: self
+                .file_path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            file_stem: self
+                .file_path
+                .as_ref()
+                .and_then(|path| path.file_stem())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            windows: cfg!(windows),
+        };
+        workspace_core::task_command(&facts, build)
     }
 
     fn run_task(&mut self, build: bool) {
