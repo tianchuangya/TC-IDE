@@ -314,6 +314,59 @@ pub fn format_command(language: &str, file: &str) -> Option<String> {
     Some(format!("{command} \"{quoted}\""))
 }
 
+/// A formatter run, and whether it only touched part of the file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormatRequest {
+    /// Command to type into the terminal.
+    pub command: String,
+    /// Whether the command covers the requested lines only.
+    ///
+    /// A formatter without a range flag has to reformat the whole file, and the
+    /// editor says so instead of pretending only the selection changed.
+    pub ranged: bool,
+}
+
+/// Command that formats the selected lines of a file.
+///
+/// `start_line` and `end_line` are zero based and inclusive, and the command
+/// passes them on in whatever form the tool of that language wants: a JSON range
+/// for `rustfmt`, a `--lines` range for `clang-format`, and the whole file for
+/// the formatters that have no range option at all.
+pub fn format_selection_command(
+    language: &str,
+    file: &str,
+    start_line: usize,
+    end_line: usize,
+) -> Option<FormatRequest> {
+    let (tool, command) = formatter_for(language)?;
+    let quoted = file.replace('"', "\\\"");
+    let (start, end) = (start_line.min(end_line), start_line.max(end_line));
+    match tool {
+        // rustfmt wants one based line ranges as JSON.
+        "rustfmt" => Some(FormatRequest {
+            command: format!(
+                "rustfmt --file-lines '[{{\"file\":\"{quoted}\",\"range\":{{\"start_line\":{},\"end_line\":{}}}}}]'",
+                start + 1,
+                end + 1
+            ),
+            ranged: true,
+        }),
+        // clang-format replaces the file in place and only rewrites those lines.
+        "clang-format" => Some(FormatRequest {
+            command: format!(
+                "clang-format -i --lines={}:{} \"{quoted}\"",
+                start + 1,
+                end + 1
+            ),
+            ranged: true,
+        }),
+        _ => Some(FormatRequest {
+            command: format!("{command} \"{quoted}\""),
+            ranged: false,
+        }),
+    }
+}
+
 /// Probe command that proves a formatter or debugger is really installed.
 pub fn tool_probe_command(tool: &str) -> String {
     format!("{tool} --version")
@@ -1245,5 +1298,43 @@ mod tests {
         for asset in MSIX_ASSET_FILES {
             assert!(manifest.contains(asset), "the manifest should list {asset}");
         }
+    }
+
+    #[test]
+    fn a_selection_formats_through_the_tool_range_flag() {
+        let rust = format_selection_command("Rust", "src/main.rs", 3, 7).expect("rustfmt");
+        assert!(rust.ranged);
+        assert_eq!(
+            rust.command,
+            "rustfmt --file-lines '[{\"file\":\"src/main.rs\",\"range\":{\"start_line\":4,\"end_line\":8}}]'"
+        );
+
+        let c = format_selection_command("C++", "src/engine.cpp", 0, 0).expect("clang-format");
+        assert!(c.ranged);
+        assert_eq!(c.command, "clang-format -i --lines=1:1 \"src/engine.cpp\"");
+
+        // A reversed selection still formats the lines it covers.
+        let reversed = format_selection_command("Rust", "a.rs", 9, 2).expect("rustfmt");
+        assert!(reversed
+            .command
+            .contains("\"start_line\":3,\"end_line\":10"));
+
+        // Tools without a range flag reformat the whole file, and say so.
+        for (language, file) in [
+            ("Python", "app.py"),
+            ("Go", "main.go"),
+            ("TypeScript", "app.ts"),
+        ] {
+            let request = format_selection_command(language, file, 2, 4).expect("a formatter");
+            assert!(!request.ranged, "{language} has no range flag");
+            assert!(request.command.contains(file));
+            assert_eq!(request.command, format_command(language, file).unwrap());
+        }
+
+        assert!(format_selection_command("Markdown", "README.md", 0, 1).is_none());
+
+        // A quote in the file name cannot break out of the command.
+        let quoted = format_selection_command("Rust", "my \"app\".rs", 0, 1).expect("rustfmt");
+        assert!(quoted.command.contains("my \\\"app\\\".rs"));
     }
 }

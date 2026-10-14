@@ -103,7 +103,15 @@ pub(super) fn handle_key_down(window: Hwnd, w_param: Wparam) -> Lresult {
         }
     }
     if w_param as u32 == 0x78 {
-        APP.with(|cell| cell.borrow_mut().toggle_breakpoint());
+        // F9 toggles the breakpoint, Ctrl+F9 conditions it in place.
+        APP.with(|cell| {
+            let mut app = cell.borrow_mut();
+            if platform::control_pressed() {
+                app.begin_breakpoint_condition();
+            } else {
+                app.toggle_breakpoint();
+            }
+        });
         invalidate(window);
         return 0;
     }
@@ -146,6 +154,67 @@ pub(super) fn handle_key_down(window: Hwnd, w_param: Wparam) -> Lresult {
         });
         invalidate(window);
         return 0;
+    }
+    // An inline prompt owns the keyboard until Enter or Esc.
+    if APP.with(|cell| cell.borrow().rename_prompt.is_some()) {
+        let handled = APP.with(|cell| {
+            let mut app = cell.borrow_mut();
+            match w_param as u32 {
+                0x1b => {
+                    app.rename_prompt = None;
+                    app.status = "Rename cancelled".into();
+                }
+                VK_BACK => {
+                    if let Some(prompt) = app.rename_prompt.as_mut() {
+                        prompt.pop();
+                    }
+                }
+                0x0d => {
+                    // The prompt is the new name; the request reads it back.
+                    if app
+                        .rename_prompt
+                        .as_deref()
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        .is_empty()
+                    {
+                        app.status = "Rename needs a new name".into();
+                    } else {
+                        app.request_language_feature(LspRequest::Rename);
+                        app.rename_prompt = None;
+                    }
+                }
+                _ => return false,
+            }
+            true
+        });
+        if handled {
+            invalidate(window);
+            return 0;
+        }
+    }
+    if APP.with(|cell| cell.borrow().breakpoint_prompt.is_some()) {
+        let handled = APP.with(|cell| {
+            let mut app = cell.borrow_mut();
+            match w_param as u32 {
+                0x1b => {
+                    app.breakpoint_prompt = None;
+                    app.status = "Breakpoint condition cancelled".into();
+                }
+                VK_BACK => {
+                    if let Some(prompt) = app.breakpoint_prompt.as_mut() {
+                        prompt.pop();
+                    }
+                }
+                0x0d => app.apply_breakpoint_condition(),
+                _ => return false,
+            }
+            true
+        });
+        if handled {
+            invalidate(window);
+            return 0;
+        }
     }
     if w_param as u32 == 0x71 {
         // F2 asks for a new name and then for the rename edits.

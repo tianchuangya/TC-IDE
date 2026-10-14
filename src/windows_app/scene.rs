@@ -103,7 +103,9 @@ pub(super) fn render_window(window: Hwnd) {
                 .filter(|(line, _)| *line >= first_line)
                 .map(|(line, is_error)| (line - first_line, is_error))
                 .collect::<Vec<_>>();
-            let status_line = if let Some(prompt) = app.rename_prompt.as_ref() {
+            let status_line = if let Some(prompt) = app.breakpoint_prompt.as_ref() {
+                format!("Breakpoint condition: {prompt}")
+            } else if let Some(prompt) = app.rename_prompt.as_ref() {
                 format!("Rename to: {prompt}")
             } else if let Some(diagnostic) = app
                 .lsp_diagnostics

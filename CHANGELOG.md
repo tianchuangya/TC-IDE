@@ -27,6 +27,14 @@
 
 ### Windows 后端
 
+- 选区格式化：有选区时只格式化选中的行（`rustfmt --file-lines`、`clang-format --lines`），
+  没有范围选项的格式化器会明确说明"整文件重排"；格式化完成后才重新加载文件，
+  不再与仍在写文件的工具抢时间。
+- 断点可就地编辑：`Ctrl+F9` 为光标所在行的断点输入条件（`dap_core::BreakpointSpec`
+  支持 condition/hitCondition/logMessage），问题面板的断点行会显示条件；F9 仍增删断点。
+- 修复：`F2` 重命名的内联输入此前没有任何提交路径（输入完按回车无反应），现在回车提交、Esc 取消。
+- `--self-check` 的状态层检查移到 `src/windows_app/selfcheck.rs`，模块根文件保持在千行出头。
+
 - 底部终端与弹出终端都保留滚动历史；面板正文支持拖选与 `Ctrl+Shift+C` 复制。
 - 弹出终端支持独立滚动、鼠标选择、复制与中文 IME，并按窗口实际尺寸同步 ConPTY 行列。
 - ConPTY 网格来自共享几何与真实字体测量，不再写死列数/行数。

@@ -426,15 +426,17 @@ impl WindowsAppState {
                 None,
             ));
         }
-        for (path, lines) in &self.breakpoints {
+        for (path, specs) in self.breakpoints.files() {
+            let path = PathBuf::from(path);
             let name = path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            for line in lines {
+            for spec in specs {
+                // A conditional breakpoint says what makes it stop.
                 rows.push((
-                    format!("breakpoint  {name}:{}", line + 1),
-                    Some((path.clone(), *line, 0)),
+                    format!("breakpoint  {name}:{}  {}", spec.line + 1, spec.describe()),
+                    Some((path.clone(), spec.line, 0)),
                 ));
             }
         }
@@ -495,6 +497,10 @@ impl WindowsAppState {
     }
 
     /// Format the active file with the formatter for its language.
+    /// Format the selection when there is one, otherwise the whole file.
+    ///
+    /// The formatter runs in the terminal, so the file is reloaded once the
+    /// tool has actually finished with it instead of racing it.
     pub(super) fn format_current_file(&mut self) {
         let language = editor_core::language_for_file(&self.file_name);
         let name = self
@@ -503,29 +509,89 @@ impl WindowsAppState {
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.file_name.clone());
-        let Some(command) = workspace_core::format_command(language, &name) else {
+        let selection = self.selection_range();
+        let request = match selection {
+            Some((from, to)) => workspace_core::format_selection_command(
+                language,
+                &name,
+                from.line.min(to.line),
+                from.line.max(to.line),
+            ),
+            None => workspace_core::format_command(language, &name).map(|command| {
+                workspace_core::FormatRequest {
+                    command,
+                    ranged: false,
+                }
+            }),
+        };
+        let Some(request) = request else {
             self.status = format!("No formatter is configured for {language}");
             return;
         };
         self.terminal_open = true;
         self.ensure_terminal();
+        // The marker tells the editor when the tool is done; reloading before
+        // that would read the file the formatter is still writing.
+        let marker = format!("__TC_FORMAT_DONE_{}__", self.started.elapsed().as_nanos());
+        let command = format!("{}; Write-Output '{marker}'", request.command);
         if let Some(tab) = self.terminals.last() {
             let _ = tab.session.write(&format!("{command}\r"));
             self.active_terminal = self.terminals.len() - 1;
         }
-        if let Some(path) = self.file_path.clone() {
-            if let Ok(content) = fs::read_to_string(&path) {
-                let mut lines = content.lines().map(str::to_string).collect::<Vec<_>>();
-                if lines.is_empty() {
-                    lines.push(String::new());
-                }
-                self.buffer = text_buffer::TextBuffer::from_lines(&lines);
-                self.lines = lines;
-                self.clamp_caret();
-                self.status = format!("Formatted {} with {command}", path.display());
-                return;
+        self.format_pending = self
+            .file_path
+            .clone()
+            .map(|path| (path, marker, Instant::now()));
+        self.status = match selection {
+            Some((from, to)) if request.ranged => format!(
+                "Formatting lines {}-{} with {}",
+                from.line.min(to.line) + 1,
+                from.line.max(to.line) + 1,
+                request.command
+            ),
+            Some((from, to)) => format!(
+                "Formatting lines {}-{}: {} has no range option, the whole file is reformatted",
+                from.line.min(to.line) + 1,
+                from.line.max(to.line) + 1,
+                request.command
+            ),
+            None => format!("Formatting with {}", request.command),
+        };
+    }
+
+    /// Reload a file once the formatter that rewrote it has finished.
+    pub(super) fn poll_format(&mut self) {
+        let Some((path, marker, started)) = self.format_pending.clone() else {
+            return;
+        };
+        let finished = self.terminals.iter().any(|tab| {
+            tab.session.view.lock().ok().is_some_and(|view| {
+                view.lines.iter().any(|line| line.contains(&marker))
+                    || view.current.contains(&marker)
+            })
+        });
+        if !finished {
+            if started.elapsed().as_secs() > 20 {
+                // The tool never answered: say so instead of waiting forever.
+                self.format_pending = None;
+                self.status =
+                    "The formatter did not finish; check that the tool is installed".into();
             }
+            return;
         }
-        self.status = format!("Formatting with {command}");
+        self.format_pending = None;
+        let Ok(content) = fs::read_to_string(&path) else {
+            self.status = format!("Could not read {} after formatting", path.display());
+            return;
+        };
+        let mut lines = content.lines().map(str::to_string).collect::<Vec<_>>();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        self.buffer = text_buffer::TextBuffer::from_lines(&lines);
+        self.lines = lines;
+        self.clamp_caret();
+        self.reveal_caret();
+        self.status = format!("Formatted {}", path.display());
     }
 }

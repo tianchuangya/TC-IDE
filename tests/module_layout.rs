@@ -12,7 +12,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// `(module, the region it owns)` of the Windows app.
-const WINDOWS_MODULES: [(&str, &str); 14] = [
+const WINDOWS_MODULES: [(&str, &str); 15] = [
     ("ai", "the AI chat panel and its transcript"),
     ("debug", "DAP sessions, breakpoints and stepping"),
     ("detached", "the standalone ConPTY window"),
@@ -32,6 +32,7 @@ const WINDOWS_MODULES: [(&str, &str); 14] = [
     ("panel", "the bottom terminal panel"),
     ("pointer", "mouse handling per region"),
     ("scene", "scene assembly and graph geometry"),
+    ("selfcheck", "the scriptable state layer check"),
     ("workspace", "project scanning, templates and sessions"),
 ];
 

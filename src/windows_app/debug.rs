@@ -3,16 +3,91 @@
 use super::*;
 
 impl WindowsAppState {
-    /// Breakpoint lines of the active file.
+    /// Path of the active file, as the breakpoint table keys it.
+    pub(super) fn breakpoint_path(&self) -> Option<String> {
+        self.file_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    /// Lines of the active file that have a breakpoint.
     pub(super) fn active_breakpoints(&self) -> Vec<usize> {
-        let Some(path) = self.file_path.clone() else {
-            return Vec::new();
+        match self.breakpoint_path() {
+            Some(path) => self.breakpoints.lines(&path),
+            None => Vec::new(),
+        }
+    }
+
+    /// Breakpoints of the active file, with their conditions.
+    pub(super) fn active_breakpoint_specs(&self) -> Vec<dap_core::BreakpointSpec> {
+        match self.breakpoint_path() {
+            Some(path) => self.breakpoints.specs(&path).to_vec(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Open the prompt that edits the condition of the caret line's breakpoint.
+    pub(super) fn begin_breakpoint_condition(&mut self) {
+        let Some(path) = self.breakpoint_path() else {
+            self.status = "Open a file before editing a breakpoint".into();
+            return;
         };
-        self.breakpoints
+        let line = self.caret_line;
+        let Some(spec) = self
+            .breakpoints
+            .specs(&path)
             .iter()
-            .find(|(known, _)| *known == path)
-            .map(|(_, lines)| lines.clone())
-            .unwrap_or_default()
+            .find(|spec| spec.line == line)
+            .cloned()
+        else {
+            self.status = format!("No breakpoint on line {} to condition", line + 1);
+            return;
+        };
+        self.breakpoint_prompt = Some(spec.condition.clone().unwrap_or_default());
+        self.status = format!(
+            "Condition for line {}: type an expression, Enter applies, Esc clears",
+            line + 1
+        );
+    }
+
+    /// Apply the typed condition to the caret line's breakpoint.
+    pub(super) fn apply_breakpoint_condition(&mut self) {
+        let (Some(path), Some(prompt)) = (self.breakpoint_path(), self.breakpoint_prompt.take())
+        else {
+            return;
+        };
+        let line = self.caret_line;
+        let condition = prompt.trim().to_string();
+        let text = if condition.is_empty() {
+            None
+        } else {
+            Some(condition.as_str())
+        };
+        if !self.breakpoints.condition(&path, line, text) {
+            self.status = format!("No breakpoint on line {} any more", line + 1);
+            return;
+        }
+        self.status = if condition.is_empty() {
+            format!("Breakpoint on line {} stops every time", line + 1)
+        } else {
+            format!("Breakpoint on line {} stops when {condition}", line + 1)
+        };
+        self.push_breakpoints_to_adapter();
+    }
+
+    /// Send the breakpoints of the active file to a running adapter.
+    pub(super) fn push_breakpoints_to_adapter(&mut self) {
+        if self.debug_session.is_none() {
+            return;
+        }
+        let Some(path_text) = self.breakpoint_path() else {
+            return;
+        };
+        let specs = self.active_breakpoint_specs();
+        let arguments = dap_core::set_breakpoints_arguments(&path_text, &specs);
+        if let Some(session) = self.debug_session.as_mut() {
+            let _ = session.request(dap_core::PendingRequest::SetBreakpoints, &arguments);
+        }
     }
 
     /// Add or remove a breakpoint on the caret line.
@@ -22,41 +97,13 @@ impl WindowsAppState {
             return;
         };
         let line = self.caret_line;
-        let entry = self
-            .breakpoints
-            .iter_mut()
-            .find(|(known, _)| *known == path);
-        match entry {
-            Some((_, lines)) => {
-                if let Some(position) = lines.iter().position(|existing| *existing == line) {
-                    lines.remove(position);
-                    self.status = format!("Breakpoint removed from line {}", line + 1);
-                } else {
-                    lines.push(line);
-                    lines.sort_unstable();
-                    self.status = format!("Breakpoint set on line {}", line + 1);
-                }
-                if lines.is_empty() {
-                    self.breakpoints.retain(|(known, _)| *known != path);
-                }
-            }
-            None => {
-                self.breakpoints.push((path, vec![line]));
-                self.status = format!("Breakpoint set on line {}", line + 1);
-            }
+        let text = path.to_string_lossy().into_owned();
+        if self.breakpoints.toggle(&text, line) {
+            self.status = format!("Breakpoint set on line {}", line + 1);
+        } else {
+            self.status = format!("Breakpoint removed from line {}", line + 1);
         }
-        if self.debug_session.is_some() {
-            let path_text = self
-                .file_path
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let lines = self.active_breakpoints();
-            let arguments = dap_core::set_breakpoints_arguments(&path_text, &lines);
-            if let Some(session) = self.debug_session.as_mut() {
-                let _ = session.request(dap_core::PendingRequest::SetBreakpoints, &arguments);
-            }
-        }
+        self.push_breakpoints_to_adapter();
     }
 
     /// Start debugging the active file, or continue when already paused.
@@ -89,11 +136,7 @@ impl WindowsAppState {
             return;
         }
         let cwd = self.project_root.to_string_lossy().into_owned();
-        let breakpoints = self
-            .breakpoints
-            .iter()
-            .map(|(path, lines)| (path.to_string_lossy().into_owned(), lines.clone()))
-            .collect::<Vec<_>>();
+        let breakpoints = self.breakpoints.files();
         match dap_core::DebugSession::start(&spec, &self.project_root) {
             Ok(mut session) => {
                 session
@@ -126,6 +169,7 @@ impl WindowsAppState {
         self.debug_session = None;
         self.debug_state = dap_core::DebugState::default();
         self.debug_stop_seen.clear();
+        self.breakpoints.clear_all();
         self.status = "Debugging stopped".into();
     }
 

@@ -182,7 +182,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 
 - [~] 扩展安装：extension_core 已实现下载/校验/解包/卸载命令与运行时缓存清单，Windows 面板执行真实命令并校验摘要；**目录需用户提供（<项目>/.tc-ide-catalog.conf），仓库不内置编造的 URL 与校验和**，升级/卸载的界面入口也还没有
 - [x] 用户级运行时缓存清单：记录 id/版本/校验和/字节数/目录，支持复用、修剪与序列化（Windows 已接入，Linux 待接入）。
-- [~] Debugger/Formatter：格式化当前文件已完成；调试是真正的 DAP 会话（F9 断点、F5/Shift+F5、F10、F11/Shift+F11、自动取调用栈/作用域/变量并跳到停下的帧），调用栈、变量与断点现在显示在 `Ctrl+Shift+D` 面板中并可回车跳转；**仍缺选区格式化与断点的就地编辑（增删/条件）**
+- [x] Debugger/Formatter：格式化当前文件已完成；调试是真正的 DAP 会话（F9 断点、F5/Shift+F5、F10、F11/Shift+F11、自动取调用栈/作用域/变量并跳到停下的帧），调用栈、变量与断点现在显示在 `Ctrl+Shift+D` 面板中并可回车跳转。（**本轮补齐最后两项**：①选区格式化——`workspace_core::format_selection_command` 按工具给出带范围的命令（`rustfmt --file-lines` 的 JSON 行区间、`clang-format -i --lines=a:b`），没有范围选项的格式化器（ruff/biome/gofmt）明确回报"整文件重排"而不是假装只改了选区；`Ctrl+Shift+F` 有选区时只格式化选区，没选区时整文件。②断点的就地编辑（增删/条件）——`dap_core::Breakpoints` 成为断点表（按文件、按行、带条件），`BreakpointSpec` 支持 condition/hitCondition/logMessage 并正确转义进 `setBreakpoints` 请求；F9 仍增删断点，新增 **Ctrl+F9 就地编辑光标所在行的条件**（状态栏内联输入，Enter 应用、Esc 取消），`Ctrl+Shift+D` 面板的断点行会显示条件。顺带修掉两个真实缺陷：F2 重命名的内联输入此前**没有任何提交路径**（输入完按回车什么都不发生），现在 Enter 提交、Esc 取消；"格式化当前文件"此前在把命令写进终端后**立刻**重读文件（格式化器还没跑完），现在靠结束标记等待工具真正完成，20 秒无响应给出可读提示。Linux 端本来就没有格式化入口（本次未新增）。新增 3 项单元测试（范围命令、条件断点请求、断点表编辑））
 - [x] AI：`ai_core::ChatSession` 子进程 curl（Key 走环境变量、SSE 增量、HTTP 状态、可取消）+ Windows 面板（内联输入、Enter 发送、Esc 取消、流式回答、错误显示、最近 12 轮上下文），会话按项目保存到 `.tc-ide-ai/history.conf` 并在打开项目时恢复。
 - [x] API 请求使用用户选择的 Endpoint；Key 仅驻内存并通过子进程环境变量 TC_IDE_AI_KEY 传递，不出现在命令行、配置文件或日志。
 
@@ -213,7 +213,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 ### P2：自动化与发布前门槛
 
 - [x] 可脚本化的状态层测试：tc-ide --self-check 覆盖共享内核断言，Windows CI 在发布构建后运行它。
-- [x] 单元测试覆盖：`graph_core`、`terminal_core`、`editor_core`、`workspace_core`（偏好设置/项目模板/打包命令与打包目标/打包报告）、`session_core`、`ai_core`、`extension_core`、`lsp_core`、`dap_core`、`text_buffer`、`index_core`、`syntax_core`、`motion_core`（含行位置弹簧）均已覆盖（本地 202 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试；Windows 侧另有编辑器与项目树行弹簧的测试）。
+- [x] 单元测试覆盖：`graph_core`、`terminal_core`、`editor_core`、`workspace_core`（偏好设置/项目模板/打包命令与打包目标/打包报告）、`session_core`、`ai_core`、`extension_core`、`lsp_core`、`dap_core`、`text_buffer`、`index_core`、`syntax_core`、`motion_core`（含行位置弹簧）均已覆盖（本地 205 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试；Windows 侧另有编辑器与项目树行弹簧的测试）。
 - [x] CI 加入 `cargo fmt --check`、Clippy（先清零现有警告）和产物结构检查。（`cargo fmt --check` 与 `windows-typecheck` 已加入；Clippy 仍待清零现有警告后接入，当前 Linux 侧仍有 18 条、Windows 侧 2 条 dead_code 类警告）
 - [x] 版本号（Cargo.toml 0.3.0）、CHANGELOG.md、docs/INSTALL.md、docs/KNOWN-ISSUES.md、docs/REAL-MACHINE-CHECKLIST.md 已就绪，均标注“未发布”。
 - [x] 未触发 release.yml、未创建标签或 Release；工作流已补齐三平台产物步骤，但仍然只能手动触发。
@@ -339,7 +339,7 @@ cargo run --release
 ```bash
 rustup run stable cargo fmt --check                          # 必须用 stable 的 rustfmt：本机 /usr/bin/rustfmt 1.7
                                                              # 与 CI 的 1.10 排版结果不同，用错版本会“本地通过、CI 失败”
-cargo test --all-targets                                   # 202 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试
+cargo test --all-targets                                   # 205 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试
 DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png --render-scene packaging   # 包装与编辑动画也可渲染成帧
 DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png --render-scene edit
 DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png --render-scene background   # 连背景图位置一起渲染

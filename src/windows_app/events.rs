@@ -237,6 +237,12 @@ pub(super) fn handle_character(window: Hwnd, value: char) {
                     prompt.push(value);
                 }
             }
+        } else if app.breakpoint_prompt.is_some() {
+            if !value.is_control() {
+                if let Some(prompt) = app.breakpoint_prompt.as_mut() {
+                    prompt.push(value);
+                }
+            }
         } else if app.ai_prompt_focused {
             if !value.is_control() {
                 app.ai_prompt.push(value);
@@ -394,6 +400,7 @@ pub(super) unsafe extern "system" fn window_proc(
                 app.poll_language_server();
                 app.poll_debug_session();
                 app.poll_chat_session();
+                app.poll_format();
                 // Coalesce edits: tell the server after typing pauses.
                 if app.lsp_dirty
                     && app

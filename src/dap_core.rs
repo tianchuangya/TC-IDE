@@ -217,14 +217,219 @@ pub fn launch_arguments(program: &str, cwd: &str, stop_on_entry: bool) -> String
 }
 
 /// `setBreakpoints` arguments for one file.
-pub fn set_breakpoints_arguments(path: &str, lines: &[usize]) -> String {
-    let path = path.replace('\\', "\\\\").replace('"', "\\\"");
-    let breakpoints = lines
+pub fn set_breakpoints_arguments(path: &str, breakpoints: &[BreakpointSpec]) -> String {
+    let path = escape_json(path);
+    let list = breakpoints
         .iter()
-        .map(|line| format!("{{\"line\":{}}}", line + 1))
+        .map(|breakpoint| {
+            let mut fields = vec![format!("\"line\":{}", breakpoint.line + 1)];
+            for (key, value) in [
+                ("condition", breakpoint.condition.as_ref()),
+                ("hitCondition", breakpoint.hit_condition.as_ref()),
+                ("logMessage", breakpoint.log_message.as_ref()),
+            ] {
+                if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+                    fields.push(format!("\"{key}\":\"{}\"", escape_json(value)));
+                }
+            }
+            format!("{{{}}}", fields.join(","))
+        })
         .collect::<Vec<_>>()
         .join(",");
-    format!("{{\"source\":{{\"path\":\"{path}\"}},\"breakpoints\":[{breakpoints}]}}")
+    format!("{{\"source\":{{\"path\":\"{path}\"}},\"breakpoints\":[{list}]}}")
+}
+
+/// Escape a string for a JSON document.
+pub fn escape_json(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            value if (value as u32) < 0x20 => {
+                escaped.push_str(&format!("\\u{:04x}", value as u32));
+            }
+            value => escaped.push(value),
+        }
+    }
+    escaped
+}
+
+/// One breakpoint: a line, and what makes it stop.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct BreakpointSpec {
+    pub line: usize,
+    /// Expression that has to hold for the breakpoint to stop.
+    pub condition: Option<String>,
+    /// Number of hits before it stops, in the form the adapter expects.
+    pub hit_condition: Option<String>,
+    /// Message a logpoint prints instead of stopping.
+    pub log_message: Option<String>,
+}
+
+impl BreakpointSpec {
+    /// A plain breakpoint on a line.
+    pub fn new(line: usize) -> Self {
+        Self {
+            line,
+            ..Self::default()
+        }
+    }
+
+    /// A breakpoint that only stops while `condition` holds.
+    pub fn conditional(line: usize, condition: impl Into<String>) -> Self {
+        Self {
+            line,
+            condition: Some(condition.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Whether the breakpoint carries anything beyond its line.
+    pub fn is_conditional(&self) -> bool {
+        self.condition
+            .as_ref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || self
+                .hit_condition
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty())
+            || self
+                .log_message
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty())
+    }
+
+    /// One line description for the problems panel.
+    pub fn describe(&self) -> String {
+        let mut text = format!("line {}", self.line + 1);
+        if let Some(condition) = self
+            .condition
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            text.push_str(&format!(" · if {condition}"));
+        }
+        if let Some(hits) = self
+            .hit_condition
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            text.push_str(&format!(" · hits {hits}"));
+        }
+        if let Some(message) = self
+            .log_message
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            text.push_str(&format!(" · log {message}"));
+        }
+        text
+    }
+}
+
+/// Breakpoints of a session, per file, in line order.
+///
+/// The panel edits this table in place: a breakpoint can be added, removed or
+/// given a condition without the editor and the debug adapter disagreeing about
+/// what is set.
+#[derive(Clone, Debug, Default)]
+pub struct Breakpoints {
+    files: std::collections::BTreeMap<String, Vec<BreakpointSpec>>,
+}
+
+impl Breakpoints {
+    /// No breakpoints.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add or remove the plain breakpoint on a line. Returns true when set.
+    pub fn toggle(&mut self, path: &str, line: usize) -> bool {
+        if self.clear(path, line) {
+            return false;
+        }
+        self.set(path, BreakpointSpec::new(line));
+        true
+    }
+
+    /// Add a breakpoint, replacing the one already on that line.
+    pub fn set(&mut self, path: &str, breakpoint: BreakpointSpec) {
+        let entry = self.files.entry(path.to_string()).or_default();
+        match entry.iter().position(|known| known.line == breakpoint.line) {
+            Some(index) => entry[index] = breakpoint,
+            None => entry.push(breakpoint),
+        }
+        entry.sort_by_key(|known| known.line);
+    }
+
+    /// Remove the breakpoint on a line, if there is one.
+    pub fn clear(&mut self, path: &str, line: usize) -> bool {
+        let Some(entry) = self.files.get_mut(path) else {
+            return false;
+        };
+        let before = entry.len();
+        entry.retain(|known| known.line != line);
+        let removed = entry.len() != before;
+        if entry.is_empty() {
+            self.files.remove(path);
+        }
+        removed
+    }
+
+    /// Set, change or drop the condition of the breakpoint on a line.
+    ///
+    /// Returns false when the line has no breakpoint: a condition without a
+    /// breakpoint would never stop anything.
+    pub fn condition(&mut self, path: &str, line: usize, condition: Option<&str>) -> bool {
+        let Some(entry) = self.files.get_mut(path) else {
+            return false;
+        };
+        let Some(breakpoint) = entry.iter_mut().find(|known| known.line == line) else {
+            return false;
+        };
+        breakpoint.condition = condition
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        true
+    }
+
+    /// Breakpoints of one file, in line order.
+    pub fn specs(&self, path: &str) -> &[BreakpointSpec] {
+        self.files.get(path).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Lines of one file that have a breakpoint.
+    pub fn lines(&self, path: &str) -> Vec<usize> {
+        self.specs(path).iter().map(|known| known.line).collect()
+    }
+
+    /// Every file with its breakpoints, in path order.
+    pub fn files(&self) -> Vec<(String, Vec<BreakpointSpec>)> {
+        self.files
+            .iter()
+            .map(|(path, specs)| (path.clone(), specs.clone()))
+            .collect()
+    }
+
+    /// Breakpoints in the session.
+    pub fn len(&self) -> usize {
+        self.files.values().map(Vec::len).sum()
+    }
+
+    /// Whether nothing is set.
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// Forget everything, for a session that ended.
+    pub fn clear_all(&mut self) {
+        self.files.clear();
+    }
 }
 
 /// `stackTrace` arguments for a thread.
@@ -427,16 +632,16 @@ impl DebugSession {
         &mut self,
         program: &str,
         cwd: &str,
-        breakpoints: &[(String, Vec<usize>)],
+        breakpoints: &[(String, Vec<BreakpointSpec>)],
     ) -> Result<(), String> {
         self.request(PendingRequest::Initialize, &initialize_arguments("tc-ide"))?;
-        for (path, lines) in breakpoints {
-            if lines.is_empty() {
+        for (path, specs) in breakpoints {
+            if specs.is_empty() {
                 continue;
             }
             self.request(
                 PendingRequest::SetBreakpoints,
-                &set_breakpoints_arguments(path, lines),
+                &set_breakpoints_arguments(path, specs),
             )?;
         }
         self.request(
@@ -600,7 +805,8 @@ mod tests {
         let launch = launch_arguments("C:\\demo\\app.py", "C:\\demo", true);
         assert!(launch.contains("C:\\\\demo\\\\app.py"));
         assert!(launch.contains("\"stopOnEntry\":true"));
-        let breakpoints = set_breakpoints_arguments("/p/a.rs", &[2, 9]);
+        let breakpoints =
+            set_breakpoints_arguments("/p/a.rs", &[BreakpointSpec::new(2), BreakpointSpec::new(9)]);
         assert!(breakpoints.contains("\"path\":\"/p/a.rs\""));
         assert!(breakpoints.contains("[{\"line\":3},{\"line\":10}]"));
         assert!(stack_trace_arguments(4).contains("\"threadId\":4"));
@@ -772,7 +978,7 @@ while True:
             .initialize_and_launch(
                 "/tmp/demo.py",
                 &directory.to_string_lossy(),
-                &[("/tmp/demo.py".to_string(), vec![2])],
+                &[("/tmp/demo.py".to_string(), vec![BreakpointSpec::new(2)])],
             )
             .expect("launch");
 
@@ -829,5 +1035,109 @@ while True:
 
         drop(session);
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_breakpoint_carries_a_condition_a_hit_count_or_a_log_message() {
+        let plain = set_breakpoints_arguments("/p/a.rs", &[BreakpointSpec::new(2)]);
+        assert_eq!(
+            plain,
+            "{\"source\":{\"path\":\"/p/a.rs\"},\"breakpoints\":[{\"line\":3}]}"
+        );
+
+        let specs = vec![
+            BreakpointSpec::conditional(4, "value > 3"),
+            BreakpointSpec {
+                line: 8,
+                hit_condition: Some("5".into()),
+                log_message: Some("value is {value}".into()),
+                ..BreakpointSpec::default()
+            },
+            BreakpointSpec {
+                line: 9,
+                condition: Some("   ".into()),
+                ..BreakpointSpec::default()
+            },
+        ];
+        let arguments = set_breakpoints_arguments("/p/a.rs", &specs);
+        assert!(
+            arguments.contains("{\"line\":5,\"condition\":\"value > 3\"}"),
+            "{arguments}"
+        );
+        assert!(arguments.contains("\"hitCondition\":\"5\""));
+        assert!(arguments.contains("\"logMessage\":\"value is {value}\""));
+        assert!(
+            arguments.contains("{\"line\":10}"),
+            "a blank condition is left out: {arguments}"
+        );
+
+        // Quotes and newlines in a condition cannot break the request document.
+        let tricky = set_breakpoints_arguments(
+            "/p/a\"b.rs",
+            &[BreakpointSpec::conditional(0, "name == \"x\"\nnext")],
+        );
+        assert!(tricky.contains("/p/a\\\"b.rs"), "{tricky}");
+        assert!(tricky.contains("name == \\\"x\\\"\\nnext"), "{tricky}");
+
+        assert!(BreakpointSpec::conditional(1, "x").is_conditional());
+        assert!(BreakpointSpec::new(1).describe() == "line 2");
+        assert_eq!(
+            BreakpointSpec::conditional(11, "count > 0").describe(),
+            "line 12 · if count > 0"
+        );
+        let logpoint = BreakpointSpec {
+            line: 0,
+            log_message: Some("hit".into()),
+            ..BreakpointSpec::default()
+        };
+        assert_eq!(logpoint.describe(), "line 1 · log hit");
+        assert!(logpoint.is_conditional());
+    }
+
+    #[test]
+    fn the_breakpoint_table_is_edited_in_place() {
+        let mut breakpoints = Breakpoints::new();
+        assert!(breakpoints.toggle("a.rs", 4), "a toggle sets a breakpoint");
+        assert!(
+            !breakpoints.toggle("a.rs", 4),
+            "and toggling again removes it"
+        );
+        assert!(breakpoints.is_empty());
+
+        assert!(breakpoints.toggle("a.rs", 9));
+        assert!(breakpoints.toggle("a.rs", 2));
+        assert!(breakpoints.toggle("b.rs", 1));
+        assert_eq!(breakpoints.lines("a.rs"), [2, 9], "lines stay sorted");
+        assert_eq!(breakpoints.len(), 3);
+        assert_eq!(breakpoints.files().len(), 2);
+
+        // A condition needs a breakpoint to attach to.
+        assert!(!breakpoints.condition("c.rs", 1, Some("x")));
+        assert!(!breakpoints.condition("a.rs", 3, Some("x")));
+        assert!(breakpoints.condition("a.rs", 9, Some("value > 3")));
+        assert_eq!(
+            breakpoints.specs("a.rs")[1].condition.as_deref(),
+            Some("value > 3")
+        );
+        assert!(breakpoints.specs("a.rs")[1].is_conditional());
+        // Clearing it leaves a plain breakpoint behind.
+        assert!(breakpoints.condition("a.rs", 9, None));
+        assert!(!breakpoints.specs("a.rs")[1].is_conditional());
+
+        // Setting a breakpoint again replaces the one on that line.
+        breakpoints.set("a.rs", BreakpointSpec::conditional(9, "again"));
+        assert_eq!(breakpoints.len(), 3);
+        assert_eq!(
+            breakpoints.specs("a.rs")[1].condition.as_deref(),
+            Some("again")
+        );
+
+        assert!(breakpoints.clear("a.rs", 9));
+        assert!(!breakpoints.clear("a.rs", 9));
+        breakpoints.clear("b.rs", 1);
+        assert_eq!(breakpoints.files().len(), 1);
+        breakpoints.clear_all();
+        assert!(breakpoints.is_empty());
+        assert!(breakpoints.specs("a.rs").is_empty());
     }
 }
