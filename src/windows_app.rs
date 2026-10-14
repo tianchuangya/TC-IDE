@@ -123,6 +123,8 @@ enum LspRequest {
     Completion,
     Hover,
     Definition,
+    References,
+    Rename,
 }
 
 struct StoredBuffer {
@@ -277,6 +279,9 @@ struct WindowsAppState {
     lsp_pending: Vec<(u64, LspRequest)>,
     lsp_completions: Vec<String>,
     lsp_hover: Option<(usize, usize, String)>,
+    lsp_locations: Vec<(PathBuf, usize, usize)>,
+    lsp_location_cursor: usize,
+    rename_prompt: Option<String>,
     lsp_last_change: Option<Instant>,
     lsp_dirty: bool,
     lsp_completion_asked: Option<Instant>,
@@ -545,6 +550,9 @@ impl WindowsAppState {
             lsp_pending: Vec::new(),
             lsp_completions: Vec::new(),
             lsp_hover: None,
+            lsp_locations: Vec::new(),
+            lsp_location_cursor: 0,
+            rename_prompt: None,
             lsp_last_change: None,
             lsp_dirty: false,
             lsp_completion_asked: None,
@@ -692,6 +700,7 @@ impl WindowsAppState {
         self.load_document(index);
         self.lsp_diagnostics.clear();
         self.lsp_completions.clear();
+        self.lsp_locations.clear();
         self.ensure_language_server();
         self.status = format!("Active document: {}", self.file_name);
         true
@@ -1828,15 +1837,111 @@ impl WindowsAppState {
         };
         let line = self.caret_line as u32;
         let character = self.caret_column as u32;
+        let rename = request == LspRequest::Rename;
         let method = match request {
             LspRequest::Completion => "textDocument/completion",
             LspRequest::Hover => "textDocument/hover",
             LspRequest::Definition => "textDocument/definition",
+            LspRequest::References => "textDocument/references",
+            LspRequest::Rename => "textDocument/rename",
         };
-        match server.position_request(method, &path, line, character) {
+        let result = if rename {
+            let new_name = self.rename_prompt.clone().unwrap_or_default();
+            if new_name.is_empty() {
+                self.status = "Rename needs a new name".into();
+                return;
+            }
+            server.rename(&path, line, character, &new_name)
+        } else {
+            server.position_request(method, &path, line, character)
+        };
+        match result {
             Ok(id) => self.lsp_pending.push((id, request)),
             Err(error) => self.status = error,
         }
+    }
+
+    /// Jump to the next reference the server reported.
+    fn jump_to_next_reference(&mut self) {
+        if self.lsp_locations.is_empty() {
+            self.status = "No references from the language server yet".into();
+            return;
+        }
+        let index = self.lsp_location_cursor % self.lsp_locations.len();
+        let (path, line, column) = self.lsp_locations[index].clone();
+        self.lsp_location_cursor = index + 1;
+        if path.is_file() {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if self.file_path.as_deref() != Some(path.as_path()) {
+                self.open_file(path);
+            } else {
+                self.status = format!("Reference in {name}");
+            }
+            self.caret_line = line.min(self.lines.len().saturating_sub(1));
+            self.caret_column = column;
+            self.clamp_caret();
+            self.reveal_caret();
+            self.status = format!(
+                "Reference {} of {} at {}:{}",
+                index + 1,
+                self.lsp_locations.len(),
+                self.file_name,
+                self.caret_line + 1
+            );
+        } else {
+            self.status = format!("Reference file is not available: {}", path.display());
+        }
+    }
+
+    /// Apply the edits a rename response asked for.
+    fn apply_rename_edits(&mut self, edits: &[lsp_core::RenameEdit]) {
+        if edits.is_empty() {
+            self.status = "The language server returned no rename edits".into();
+            return;
+        }
+        let mut touched = 0usize;
+        let mut grouped: Vec<(PathBuf, Vec<lsp_core::RenameEdit>)> = Vec::new();
+        for edit in edits {
+            let path = PathBuf::from(&edit.path);
+            match grouped.iter_mut().find(|(known, _)| *known == path) {
+                Some((_, list)) => list.push(edit.clone()),
+                None => grouped.push((path, vec![edit.clone()])),
+            }
+        }
+        for (path, list) in grouped {
+            let is_active = self.file_path.as_deref() == Some(path.as_path());
+            let text = if is_active {
+                self.buffer.to_text()
+            } else {
+                match fs::read_to_string(&path) {
+                    Ok(content) => content.replace("\r\n", "\n"),
+                    Err(error) => {
+                        self.status = format!("Rename could not read {}: {error}", path.display());
+                        return;
+                    }
+                }
+            };
+            let updated = lsp_core::apply_edits(&text, &list);
+            if is_active {
+                self.buffer = text_buffer::TextBuffer::from_text(&updated);
+                self.sync_lines();
+                self.reveal_caret();
+                touched += 1;
+                continue;
+            }
+            match fs::write(&path, updated.replace('\n', "\r\n")) {
+                Ok(()) => touched += 1,
+                Err(error) => {
+                    self.status = format!("Rename could not write {}: {error}", path.display());
+                    return;
+                }
+            }
+        }
+        self.request_project_index();
+        self.status = format!("Rename applied to {touched} file(s)");
     }
 
     /// Collect whatever the language server has sent since the last tick.
@@ -1913,9 +2018,29 @@ impl WindowsAppState {
                             self.caret_line = line as usize;
                             self.caret_column = column as usize;
                             self.clamp_caret();
+                            self.reveal_caret();
                             self.status = "Jumped to the definition reported by the server".into();
                         }
                     }
+                }
+                LspRequest::References => {
+                    self.lsp_locations = lsp_core::parse_locations(&message)
+                        .into_iter()
+                        .map(|(path, line, column)| {
+                            (PathBuf::from(path), line as usize, column as usize)
+                        })
+                        .collect();
+                    self.lsp_location_cursor = 0;
+                    let count = self.lsp_locations.len();
+                    self.status = if count == 0 {
+                        "The language server reported no references".into()
+                    } else {
+                        format!("{count} reference(s); Ctrl+R again jumps to the next one")
+                    };
+                }
+                LspRequest::Rename => {
+                    let edits = lsp_core::parse_rename_edits(&message);
+                    self.apply_rename_edits(&edits);
                 }
             }
         }
@@ -3104,9 +3229,19 @@ fn render_window(window: Hwnd) {
                 .filter(|(line, _)| *line >= first_line)
                 .map(|(line, is_error)| (line - first_line, is_error))
                 .collect::<Vec<_>>();
-            let status_line = match &app.lsp_hover {
-                Some((_, _, text)) => text.lines().next().unwrap_or("").to_string(),
-                None => app.status.clone(),
+            let status_line = if let Some(prompt) = app.rename_prompt.as_ref() {
+                format!("Rename to: {prompt}")
+            } else if let Some(diagnostic) = app
+                .lsp_diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.line as usize == app.caret_line)
+            {
+                diagnostic.line_text()
+            } else {
+                match &app.lsp_hover {
+                    Some((_, _, text)) => text.lines().next().unwrap_or("").to_string(),
+                    None => app.status.clone(),
+                }
             };
             let graph_first_index = graph.clamped_scroll(app.graph_scroll, graph_rows);
             let graph_nodes = graph.visible(app.graph_scroll, graph_rows).to_vec();
@@ -3283,6 +3418,12 @@ fn handle_character(window: Hwnd, value: char) {
         } else if app.font_search_focused {
             if !value.is_control() {
                 app.font_search.push(value);
+            }
+        } else if app.rename_prompt.is_some() {
+            if !value.is_control() {
+                if let Some(prompt) = app.rename_prompt.as_mut() {
+                    prompt.push(value);
+                }
             }
         } else if app.ai_prompt_focused {
             if !value.is_control() {
@@ -4514,6 +4655,19 @@ unsafe extern "system" fn window_proc(
                         invalidate(window);
                         return 0;
                     }
+                    0x52 => {
+                        // Ctrl+R lists references, then cycles through them.
+                        APP.with(|cell| {
+                            let mut app = cell.borrow_mut();
+                            if app.lsp_locations.is_empty() {
+                                app.request_language_feature(LspRequest::References);
+                            } else {
+                                app.jump_to_next_reference();
+                            }
+                        });
+                        invalidate(window);
+                        return 0;
+                    }
                     0x57 => {
                         // Ctrl+W closes the active document.
                         APP.with(|cell| {
@@ -4536,6 +4690,17 @@ unsafe extern "system" fn window_proc(
                 APP.with(|cell| {
                     cell.borrow_mut()
                         .request_language_feature(LspRequest::Definition)
+                });
+                invalidate(window);
+                return 0;
+            }
+            if w_param as u32 == 0x71 {
+                // F2 asks for a new name and then for the rename edits.
+                APP.with(|cell| {
+                    let mut app = cell.borrow_mut();
+                    app.rename_prompt = Some(String::new());
+                    app.graph_search_focused = false;
+                    app.status = "Rename: type the new name and press Enter".into();
                 });
                 invalidate(window);
                 return 0;
@@ -5973,6 +6138,31 @@ pub fn self_check() -> i32 {
     report(
         "language id mapping",
         lsp_core::language_id("app.py") == "python",
+        &mut failures,
+    );
+    let applied = lsp_core::apply_edits(
+        "let value = 1;\n",
+        &[lsp_core::RenameEdit {
+            path: "demo.rs".into(),
+            line: 0,
+            column: 4,
+            end_line: 0,
+            end_column: 9,
+            new_text: "answer".into(),
+        }],
+    );
+    report(
+        "rename edits apply to a document",
+        applied == "let answer = 1;\n",
+        &mut failures,
+    );
+    report(
+        "reference locations parse",
+        lsp_core::parse_locations(
+            "{\"result\":[{\"uri\":\"file:///p/a.rs\",\"range\":{\"start\":{\"line\":2,\"character\":1},\"end\":{}}}]}",
+        )
+        .len()
+            == 1,
         &mut failures,
     );
 

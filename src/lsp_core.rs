@@ -848,18 +848,70 @@ pub fn parse_locations(text: &str) -> Vec<(String, u32, u32)> {
         .collect()
 }
 
-/// Text edits from a rename response, as `(path, line, column, new text)`.
-pub fn parse_rename_edits(text: &str) -> Vec<(String, u32, u32, String)> {
+/// One text edit of a rename response.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenameEdit {
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
+    pub new_text: String,
+}
+
+/// Text edits from a rename response.
+pub fn parse_rename_edits(text: &str) -> Vec<RenameEdit> {
     let mut edits = Vec::new();
     for (path, object) in document_changes(text) {
         for edit in json_objects(&object, "edits") {
             let line = json_number(&edit, "line").unwrap_or(0) as u32;
             let column = json_number(&edit, "character").unwrap_or(0) as u32;
+            // The first `line`/`character` pair belongs to the range start, the
+            // second one to its end; a full replacement needs both.
+            let positions = json_positions(&edit);
+            let (end_line, end_column) = positions.get(1).copied().unwrap_or((line, column));
             let new_text = json_string(&edit, "newText").unwrap_or_default();
-            edits.push((path.clone(), line, column, new_text));
+            edits.push(RenameEdit {
+                path: path.clone(),
+                line,
+                column,
+                end_line,
+                end_column,
+                new_text,
+            });
         }
     }
     edits
+}
+
+/// Every `(line, character)` pair of a JSON document, in order.
+pub fn json_positions(text: &str) -> Vec<(u32, u32)> {
+    let mut positions = Vec::new();
+    let mut search = 0;
+    while let Some(found) = text[search..].find("\"line\"") {
+        let start = search + found;
+        let line = json_number(&text[start..], "line").unwrap_or(0) as u32;
+        let column = json_number(&text[start..], "character").unwrap_or(0) as u32;
+        positions.push((line, column));
+        search = start + 6;
+    }
+    positions
+}
+
+/// Apply rename edits to a document, newest position first so earlier offsets
+/// stay valid. Edits outside the document are ignored.
+pub fn apply_edits(text: &str, edits: &[RenameEdit]) -> String {
+    let mut ordered = edits.to_vec();
+    ordered.sort_by_key(|edit| std::cmp::Reverse((edit.line, edit.column)));
+    let mut buffer = crate::text_buffer::TextBuffer::from_text(text);
+    for edit in ordered {
+        buffer.replace(
+            (edit.line as usize, edit.column as usize),
+            (edit.end_line as usize, edit.end_column as usize),
+            &edit.new_text,
+        );
+    }
+    buffer.to_text()
 }
 
 /// `(path, object)` pairs of a `WorkspaceEdit` style response.
@@ -1064,20 +1116,59 @@ mod tests {
         let response = "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"changes\":{\"file:///p/src/main.rs\":{\"edits\":[{\"range\":{\"start\":{\"line\":1,\"character\":4},\"end\":{\"line\":1,\"character\":8}},\"newText\":\"renamed\"}]},\"file:///p/src/lib.rs\":{\"edits\":[{\"range\":{\"start\":{\"line\":8,\"character\":1},\"end\":{}},\"newText\":\"renamed\"}]}}}}";
         let edits = parse_rename_edits(response);
         assert_eq!(edits.len(), 2);
-        assert!(edits
-            .iter()
-            .any(|(path, line, column, text)| path == "/p/src/main.rs"
-                && *line == 1
-                && *column == 4
-                && text == "renamed"));
-        assert!(edits.iter().any(|(path, ..)| path == "/p/src/lib.rs"));
+        assert!(edits.iter().any(|edit| edit.path == "/p/src/main.rs"
+            && edit.line == 1
+            && edit.column == 4
+            && edit.end_line == 1
+            && edit.end_column == 8
+            && edit.new_text == "renamed"));
+        assert!(edits.iter().any(|edit| edit.path == "/p/src/lib.rs"));
+
+        // Applying the edits renames the identifier in place.
+        let document = "fn main() {\n    let value = 1;\n}\n";
+        let applied = apply_edits(
+            document,
+            &[RenameEdit {
+                path: "/p/src/main.rs".into(),
+                line: 1,
+                column: 8,
+                end_line: 1,
+                end_column: 13,
+                new_text: "answer".into(),
+            }],
+        );
+        assert_eq!(applied, "fn main() {\n    let answer = 1;\n}\n");
+
+        // Several edits on one document are applied without shifting each other.
+        let many = apply_edits(
+            "aaa bbb aaa",
+            &[
+                RenameEdit {
+                    path: "x".into(),
+                    line: 0,
+                    column: 0,
+                    end_line: 0,
+                    end_column: 3,
+                    new_text: "one".into(),
+                },
+                RenameEdit {
+                    path: "x".into(),
+                    line: 0,
+                    column: 8,
+                    end_line: 0,
+                    end_column: 11,
+                    new_text: "three".into(),
+                },
+            ],
+        );
+        assert_eq!(many, "one bbb three");
 
         // The `documentChanges` shape is understood too.
         let array_shape = "{\"result\":{\"documentChanges\":[{\"textDocument\":{\"uri\":\"file:///p/a.rs\",\"version\":2},\"edits\":[{\"range\":{\"start\":{\"line\":3,\"character\":0},\"end\":{}},\"newText\":\"renamed\"}]}]}}";
         let edits = parse_rename_edits(array_shape);
         assert_eq!(edits.len(), 1);
-        assert_eq!(edits[0].0, "/p/a.rs");
-        assert_eq!(edits[0].1, 3);
+        assert_eq!(edits[0].path, "/p/a.rs");
+        assert_eq!(edits[0].line, 3);
     }
 
     #[test]
