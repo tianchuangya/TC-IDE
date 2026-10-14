@@ -26,7 +26,7 @@ jobs:
         run: cargo test --all-targets
       - name: Build release binary
         run: cargo build --release
-      - name: Package Linux release
+      - name: Package the portable Linux build
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
@@ -37,7 +37,67 @@ jobs:
           install -m 644 TC-IDE.desktop "dist/${package_dir}/"
           cp -R assets "dist/${package_dir}/assets"
           tar -C dist -czf "dist/${package_dir}.tar.gz" "${package_dir}"
-          sha256sum "dist/${package_dir}.tar.gz" > "dist/${package_dir}.tar.gz.sha256"
+      - name: Build the Debian package on its own runner
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          # A .deb is produced here, on Linux, never faked from another system.
+          version="${RELEASE_TAG#v}"
+          root="build/deb"
+          rm -rf "${root}"
+          mkdir -p "${root}/DEBIAN" \
+                   "${root}/usr/bin" \
+                   "${root}/usr/share/applications" \
+                   "${root}/usr/share/icons/hicolor/256x256/apps" \
+                   "${root}/usr/share/doc/tc-ide"
+          install -m 755 target/release/tc-ide "${root}/usr/bin/tc-ide"
+          install -m 644 TC-IDE.desktop "${root}/usr/share/applications/tc-ide.desktop"
+          install -m 644 assets/tc-ide-icon.png \
+            "${root}/usr/share/icons/hicolor/256x256/apps/tc-ide.png"
+          install -m 644 README.md LICENSE "${root}/usr/share/doc/tc-ide/"
+          installed_size=$(du -sk "${root}/usr" | cut -f1)
+          cat > "${root}/DEBIAN/control" <<EOF
+          Package: tc-ide
+          Version: ${version}
+          Architecture: amd64
+          Maintainer: TianChuangYa <https://github.com/tianchuangya>
+          Section: devel
+          Priority: optional
+          Installed-Size: ${installed_size}
+          Depends: libx11-6, libcairo2, libpango-1.0-0
+          Description: Native, motion-first IDE experiment written in Rust
+           TC-IDE uses native windows on Linux, Windows and macOS, keeps the
+           interface in Rust and never ships an HTML or WebView runtime.
+          EOF
+          dpkg-deb --build --root-owner-group "${root}" \
+            "dist/tc-ide_${version}_amd64.deb"
+      - name: Try the AppImage build (tooling download may be unavailable)
+        continue-on-error: true
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          curl -fsSL -o /tmp/appimagetool \
+            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x /tmp/appimagetool
+          appdir="build/TC-IDE.AppDir"
+          mkdir -p "${appdir}/usr/bin"
+          install -m 755 target/release/tc-ide "${appdir}/usr/bin/tc-ide"
+          install -m 644 assets/tc-ide-icon.png "${appdir}/tc-ide.png"
+          install -m 644 TC-IDE.desktop "${appdir}/tc-ide.desktop"
+          printf '#!/bin/sh\nexec "$(dirname "$0")/usr/bin/tc-ide" "$@"\n' > "${appdir}/AppRun"
+          chmod +x "${appdir}/AppRun"
+          ARCH=x86_64 /tmp/appimagetool "${appdir}" \
+            "dist/TC-IDE-${RELEASE_TAG}-x86_64.AppImage"
+      - name: Checksums and artifact list
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          cd dist
+          sha256sum ./* > SHA256SUMS.txt
+          {
+            echo "Artifacts built on $(uname -srm)"
+            ls -1
+          } | tee ARTIFACTS.txt
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -45,7 +105,98 @@ jobs:
         run: |
           gh release create "${RELEASE_TAG}" \
             dist/*.tar.gz \
-            dist/*.sha256 \
+            dist/*.deb \
+            dist/*.AppImage \
+            dist/SHA256SUMS.txt \
+            dist/ARTIFACTS.txt \
             --target "${GITHUB_SHA}" \
             --title "TC-IDE ${RELEASE_TAG}" \
             --generate-notes
+
+  macos:
+    needs: linux
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --all-targets
+      - name: Build release binary
+        run: cargo build --release
+      - name: Build the disk image on macOS
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          # A .dmg is produced here, on macOS, never faked from another system.
+          version="${RELEASE_TAG#v}"
+          app="build/TC-IDE.app"
+          mkdir -p "${app}/Contents/MacOS" "${app}/Contents/Resources"
+          install -m 755 target/release/tc-ide "${app}/Contents/MacOS/tc-ide"
+          install -m 644 assets/tc-ide-icon.png "${app}/Contents/Resources/tc-ide.png"
+          cat > "${app}/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>TC-IDE</string>
+            <key>CFBundleDisplayName</key><string>TC-IDE</string>
+            <key>CFBundleIdentifier</key><string>com.tianchuangya.tcide</string>
+            <key>CFBundleVersion</key><string>${version}</string>
+            <key>CFBundleShortVersionString</key><string>${version}</string>
+            <key>CFBundleExecutable</key><string>tc-ide</string>
+            <key>CFBundleIconFile</key><string>tc-ide.png</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+          </dict>
+          </plist>
+          EOF
+          mkdir -p dist
+          tar -C build -czf "dist/TC-IDE-${RELEASE_TAG}-macos-universal-app.tar.gz" TC-IDE.app
+          hdiutil create -volname "TC-IDE ${RELEASE_TAG}" -srcfolder "${app}" \
+            -ov -format UDZO "dist/TC-IDE-${RELEASE_TAG}-macos.dmg"
+          shasum -a 256 dist/* > "dist/SHA256SUMS-macos.txt"
+      - name: Upload macOS artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release upload "${RELEASE_TAG}" dist/* --clobber
+
+  windows:
+    needs: linux
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --all-targets
+      - name: Build release binary
+        run: cargo build --release
+      - name: Package the Windows artifacts
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $stage = "build/TC-IDE-$env:RELEASE_TAG-windows-x86_64"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item target/release/tc-ide.exe "$stage/tc-ide.exe"
+          Copy-Item README.md, LICENSE, TC-IDE.desktop $stage
+          Copy-Item -Recurse assets "$stage/assets"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/TC-IDE-$env:RELEASE_TAG-windows-x86_64.zip" -Force
+          $makeappx = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/makeappx.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if ($makeappx) {
+            & $makeappx.FullName pack /d $stage /p "dist/TC-IDE-$env:RELEASE_TAG-windows.msix" /o
+          } else {
+            Write-Host "MakeAppx.exe is unavailable; the ZIP is still published"
+          }
+      - name: Upload Windows artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release upload "$env:RELEASE_TAG" (Get-ChildItem dist/* | ForEach-Object { $_.FullName }) --clobber

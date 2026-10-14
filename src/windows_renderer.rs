@@ -93,6 +93,8 @@ pub struct WindowsScene<'a> {
     pub pointer_x: i32,
     pub package_motion: f32,
     pub package_targets: [bool; 3],
+    /// File name of the configured MSIX signing certificate, if any.
+    pub signing_certificate: &'a str,
     pub package_running: bool,
     pub package_progress: f32,
     pub background_path: Option<&'a str>,
@@ -1604,7 +1606,7 @@ impl DirectEditorRenderer {
                         left,
                         top,
                         right: width - 14.0 * scale,
-                        bottom: top + 214.0 * scale,
+                        bottom: top + 240.0 * scale,
                     },
                     14.0 * scale,
                 )
@@ -1642,7 +1644,28 @@ impl DirectEditorRenderer {
                     )
                 };
             }
+            let certificate = if scene.signing_certificate.is_empty() {
+                "4  Signing certificate: none (click to choose)".to_string()
+            } else {
+                format!("4  Signing certificate: {}", scene.signing_certificate)
+            };
             unsafe {
+                Self::text(
+                    &target_base,
+                    &self.small_format,
+                    if scene.signing_certificate.is_empty() {
+                        &muted
+                    } else {
+                        &accent
+                    },
+                    &certificate,
+                    D2D_RECT_F {
+                        left: left + 18.0 * scale,
+                        top: top + 172.0 * scale,
+                        right: width - 24.0 * scale,
+                        bottom: top + 198.0 * scale,
+                    },
+                );
                 Self::text(
                     &target_base,
                     &self.small_format,
@@ -1650,9 +1673,9 @@ impl DirectEditorRenderer {
                     "Enter  Start packaging     Esc  Close",
                     D2D_RECT_F {
                         left: left + 18.0 * scale,
-                        top: top + 178.0 * scale,
+                        top: top + 194.0 * scale,
                         right: width - 24.0 * scale,
-                        bottom: top + 206.0 * scale,
+                        bottom: top + 222.0 * scale,
                     },
                 )
             };

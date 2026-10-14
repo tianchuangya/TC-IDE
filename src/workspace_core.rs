@@ -386,6 +386,174 @@ pub fn task_command(facts: &ProjectFacts, build: bool) -> String {
     }
 }
 
+/// Package formats TC-IDE can produce.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackageTarget {
+    WindowsExecutable,
+    PortableZip,
+    Msix,
+    Deb,
+    AppImage,
+    Dmg,
+}
+
+impl PackageTarget {
+    pub const ALL: [PackageTarget; 6] = [
+        PackageTarget::WindowsExecutable,
+        PackageTarget::PortableZip,
+        PackageTarget::Msix,
+        PackageTarget::Deb,
+        PackageTarget::AppImage,
+        PackageTarget::Dmg,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PackageTarget::WindowsExecutable => "Windows .exe",
+            PackageTarget::PortableZip => "Portable ZIP",
+            PackageTarget::Msix => "MSIX",
+            PackageTarget::Deb => "Debian .deb",
+            PackageTarget::AppImage => "AppImage",
+            PackageTarget::Dmg => "macOS .dmg",
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            PackageTarget::WindowsExecutable => "exe",
+            PackageTarget::PortableZip | PackageTarget::Msix | PackageTarget::Dmg => {
+                if self == PackageTarget::Msix {
+                    "msix"
+                } else if self == PackageTarget::Dmg {
+                    "dmg"
+                } else {
+                    "zip"
+                }
+            }
+            PackageTarget::Deb => "deb",
+            PackageTarget::AppImage => "AppImage",
+        }
+    }
+
+    /// Whether the format has to be produced on its own operating system.
+    pub fn native_system(self) -> Option<&'static str> {
+        match self {
+            PackageTarget::Deb | PackageTarget::AppImage => Some("linux"),
+            PackageTarget::Dmg => Some("macos"),
+            _ => Some("windows"),
+        }
+    }
+
+    /// Artifact name inside the project package directory.
+    pub fn artifact_name(self, project: &str) -> String {
+        format!("{project}.{}", self.extension())
+    }
+
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|target| *target == self)
+            .unwrap_or(0)
+    }
+
+    pub fn from_index(index: usize) -> Self {
+        Self::ALL[index.min(Self::ALL.len() - 1)]
+    }
+}
+
+/// Progress a packaging command line has reached so far.
+///
+/// The panel binds its animation to these markers instead of a timer, so the
+/// progress only moves when the build actually does something.
+pub fn packaging_progress(output: &str) -> Option<f32> {
+    const MARKERS: [(&str, f32); 12] = [
+        ("New-Item", 0.08),
+        ("Compiling", 0.35),
+        ("go build", 0.4),
+        ("gcc ", 0.4),
+        ("g++ ", 0.4),
+        ("PyInstaller", 0.45),
+        ("javac ", 0.4),
+        ("Finished", 0.62),
+        ("Compress-Archive", 0.78),
+        ("makeappx", 0.88),
+        ("MakeAppx", 0.88),
+        ("pack /d", 0.9),
+    ];
+    let mut progress: Option<f32> = None;
+    for line in output.lines() {
+        for (needle, value) in MARKERS {
+            if line.contains(needle) {
+                progress = Some(progress.map_or(value, |current: f32| current.max(value)));
+            }
+        }
+    }
+    progress
+}
+
+/// One produced artifact, or one that failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtifactReport {
+    pub target: PackageTarget,
+    pub path: String,
+    pub bytes: u64,
+    pub seconds: u64,
+    pub ok: bool,
+    /// Command that failed, when the artifact is missing.
+    pub failed_command: Option<String>,
+}
+
+impl ArtifactReport {
+    /// One line of the report written next to the artifacts.
+    pub fn line(&self) -> String {
+        if self.ok {
+            format!(
+                "{}: {} · {} · {}s",
+                self.target.label(),
+                self.path,
+                format_bytes(self.bytes),
+                self.seconds
+            )
+        } else {
+            format!(
+                "{}: FAILED after {}s · {}",
+                self.target.label(),
+                self.seconds,
+                self.failed_command.as_deref().unwrap_or("unknown command")
+            )
+        }
+    }
+}
+
+/// Human readable byte size.
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Report file written into the package directory.
+pub const PACKAGE_REPORT_FILE: &str = "BUILD-RESULT.txt";
+
+/// Full report of one packaging run.
+pub fn packaging_report(reports: &[ArtifactReport], project: &str) -> String {
+    let mut text = format!("TC-IDE packaging report for {project}\n");
+    for report in reports {
+        text.push_str(&report.line());
+        text.push('\n');
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,6 +721,79 @@ mod tests {
         let command = task_command(&facts, true);
         assert!(command.contains("No build task configured"));
         assert!(task_command(&facts, false).contains("No run task configured"));
+    }
+
+    #[test]
+    fn package_targets_describe_their_format_and_system() {
+        assert_eq!(PackageTarget::PortableZip.extension(), "zip");
+        assert_eq!(PackageTarget::Msix.extension(), "msix");
+        assert_eq!(PackageTarget::Deb.extension(), "deb");
+        assert_eq!(PackageTarget::AppImage.extension(), "AppImage");
+        assert_eq!(PackageTarget::Dmg.extension(), "dmg");
+        assert_eq!(PackageTarget::Deb.native_system(), Some("linux"));
+        assert_eq!(PackageTarget::Dmg.native_system(), Some("macos"));
+        assert_eq!(PackageTarget::Msix.native_system(), Some("windows"));
+        assert_eq!(PackageTarget::from_index(2), PackageTarget::Msix);
+        assert_eq!(PackageTarget::from_index(99), PackageTarget::Dmg);
+        assert_eq!(
+            PackageTarget::ALL[PackageTarget::Msix.index()],
+            PackageTarget::Msix
+        );
+        assert_eq!(
+            PackageTarget::WindowsExecutable.artifact_name("demo"),
+            "demo.exe"
+        );
+    }
+
+    #[test]
+    fn packaging_progress_follows_the_markers_in_the_output() {
+        assert_eq!(packaging_progress("PS C:\\demo>"), None);
+        let started = packaging_progress("New-Item -ItemType Directory -Force '.tc-ide-packages'");
+        assert_eq!(started, Some(0.08));
+        let compiling = packaging_progress("   Compiling tc-ide v0.2.0");
+        assert_eq!(compiling, Some(0.35));
+        let finished = packaging_progress("    Finished release [optimized] target(s)");
+        assert_eq!(finished, Some(0.62));
+        let packed =
+            packaging_progress("   Compiling x\n    Finished\nMakeAppx pack /d stage /p out.msix");
+        assert_eq!(packed, Some(0.9));
+        // Progress never goes backwards when an earlier marker repeats.
+        assert_eq!(
+            packaging_progress("MakeAppx pack /d s /p o\n   Compiling again"),
+            Some(0.9)
+        );
+    }
+
+    #[test]
+    fn artifact_reports_name_the_path_size_duration_or_failure() {
+        let zip = ArtifactReport {
+            target: PackageTarget::PortableZip,
+            path: ".tc-ide-packages/demo.zip".into(),
+            bytes: 2 * 1024 * 1024,
+            seconds: 12,
+            ok: true,
+            failed_command: None,
+        };
+        assert_eq!(
+            zip.line(),
+            "Portable ZIP: .tc-ide-packages/demo.zip · 2.0 MB · 12s"
+        );
+        let failed = ArtifactReport {
+            target: PackageTarget::Msix,
+            path: ".tc-ide-packages/demo.msix".into(),
+            bytes: 0,
+            seconds: 3,
+            ok: false,
+            failed_command: Some("MakeAppx pack /d stage /p demo.msix".into()),
+        };
+        assert_eq!(
+            failed.line(),
+            "MSIX: FAILED after 3s · MakeAppx pack /d stage /p demo.msix"
+        );
+        let report = packaging_report(&[zip, failed.clone()], "demo");
+        assert!(report.contains("demo.zip"));
+        assert!(report.contains("FAILED"));
+        assert!(report.starts_with("TC-IDE packaging report for demo"));
     }
 
     #[test]

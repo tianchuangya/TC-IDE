@@ -569,6 +569,55 @@ pub fn open_in_explorer(window: Hwnd, path: &Path) -> bool {
     shell_execute(window, &path.to_string_lossy(), None)
 }
 
+/// Pick the certificate used to sign an MSIX package.
+///
+/// The private key is never generated, copied or uploaded here: the user picks
+/// an existing `pfx` and the SDK signs with it.
+pub fn choose_signing_certificate(window: Hwnd) -> Option<PathBuf> {
+    let mut file = [0_u16; 32_768];
+    let title = wide("Choose a code signing certificate");
+    let filter = "Certificates\0*.pfx;*.p12\0All files\0*.*\0\0"
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    let mut dialog = OpenFileName {
+        struct_size: std::mem::size_of::<OpenFileName>() as Dword,
+        owner: window,
+        instance: ptr::null_mut(),
+        filter: filter.as_ptr(),
+        custom_filter: ptr::null_mut(),
+        max_custom_filter: 0,
+        filter_index: 1,
+        file: file.as_mut_ptr(),
+        max_file: file.len() as Dword,
+        file_title: ptr::null_mut(),
+        max_file_title: 0,
+        initial_directory: ptr::null(),
+        title: title.as_ptr(),
+        flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST,
+        file_offset: 0,
+        file_extension: 0,
+        default_extension: ptr::null(),
+        custom_data: 0,
+        hook: ptr::null_mut(),
+        template_name: ptr::null(),
+        reserved: ptr::null_mut(),
+        reserved_dword: 0,
+        flags_ex: 0,
+    };
+    if unsafe { GetOpenFileNameW(&mut dialog) } == 0 {
+        return None;
+    }
+    let length = file
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(file.len());
+    if length == 0 {
+        None
+    } else {
+        Some(PathBuf::from(String::from_utf16_lossy(&file[..length])))
+    }
+}
+
 pub fn open_external_terminal(window: Hwnd, path: &Path) -> bool {
     let display = path.to_string_lossy();
     let quoted = format!("-d \"{}\"", display.replace('"', "\\\""));

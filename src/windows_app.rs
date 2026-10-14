@@ -290,6 +290,8 @@ struct WindowsAppState {
     package_marker: String,
     package_failure_marker: String,
     package_reveal_pending: bool,
+    package_failed_command: Option<String>,
+    signing_certificate: Option<PathBuf>,
     terminal_open: bool,
     terminal_motion: f32,
     terminal_velocity: f32,
@@ -540,6 +542,8 @@ impl WindowsAppState {
             package_marker: String::new(),
             package_failure_marker: String::new(),
             package_reveal_pending: false,
+            package_failed_command: None,
+            signing_certificate: None,
             terminal_open: false,
             terminal_motion: 0.0,
             terminal_velocity: 0.0,
@@ -1539,13 +1543,20 @@ impl WindowsAppState {
         } else {
             String::new()
         };
+        let signing = match (&self.signing_certificate, self.package_targets[2]) {
+            (Some(certificate), true) => format!(
+                "; $signtool=(Get-Command signtool.exe -ErrorAction SilentlyContinue).Source; if(!$signtool){{$signtool=Get-ChildItem \"${{env:ProgramFiles(x86)}}\\Windows Kits\\10\\bin\\*\\x64\\signtool.exe\" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName}}; if(!$signtool){{throw 'Windows SDK signtool.exe is not installed'}}; & $signtool sign /fd SHA256 /f '{}' '.tc-ide-packages\\{project}.msix'",
+                certificate.to_string_lossy()
+            ),
+            _ => String::new(),
+        };
         self.package_marker = format!("__TC_PACKAGE_DONE_{}__", self.started.elapsed().as_nanos());
         self.package_failure_marker = format!(
             "__TC_PACKAGE_FAILED_{}__",
             self.started.elapsed().as_nanos()
         );
         let command = format!(
-            "$ErrorActionPreference='Stop'; try{{New-Item -ItemType Directory -Force '{stage}' | Out-Null; {build}{zip}{msix}; Write-Output '{}'}}catch{{Write-Host $_.Exception.Message; Write-Output '{}'}}",
+            "$ErrorActionPreference='Stop'; try{{New-Item -ItemType Directory -Force '{stage}' | Out-Null; {build}{zip}{msix}{signing}; Write-Output '{}'}}catch{{Write-Host $_.Exception.Message; Write-Output '{}'}}",
             self.package_marker, self.package_failure_marker
         );
         if let Some(tab) = self.terminals.first() {
@@ -1557,6 +1568,92 @@ impl WindowsAppState {
             self.package_open = false;
             self.status = "Packaging started in the Build terminal".into();
         }
+    }
+
+    /// Progress the packaging output has actually reached.
+    fn package_output_progress(&self) -> Option<f32> {
+        let index = self.terminals.iter().position(|tab| tab.name == "Build")?;
+        let output = self.terminals.get(index).and_then(|tab| {
+            tab.session
+                .view
+                .lock()
+                .ok()
+                .map(|view| view.lines.join("\n"))
+        })?;
+        workspace_core::packaging_progress(&output)
+    }
+
+    /// Artifacts the last packaging run should have produced.
+    fn package_reports(
+        &self,
+        failed_command: Option<String>,
+    ) -> Vec<workspace_core::ArtifactReport> {
+        let project = self
+            .project_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "TC-IDE-project".into())
+            .replace(['\'', '"'], "");
+        let seconds = self
+            .package_started
+            .map(|started| started.elapsed().as_secs())
+            .unwrap_or(0);
+        let mut targets = Vec::new();
+        if self.package_targets[0] {
+            targets.push(workspace_core::PackageTarget::WindowsExecutable);
+        }
+        if self.package_targets[1] {
+            targets.push(workspace_core::PackageTarget::PortableZip);
+        }
+        if self.package_targets[2] {
+            targets.push(workspace_core::PackageTarget::Msix);
+        }
+        targets
+            .into_iter()
+            .map(|target| {
+                let path = self
+                    .project_root
+                    .join(".tc-ide-packages")
+                    .join(target.artifact_name(&project));
+                let bytes = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+                let ok = bytes > 0;
+                workspace_core::ArtifactReport {
+                    target,
+                    path: path.to_string_lossy().into_owned(),
+                    bytes,
+                    seconds,
+                    ok,
+                    failed_command: if ok {
+                        None
+                    } else {
+                        Some(
+                            failed_command
+                                .clone()
+                                .unwrap_or_else(|| "the packaging command".to_string()),
+                        )
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// Write BUILD-RESULT.txt next to the artifacts and report the outcome.
+    fn finish_package(&mut self, failed_command: Option<String>) {
+        let reports = self.package_reports(failed_command);
+        let project = self
+            .project_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "TC-IDE-project".into());
+        let report = workspace_core::packaging_report(&reports, &project);
+        let directory = self.project_root.join(".tc-ide-packages");
+        let _ = fs::write(directory.join(workspace_core::PACKAGE_REPORT_FILE), &report);
+        let failed = reports.iter().filter(|report| !report.ok).count();
+        self.status = if failed == 0 {
+            format!("Packaging finished: {}", reports[0].line())
+        } else {
+            format!("Packaging failed for {failed} target(s); see BUILD-RESULT.txt")
+        };
     }
 
     fn ensure_terminal(&mut self) {
@@ -1974,16 +2071,26 @@ impl WindowsAppState {
             dt,
         );
         if self.package_running {
-            self.package_progress = self
-                .package_started
-                .map(|started| (started.elapsed().as_secs_f32() / 8.0).min(0.9))
-                .unwrap_or(0.0);
+            // Follow the real build stages; never advance without progress.
+            let reported = self.package_output_progress().unwrap_or(0.0);
+            self.package_progress = self.package_progress.max(reported).min(0.95);
             let done = self.terminals.first().is_some_and(|tab| {
                 tab.session.view.lock().ok().is_some_and(|view| {
                     view.lines
                         .iter()
                         .any(|line| line.contains(&self.package_marker))
                         || view.current.contains(&self.package_marker)
+                })
+            });
+            let failure_line = self.terminals.first().and_then(|tab| {
+                tab.session.view.lock().ok().and_then(|view| {
+                    view.lines
+                        .iter()
+                        .rev()
+                        .find(|line| {
+                            !line.contains(&self.package_failure_marker) && !line.is_empty()
+                        })
+                        .cloned()
                 })
             });
             let failed = self.terminals.first().is_some_and(|tab| {
@@ -1995,15 +2102,20 @@ impl WindowsAppState {
                 })
             });
             if failed {
+                self.package_failed_command = failure_line;
+            }
+            if failed {
                 self.package_running = false;
                 self.package_progress = 0.0;
                 self.package_started = None;
-                self.status = "Packaging failed; see the Build terminal for details".into();
+                let command = self.package_failed_command.clone();
+                self.finish_package(command);
             } else if done {
                 self.package_running = false;
                 self.package_progress = 1.0;
                 self.package_reveal_pending = true;
                 self.package_started = Some(Instant::now());
+                self.finish_package(None);
                 self.status = "Packaging finished; opening the artifact folder".into();
             }
         } else if self.package_progress >= 1.0
@@ -2463,6 +2575,12 @@ fn render_window(window: Hwnd) {
                 .map(|document| document.title())
                 .collect::<Vec<_>>();
             let active_tab = app.session.active();
+            let signing_certificate = app
+                .signing_certificate
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
             let ai_cache_summary = format!(
                 "runtime cache: {} entries · {}",
                 app.runtime_cache.entries().len(),
@@ -2570,6 +2688,7 @@ fn render_window(window: Hwnd) {
                 pointer_x: app.pointer_x,
                 package_motion: app.package_motion,
                 package_targets: app.package_targets,
+                signing_certificate: &signing_certificate,
                 package_running: app.package_running,
                 package_progress: app.package_progress,
                 background_path: background_path.as_deref(),
@@ -4275,7 +4394,7 @@ unsafe extern "system" fn window_proc(
                 && x as f32 >= package_left
                 && x as f32 <= area.right as f32 - 14.0 * scale
                 && y as f32 >= package_top
-                && y as f32 <= package_top + 214.0 * scale
+                && y as f32 <= package_top + 240.0 * scale
             {
                 APP.with(|cell| {
                     let mut app = cell.borrow_mut();
@@ -4286,7 +4405,17 @@ unsafe extern "system" fn window_proc(
                             app.package_targets[index] = !app.package_targets[index];
                             app.save_package_targets();
                         }
-                    } else if local_y >= 174.0 * scale {
+                    } else if (166.0 * scale..196.0 * scale).contains(&local_y) {
+                        if app.signing_certificate.is_some() {
+                            app.signing_certificate = None;
+                            app.status = "MSIX signing certificate cleared".into();
+                        } else if let Some(path) = platform::choose_signing_certificate(window) {
+                            app.status = format!("MSIX signing certificate: {}", path.display());
+                            app.signing_certificate = Some(path);
+                        } else {
+                            app.status = "No signing certificate selected".into();
+                        }
+                    } else if local_y >= 200.0 * scale {
                         app.start_package();
                     }
                 });
