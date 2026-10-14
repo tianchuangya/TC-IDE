@@ -1,4 +1,8 @@
-//! Shared language server protocol layer.
+//! Shared JSON-RPC and language server protocol layer.
+//!
+//! The wire format here — content length framing, the tiny JSON readers and
+//! message classification — is the same one debug adapters use, so `dap_core`
+//! builds on this module instead of duplicating it.
 //!
 //! A language server client is mostly framing, request building and response
 //! parsing; only the transport is platform specific. Keeping the protocol here
@@ -721,45 +725,68 @@ pub fn json_objects(text: &str, key: &str) -> Vec<String> {
 }
 
 /// First string value of a key inside a JSON document.
+///
+/// Keeps looking when a key name also appears as a value, which happens as soon
+/// as a document contains `"type":"event"` next to an `"event":"stopped"`.
 pub fn json_string(text: &str, key: &str) -> Option<String> {
     let needle = format!("\"{key}\"");
-    let position = text.find(&needle)?;
-    let rest = text[position + needle.len()..].trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    let rest = rest.strip_prefix('"')?;
-    let mut value = String::new();
-    let mut escaped = false;
-    for character in rest.chars() {
-        if escaped {
+    let mut search = 0;
+    while let Some(found) = text[search..].find(&needle) {
+        let start = search + found + needle.len();
+        search = start;
+        let rest = text[start..].trim_start();
+        let Some(rest) = rest.strip_prefix(':') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('"') else {
+            continue;
+        };
+        let mut value = String::new();
+        let mut escaped = false;
+        for character in rest.chars() {
+            if escaped {
+                match character {
+                    'n' => value.push('\n'),
+                    'r' => value.push('\r'),
+                    't' => value.push('\t'),
+                    other => value.push(other),
+                }
+                escaped = false;
+                continue;
+            }
             match character {
-                'n' => value.push('\n'),
-                'r' => value.push('\r'),
-                't' => value.push('\t'),
+                '\\' => escaped = true,
+                '"' => return Some(value),
                 other => value.push(other),
             }
-            escaped = false;
-            continue;
         }
-        match character {
-            '\\' => escaped = true,
-            '"' => return Some(value),
-            other => value.push(other),
-        }
+        return Some(value);
     }
-    Some(value)
+    None
 }
 
 /// First number value of a key inside a JSON document.
 pub fn json_number(text: &str, key: &str) -> Option<u64> {
     let needle = format!("\"{key}\"");
-    let position = text.find(&needle)?;
-    let rest = text[position + needle.len()..].trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    let digits = rest
-        .chars()
-        .take_while(|character| character.is_ascii_digit())
-        .collect::<String>();
-    digits.parse().ok()
+    let mut search = 0;
+    while let Some(found) = text[search..].find(&needle) {
+        let start = search + found + needle.len();
+        search = start;
+        let rest = text[start..].trim_start();
+        let Some(rest) = rest.strip_prefix(':') else {
+            continue;
+        };
+        let digits = rest
+            .trim_start()
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect::<String>();
+        if let Ok(value) = digits.parse() {
+            return Some(value);
+        }
+    }
+    None
 }
 
 /// Diagnostics from a `textDocument/publishDiagnostics` notification.

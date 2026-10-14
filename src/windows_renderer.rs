@@ -87,6 +87,8 @@ pub struct WindowsScene<'a> {
     pub tab_dirty: Vec<bool>,
     /// `(line, is_error)` pairs the gutter marks.
     pub diagnostic_lines: &'a [(usize, bool)],
+    /// Breakpoint lines, relative to the first visible line.
+    pub breakpoint_lines: &'a [usize],
     pub graph_nodes: &'a [graph_core::GraphNode],
     /// Absolute index of the first drawn node.
     pub graph_first_index: usize,
@@ -505,6 +507,23 @@ impl DirectEditorRenderer {
         // tree stay put, and the column is clipped while it is drawn.
         let scroll_x = scene.scroll_columns as f32 * self.code_cell * scale;
         let code_origin = tree_w - scroll_x;
+        // Breakpoints the user set, drawn as dots before the code column.
+        for line in scene.breakpoint_lines.iter().take(200) {
+            let top = code_top + *line as f32 * line_step;
+            if top < header_h || top > body_bottom {
+                continue;
+            }
+            unsafe {
+                Self::fill(
+                    &target_base,
+                    &literal,
+                    tree_w + 26.0 * scale,
+                    top + 5.0 * scale,
+                    tree_w + 34.0 * scale,
+                    top + 13.0 * scale,
+                )
+            };
+        }
         // Diagnostics from the language server, marked in the gutter.
         for (line, is_error) in scene.diagnostic_lines.iter().take(200) {
             let top = code_top + *line as f32 * line_step;
