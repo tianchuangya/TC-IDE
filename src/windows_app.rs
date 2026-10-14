@@ -2018,6 +2018,62 @@ impl WindowsAppState {
         }
     }
 
+    /// Format the active file with the formatter for its language.
+    fn format_current_file(&mut self) {
+        let language = editor_core::language_for_file(&self.file_name);
+        let name = self
+            .file_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.file_name.clone());
+        let Some(command) = workspace_core::format_command(language, &name) else {
+            self.status = format!("No formatter is configured for {language}");
+            return;
+        };
+        self.terminal_open = true;
+        self.ensure_terminal();
+        if let Some(tab) = self.terminals.last() {
+            let _ = tab.session.write(&format!("{command}\r"));
+            self.active_terminal = self.terminals.len() - 1;
+        }
+        if let Some(path) = self.file_path.clone() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                let mut lines = content.lines().map(str::to_string).collect::<Vec<_>>();
+                if lines.is_empty() {
+                    lines.push(String::new());
+                }
+                self.lines = lines;
+                self.clamp_caret();
+                self.status = format!("Formatted {} with {command}", path.display());
+                return;
+            }
+        }
+        self.status = format!("Formatting with {command}");
+    }
+
+    /// Start the debug adapter that fits the active file, when one is known.
+    fn start_debug_adapter(&mut self) {
+        let language = editor_core::language_for_file(&self.file_name);
+        let name = self
+            .file_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.file_name.clone());
+        let Some((tool, command)) = workspace_core::debug_adapter_for(language, &name) else {
+            self.status = format!("No debug adapter is configured for {language}");
+            return;
+        };
+        self.terminal_open = true;
+        self.ensure_terminal();
+        if let Some(tab) = self.terminals.last() {
+            let _ = tab.session.write(&format!("{command}\r"));
+            self.active_terminal = self.terminals.len() - 1;
+        }
+        self.status = format!("Started {tool} in the terminal; adapter logs appear there");
+    }
+
     fn probe_extension_tool(&mut self, label: &str, command: &str) {
         self.terminal_open = true;
         self.ensure_terminal();
@@ -4537,6 +4593,14 @@ unsafe extern "system" fn window_proc(
                             } else if (240.0..290.0).contains(&local_y) {
                                 app.light_theme = true;
                                 app.status = "Light theme applied".into();
+                            }
+                        } else if matches!(app.extension_category, 2 | 3) && (348.0..392.0)
+                            .contains(&((y as f32 - top) / scale))
+                        {
+                            if app.extension_category == 2 {
+                                app.start_debug_adapter();
+                            } else {
+                                app.format_current_file();
                             }
                         } else if matches!(app.extension_category, 2 | 3) {
                             let local_y = (y as f32 - top) / scale;

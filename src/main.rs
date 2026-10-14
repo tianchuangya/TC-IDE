@@ -4,6 +4,7 @@ mod extension_core;
 mod graph_core;
 #[cfg(target_os = "linux")]
 mod linux_app;
+mod lsp_core;
 #[cfg(target_os = "macos")]
 mod macos_app;
 mod session_core;

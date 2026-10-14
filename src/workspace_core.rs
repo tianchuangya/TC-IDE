@@ -292,6 +292,50 @@ pub fn project_template(
     }
 }
 
+/// Formatter that fits a language.
+pub fn formatter_for(language: &str) -> Option<(&'static str, &'static str)> {
+    match language {
+        "Rust" => Some(("rustfmt", "rustfmt")),
+        "C" | "C++" => Some(("clang-format", "clang-format -i")),
+        "Python" => Some(("ruff", "ruff format")),
+        "JavaScript" | "TypeScript" | "JSON" => Some(("biome", "biome format --write")),
+        "Go" => Some(("gofmt", "gofmt -w")),
+        _ => None,
+    }
+}
+
+/// Command that formats the active file, or `None` when no formatter is known.
+///
+/// Formatting runs in the terminal so the user sees the tool output and any
+/// error, and the file is reloaded afterwards.
+pub fn format_command(language: &str, file: &str) -> Option<String> {
+    let (_, command) = formatter_for(language)?;
+    let quoted = file.replace('"', "\\\"");
+    Some(format!("{command} \"{quoted}\""))
+}
+
+/// Probe command that proves a formatter or debugger is really installed.
+pub fn tool_probe_command(tool: &str) -> String {
+    format!("{tool} --version")
+}
+
+/// Debug adapters TC-IDE can launch through a language server or the terminal.
+pub fn debug_adapter_for(language: &str, file: &str) -> Option<(&'static str, String)> {
+    match language {
+        "Python" => Some((
+            "debugpy",
+            format!("python -m debugpy --listen 5678 --wait-for-client \"{file}\""),
+        )),
+        "C" | "C++" => Some((
+            "lldb-dap",
+            format!("lldb-dap --one-line \"target create \\\"{file}\\\"\""),
+        )),
+        "Rust" => Some(("lldb-dap", format!("lldb-dap -- \"{file}\""))),
+        "Go" => Some(("dlv", "dlv dap --listen=127.0.0.1:5678".to_string())),
+        _ => None,
+    }
+}
+
 /// What the workspace knows about a project when it builds a task command.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ProjectFacts {
@@ -794,6 +838,30 @@ mod tests {
         assert!(report.contains("demo.zip"));
         assert!(report.contains("FAILED"));
         assert!(report.starts_with("TC-IDE packaging report for demo"));
+    }
+
+    #[test]
+    fn formatters_and_debug_adapters_follow_the_language() {
+        assert_eq!(formatter_for("Rust").map(|(tool, _)| tool), Some("rustfmt"));
+        assert_eq!(
+            format_command("Rust", "src/main.rs").as_deref(),
+            Some("rustfmt \"src/main.rs\"")
+        );
+        assert_eq!(
+            format_command("Python", "app.py").as_deref(),
+            Some("ruff format \"app.py\"")
+        );
+        assert!(format_command("Markdown", "README.md").is_none());
+        assert_eq!(tool_probe_command("clang-format"), "clang-format --version");
+
+        let (tool, command) = debug_adapter_for("Python", "app.py").expect("adapter");
+        assert_eq!(tool, "debugpy");
+        assert!(command.contains("--wait-for-client"));
+        assert_eq!(
+            debug_adapter_for("Rust", "target/debug/demo").map(|(tool, _)| tool),
+            Some("lldb-dap")
+        );
+        assert!(debug_adapter_for("Markdown", "README.md").is_none());
     }
 
     #[test]

@@ -2194,6 +2194,38 @@ impl DirectEditorRenderer {
                             );
                         }
                     }
+                    // One real action per category, for the file that is open.
+                    let action = if scene.extension_category == 2 {
+                        format!("Start debug adapter for {}", scene.file_name)
+                    } else {
+                        format!("Format {}", scene.file_name)
+                    };
+                    let row_top = top + 348.0 * scale;
+                    unsafe {
+                        Self::rounded(
+                            &target_base,
+                            &selection,
+                            D2D_RECT_F {
+                                left: content_left,
+                                top: row_top,
+                                right: content_left + 520.0 * scale,
+                                bottom: row_top + 44.0 * scale,
+                            },
+                            8.0 * scale,
+                        );
+                        Self::text(
+                            &target_base,
+                            &self.small_format,
+                            &accent,
+                            &action,
+                            D2D_RECT_F {
+                                left: content_left + 16.0 * scale,
+                                top: row_top + 12.0 * scale,
+                                right: content_left + 500.0 * scale,
+                                bottom: row_top + 40.0 * scale,
+                            },
+                        );
+                    }
                 }
                 if scene.extension_category == 4 {
                     for (index, (label, value)) in [
