@@ -180,10 +180,10 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 
 ### P1：扩展与 AI
 
-- [x] 扩展安装：extension_core 已实现下载/校验/解包/卸载命令与运行时缓存清单，Windows 面板执行真实命令并校验摘要；目录需用户提供（<项目>/.tc-ide-catalog.conf），仓库不内置编造的 URL 与校验和
+- [~] 扩展安装：extension_core 已实现下载/校验/解包/卸载命令与运行时缓存清单，Windows 面板执行真实命令并校验摘要；**目录需用户提供（<项目>/.tc-ide-catalog.conf），仓库不内置编造的 URL 与校验和**，升级/卸载的界面入口也还没有
 - [x] 用户级运行时缓存清单：记录 id/版本/校验和/字节数/目录，支持复用、修剪与序列化（Windows 已接入，Linux 待接入）。
-- [x] Debugger/Formatter：新增“格式化当前文件”（真实调用 rustfmt/clang-format/ruff/biome/gofmt 并刷新编辑器）与“启动调试适配器”（debugpy/lldb-dap/dlv）；DAP 界面（断点/调用栈/变量）与选区格式化仍未实现
-- [x] AI：新增提问框、流式发送、连接测试、--max-time 超时、终端内 Ctrl+C 取消与按状态码的可读错误；回答显示在终端，尚无独立聊天面板与会话历史
+- [~] Debugger/Formatter：新增“格式化当前文件”（真实调用 rustfmt/clang-format/ruff/biome/gofmt 并刷新编辑器）与“启动调试适配器”（debugpy/lldb-dap/dlv）；**DAP 界面（断点/调用栈/变量）与选区格式化仍未实现**
+- [~] AI：新增提问框、流式发送、连接测试、--max-time 超时、终端内 Ctrl+C 取消与按状态码的可读错误；**回答显示在终端，尚无独立聊天面板与会话历史**
 - [x] API 请求使用用户选择的 Endpoint；Key 仅驻内存并通过子进程环境变量 TC_IDE_AI_KEY 传递，不出现在命令行、配置文件或日志。
 
 ### P1：打包与动画
@@ -220,7 +220,8 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 
 ## 5.1 仍然开着的队列（2026-10-15 之后）
 
-上面勾选项里带 `[~]` 的表示“已做一半”，下面是仍然需要继续的具体工作，按建议顺序：
+
+图例：`[x]` 已完成，`[~]` 只完成了一部分（详情写在条目里）。下面是仍然需要继续的具体工作，按建议顺序：
 
 1. **Windows 实机验收**：按 `docs/REAL-MACHINE-CHECKLIST.md` 逐项确认，把结果写回本文件与
    `docs/KNOWN-ISSUES.md`。这是当前唯一无法由 CI 或 Linux 本地替代的部分。
