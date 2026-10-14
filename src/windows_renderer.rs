@@ -75,6 +75,10 @@ pub struct WindowsScene<'a> {
     pub ai_field_focused: Option<usize>,
     pub symbols: &'a [SymbolOccurrence],
     pub hovered_symbol: Option<&'a SymbolOccurrence>,
+    /// Titles of the open documents.
+    pub tabs: &'a [String],
+    pub active_tab: usize,
+    pub tab_dirty: Vec<bool>,
     pub graph_nodes: &'a [graph_core::GraphNode],
     /// Absolute index of the first drawn node.
     pub graph_first_index: usize,
@@ -1146,6 +1150,66 @@ impl DirectEditorRenderer {
                 },
             )
         };
+        // Document tabs across the editor header.
+        {
+            let tab_width = 132.0 * scale;
+            let tab_top = header_h + 4.0 * scale;
+            let tab_bottom = header_h + 30.0 * scale;
+            let mut tab_x = tree_w + 16.0 * scale;
+            for (index, title) in scene.tabs.iter().enumerate() {
+                if tab_x + tab_width > editor_right - 8.0 * scale {
+                    break;
+                }
+                let active = index == scene.active_tab;
+                unsafe {
+                    Self::rounded(
+                        &target_base,
+                        if active { &selection } else { &raised },
+                        D2D_RECT_F {
+                            left: tab_x,
+                            top: tab_top,
+                            right: tab_x + tab_width - 6.0 * scale,
+                            bottom: tab_bottom,
+                        },
+                        6.0 * scale,
+                    )
+                };
+                let dirty = scene.tab_dirty.get(index).copied().unwrap_or(false);
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        if active {
+                            &bright
+                        } else if dirty {
+                            &accent
+                        } else {
+                            &muted
+                        },
+                        title,
+                        D2D_RECT_F {
+                            left: tab_x + 10.0 * scale,
+                            top: tab_top + 4.0 * scale,
+                            right: tab_x + tab_width - 24.0 * scale,
+                            bottom: tab_bottom,
+                        },
+                    );
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        &muted,
+                        "x",
+                        D2D_RECT_F {
+                            left: tab_x + tab_width - 22.0 * scale,
+                            top: tab_top + 4.0 * scale,
+                            right: tab_x + tab_width - 8.0 * scale,
+                            bottom: tab_bottom,
+                        },
+                    )
+                };
+                tab_x += tab_width;
+            }
+        }
         let path_progress = (scene.animation_seconds / 0.65).clamp(0.0, 1.0);
         let path_x = graph_core::path_x(editor_right, scale);
         let first_y = header_h + graph_core::FIRST_ROW_TOP * scale;

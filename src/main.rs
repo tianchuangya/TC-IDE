@@ -4,6 +4,7 @@ mod graph_core;
 mod linux_app;
 #[cfg(target_os = "macos")]
 mod macos_app;
+mod session_core;
 mod terminal_core;
 #[cfg(target_os = "windows")]
 mod windows_app;

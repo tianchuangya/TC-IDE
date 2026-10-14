@@ -1,7 +1,7 @@
 #![allow(clippy::upper_case_acronyms)]
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::c_void;
 use std::fs;
 use std::path::PathBuf;
@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use crate::editor_core;
 use crate::graph_core;
+use crate::session_core;
 use crate::terminal_core;
 use crate::workspace_core;
 
@@ -80,6 +81,9 @@ const DT_CALCRECT: Uint = 0x0400;
 const DT_SINGLELINE: Uint = 0x0020;
 const DT_NOPREFIX: Uint = 0x0800;
 const DT_RIGHT: Uint = 0x0002;
+const MB_YESNO: Uint = 0x0004;
+const MB_ICONWARNING: Uint = 0x0030;
+const IDYES: i32 = 6;
 const TRANSPARENT_MODE: i32 = 1;
 const DEFAULT_CHARSET: u8 = 1;
 const OUT_TT_PRECIS: u8 = 4;
@@ -106,6 +110,18 @@ const NOTICE_SECONDS: f32 = 1.8;
 struct TextPosition {
     line: usize,
     column: usize,
+}
+
+/// Buffer of a document that is open but not active.
+struct StoredBuffer {
+    lines: Vec<String>,
+    file_name: String,
+    file_path: Option<PathBuf>,
+    caret_line: usize,
+    caret_column: usize,
+    selection_anchor: Option<TextPosition>,
+    undo_stack: Vec<EditorSnapshot>,
+    redo_stack: Vec<EditorSnapshot>,
 }
 
 #[derive(Clone)]
@@ -247,6 +263,9 @@ struct WindowsAppState {
     graph_scope: Option<graph_core::GraphScope>,
     graph_folded: Vec<String>,
     graph_relation: graph_core::GraphRelation,
+    session: session_core::Session,
+    stored_buffers: BTreeMap<usize, StoredBuffer>,
+    pending_close: Option<usize>,
     graph_selected: Option<usize>,
     graph_keyboard_active: bool,
     background_path: Option<PathBuf>,
@@ -364,6 +383,33 @@ impl WindowsAppState {
         }
     }
 
+    /// Restore the previous session: project, recent projects and open files.
+    fn restore_session(&mut self) {
+        let mut session = load_session();
+        session.prune_recent_projects(|path| path.is_dir());
+        if let Some(project) = session.project().cloned() {
+            if project.is_dir() {
+                self.open_project(project);
+            }
+        }
+        for path in session.restorable_documents() {
+            if path.is_file() {
+                self.open_file(path);
+            }
+        }
+        self.session = session;
+        if let Some(project) = self.session.project().cloned() {
+            self.session.set_project(Some(project));
+        }
+        if !self.session.is_empty() {
+            self.status = format!(
+                "Restored {} document(s) from the previous session",
+                self.session.documents().len()
+            );
+        }
+        save_session(&self.session);
+    }
+
     fn new() -> Self {
         let preferences = preferences::load();
         let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -462,6 +508,9 @@ impl WindowsAppState {
             graph_scope: None,
             graph_folded: Vec::new(),
             graph_relation: graph_core::GraphRelation::Follow,
+            session: session_core::Session::default(),
+            stored_buffers: BTreeMap::new(),
+            pending_close: None,
             graph_selected: None,
             graph_keyboard_active: false,
             background_path: preferences.background_path.clone().map(PathBuf::from),
@@ -500,6 +549,128 @@ impl WindowsAppState {
             create_motion: 0.0,
             create_velocity: 0.0,
         }
+    }
+
+    /// Remember which document the active buffer belongs to.
+    fn active_document(&self) -> Option<usize> {
+        let index = self.session.active();
+        self.session.documents().get(index).map(|_| index)
+    }
+
+    /// Keep the active buffer and mark it unsaved.
+    fn mark_active_dirty(&mut self) {
+        if let Some(index) = self.active_document() {
+            self.session.mark_dirty(index, true);
+        }
+    }
+
+    /// Save the active buffer fields under its document index.
+    fn stash_active_buffer(&mut self) {
+        let Some(index) = self.active_document() else {
+            return;
+        };
+        let buffer = StoredBuffer {
+            lines: std::mem::take(&mut self.lines),
+            file_name: std::mem::take(&mut self.file_name),
+            file_path: self.file_path.take(),
+            caret_line: self.caret_line,
+            caret_column: self.caret_column,
+            selection_anchor: self.selection_anchor,
+            undo_stack: std::mem::take(&mut self.undo_stack),
+            redo_stack: std::mem::take(&mut self.redo_stack),
+        };
+        self.stored_buffers.insert(index, buffer);
+    }
+
+    /// Load a document into the active buffer, reading it from disk if needed.
+    fn load_document(&mut self, index: usize) {
+        if let Some(buffer) = self.stored_buffers.remove(&index) {
+            self.lines = buffer.lines;
+            self.file_name = buffer.file_name;
+            self.file_path = buffer.file_path;
+            self.caret_line = buffer.caret_line;
+            self.caret_column = buffer.caret_column;
+            self.selection_anchor = buffer.selection_anchor;
+            self.undo_stack = buffer.undo_stack;
+            self.redo_stack = buffer.redo_stack;
+        } else if let Some(document) = self.session.documents().get(index).cloned() {
+            self.file_name = document.name.clone();
+            self.file_path = document.path.clone();
+            self.lines = match document
+                .path
+                .as_ref()
+                .and_then(|path| fs::read_to_string(path).ok())
+            {
+                Some(content) => {
+                    let mut lines = content.lines().map(str::to_string).collect::<Vec<_>>();
+                    if lines.is_empty() {
+                        lines.push(String::new());
+                    }
+                    lines
+                }
+                None => vec![String::new()],
+            };
+            self.caret_line = 0;
+            self.caret_column = 0;
+            self.selection_anchor = None;
+            self.undo_stack.clear();
+            self.redo_stack.clear();
+        }
+        self.clamp_caret();
+        self.ime_composition.clear();
+        self.editing_comment = None;
+    }
+
+    /// Switch to another document, keeping the current buffer.
+    fn switch_document(&mut self, index: usize) -> bool {
+        if index == self.session.active() || index >= self.session.documents().len() {
+            return false;
+        }
+        self.stash_active_buffer();
+        self.session.activate(index);
+        self.load_document(index);
+        self.status = format!("Active document: {}", self.file_name);
+        true
+    }
+
+    /// Close a document, asking before discarding unsaved work.
+    fn close_document(&mut self, index: usize, window: Hwnd) {
+        if index >= self.session.documents().len() {
+            return;
+        }
+        if self.session.documents()[index].dirty {
+            let name = self.session.documents()[index].name.clone();
+            if !confirm_discard(window, &name) {
+                self.status = format!("Kept {name} open");
+                return;
+            }
+        }
+        let was_active = index == self.session.active();
+        if was_active && self.stored_buffers.contains_key(&index) {
+            self.stored_buffers.remove(&index);
+        } else if was_active {
+            // The active buffer belongs to this document; clear it before switching.
+            self.stored_buffers.remove(&index);
+        }
+        self.session.close(index);
+        let reindexed = std::mem::take(&mut self.stored_buffers);
+        self.stored_buffers = reindexed
+            .into_iter()
+            .map(|(key, buffer)| (if key > index { key - 1 } else { key }, buffer))
+            .collect();
+        if self.session.is_empty() {
+            self.lines = vec![String::new()];
+            self.file_name = "untitled".into();
+            self.file_path = None;
+            self.caret_line = 0;
+            self.caret_column = 0;
+            self.undo_stack.clear();
+            self.redo_stack.clear();
+            self.status = "All documents closed".into();
+            return;
+        }
+        self.load_document(self.session.active());
+        self.status = format!("Closed document; active: {}", self.file_name);
     }
 
     fn clamp_caret(&mut self) {
@@ -570,6 +741,7 @@ impl WindowsAppState {
             self.undo_stack.remove(0);
         }
         self.redo_stack.clear();
+        self.mark_active_dirty();
     }
 
     fn selection_range(&self) -> Option<(TextPosition, TextPosition)> {
@@ -797,6 +969,7 @@ impl WindowsAppState {
     }
 
     fn undo(&mut self) {
+        self.mark_active_dirty();
         if let Some(snapshot) = self.undo_stack.pop() {
             self.redo_stack.push(self.snapshot());
             self.restore(snapshot);
@@ -805,6 +978,7 @@ impl WindowsAppState {
     }
 
     fn redo(&mut self) {
+        self.mark_active_dirty();
         if let Some(snapshot) = self.redo_stack.pop() {
             self.undo_stack.push(self.snapshot());
             self.restore(snapshot);
@@ -834,14 +1008,21 @@ impl WindowsAppState {
             Ok(()) => {
                 self.status = format!("Saved {}", path.display());
                 self.project_symbols = Self::index_project(&self.project_root);
+                if let Some(index) = self.active_document() {
+                    self.session.mark_dirty(index, false);
+                }
             }
             Err(error) => self.status = format!("Save failed: {error}"),
         }
     }
 
     fn open_file(&mut self, path: PathBuf) {
+        let document = session_core::Document::from_path(&path);
         match fs::read_to_string(&path) {
             Ok(content) => {
+                self.stash_active_buffer();
+                let index = self.session.open(Some(path.clone()), document.name.clone());
+                self.stored_buffers.remove(&index);
                 self.lines = content.lines().map(str::to_string).collect();
                 if self.lines.is_empty() {
                     self.lines.push(String::new());
@@ -873,6 +1054,8 @@ impl WindowsAppState {
                 self.editing_comment = None;
                 self.started = Instant::now();
                 self.project_symbols = Self::index_project(&self.project_root);
+                self.session.remember_project(&self.project_root.clone());
+                save_session(&self.session);
                 self.status = format!(
                     "Opened {}  ·  {}",
                     path.display(),
@@ -1006,6 +1189,9 @@ impl WindowsAppState {
         self.graph_folded.clear();
         self.graph_selected = None;
         self.graph_keyboard_active = false;
+        self.session.set_project(Some(root.clone()));
+        self.session.remember_project(&root);
+        save_session(&self.session);
         self.project_root = root;
         self.package_targets = Self::load_package_targets(&self.project_root);
         self.project_scroll = 0;
@@ -1655,6 +1841,7 @@ extern "system" {
     fn GetDC(window: Hwnd) -> Hdc;
     fn GetMessageW(message: *mut Msg, window: Hwnd, minimum: Uint, maximum: Uint) -> Bool;
     fn InvalidateRect(window: Hwnd, area: *const Rect, erase: Bool) -> Bool;
+    fn MessageBoxW(window: Hwnd, text: *const u16, caption: *const u16, kind: Uint) -> i32;
     fn LoadCursorW(instance: Hinstance, cursor_name: *const u16) -> Hcursor;
     fn PostQuitMessage(exit_code: i32);
     fn RegisterClassW(class: *const WindowClass) -> u16;
@@ -1963,6 +2150,13 @@ fn render_window(window: Hwnd) {
             let symbols = editor_core::symbol_occurrences(&app.lines, &app.file_name);
             let graph_rows = graph_visible_rows(&area, dpi as f32 / 96.0, app.terminal_motion);
             let graph = build_graph(&app, &symbols);
+            let tabs = app
+                .session
+                .documents()
+                .iter()
+                .map(|document| document.title())
+                .collect::<Vec<_>>();
+            let active_tab = app.session.active();
             let graph_first_index = graph.clamped_scroll(app.graph_scroll, graph_rows);
             let graph_nodes = graph.visible(app.graph_scroll, graph_rows).to_vec();
             let graph_summary = graph.footer(app.graph_scroll, graph_rows);
@@ -2045,6 +2239,14 @@ fn render_window(window: Hwnd) {
                 ai_field_focused: app.ai_field_focused,
                 symbols: &symbols,
                 hovered_symbol: app.hovered_symbol.as_ref(),
+                tabs: &tabs,
+                active_tab,
+                tab_dirty: app
+                    .session
+                    .documents()
+                    .iter()
+                    .map(|document| document.dirty)
+                    .collect::<Vec<_>>(),
                 graph_nodes: &graph_nodes,
                 graph_first_index,
                 graph_selected: app.graph_selected,
@@ -2362,7 +2564,50 @@ fn handle_terminal_control(window: Hwnd, key: u32) -> bool {
     true
 }
 
-/// Grid the bottom terminal panel shows at the current client size.
+/// Ask before throwing away unsaved edits. Uses a native Windows message box.
+fn confirm_discard(window: Hwnd, name: &str) -> bool {
+    let text = wide(&format!(
+        "{name} has unsaved changes. Close it and discard them?"
+    ));
+    let caption = wide("TC-IDE - unsaved changes");
+    let answer = unsafe {
+        MessageBoxW(
+            window,
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_YESNO | MB_ICONWARNING,
+        )
+    };
+    answer == IDYES
+}
+
+/// Where the session (open documents, project, recent projects) is stored.
+fn session_path() -> PathBuf {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("TC-IDE")
+        .join("session.conf")
+}
+
+/// Read the previous session, if any.
+fn load_session() -> session_core::Session {
+    match fs::read_to_string(session_path()) {
+        Ok(content) => session_core::Session::parse(&content),
+        Err(_) => session_core::Session::default(),
+    }
+}
+
+/// Persist the session. Documents are listed, never their contents or secrets.
+fn save_session(session: &session_core::Session) {
+    let path = session_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, session.serialize());
+}
+
+/// Grid the bottom terminal panel shows at the current client size./// Grid the bottom terminal panel shows at the current client size.
 fn panel_grid(window: Hwnd, code_zoom: i32) -> terminal_core::GridSize {
     let mut area = unsafe { std::mem::zeroed::<Rect>() };
     unsafe { GetClientRect(window, &mut area) };
@@ -3260,6 +3505,17 @@ unsafe extern "system" fn window_proc(
                         invalidate(window);
                         return 0;
                     }
+                    0x57 => {
+                        // Ctrl+W closes the active document.
+                        APP.with(|cell| {
+                            let mut app = cell.borrow_mut();
+                            let index = app.session.active();
+                            app.close_document(index, window);
+                            save_session(&app.session);
+                        });
+                        invalidate(window);
+                        return 0;
+                    }
                     _ => 0,
                 };
                 if command != 0 {
@@ -3856,6 +4112,35 @@ unsafe extern "system" fn window_proc(
                     return 0;
                 }
             }
+            // Document tabs sit in the editor header.
+            let tab_width = 132.0 * scale;
+            let tab_top = 48.0 * scale + 4.0 * scale;
+            let tab_bottom = 48.0 * scale + 30.0 * scale;
+            let tab_left = (area.right as f32 * 0.19).max(220.0 * scale) + 16.0 * scale;
+            let graph_panel_left = graph_left(&area, scale);
+            if (y as f32) >= tab_top && (y as f32) <= tab_bottom && (x as f32) >= tab_left {
+                let slot = (((x as f32) - tab_left) / tab_width).floor();
+                if slot >= 0.0 {
+                    let index = slot as usize;
+                    let within = (x as f32) - tab_left - slot * tab_width;
+                    let closable =
+                        within >= tab_width - 30.0 * scale && (x as f32) < graph_panel_left;
+                    let count = APP.with(|cell| cell.borrow().session.documents().len());
+                    if index < count {
+                        APP.with(|cell| {
+                            let mut app = cell.borrow_mut();
+                            if closable {
+                                app.close_document(index, window);
+                            } else {
+                                app.switch_document(index);
+                            }
+                            save_session(&app.session);
+                        });
+                        invalidate(window);
+                        return 0;
+                    }
+                }
+            }
             let search_rect = graph_search_rect(&area, scale);
             let scope_rect = graph_scope_rect(&area, scale);
             if x as f32 >= graph_left(&area, scale) {
@@ -4362,7 +4647,11 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DESTROY => {
-            APP.with(|cell| cell.borrow_mut().terminals.clear());
+            APP.with(|cell| {
+                let mut app = cell.borrow_mut();
+                app.terminals.clear();
+                save_session(&app.session);
+            });
             RENDERER.with(|cell| *cell.borrow_mut() = None);
             unsafe { PostQuitMessage(0) };
             0
@@ -4410,6 +4699,7 @@ pub fn run() {
             return;
         }
         platform::install_native_menu(window);
+        APP.with(|cell| cell.borrow_mut().restore_session());
         SetTimer(window, 1, 16, ptr::null());
         ShowWindow(window, SW_SHOW);
         UpdateWindow(window);
