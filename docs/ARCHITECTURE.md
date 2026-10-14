@@ -6,11 +6,16 @@ TC-IDE 不是网页套壳。界面状态、布局、动画和绘制都由 Rust �
 
 ## 分层
 
+目标分层（括号内为当前仓库中已存在的共享模块）：
+
 1. `tc_workspace`：项目、目录、文件、符号索引。
-2. `tc_semantic_graph`：项目 → 文件 → Class → 函数，以及调用、声明、弱定义与 AI 推断边。
-3. `tc_editor`：文本缓冲、选择区、光标和字形级插入/删除动画。
+2. `tc_semantic_graph`：项目 → 文件夹 → 文件 → Class → 函数/变量，以及调用、声明、弱定义与 AI 推断边（`src/graph_core.rs` 已承载范围、搜索、层级与视口裁剪）。
+3. `tc_editor`：文本缓冲、选择区、光标和字形级插入/删除动画（`src/editor_core.rs` 已承载后缀识别、注释、关键字、补全、符号与声明分类）。
 4. `tc_ui`：原生窗口、GPU 场景、输入与统一动画时钟。
 5. `tc_packager`：Windows、Debian、macOS、AppImage、RPM 构建任务和黑洞/白洞状态动画。
+6. 终端模型（`src/terminal_core.rs`）：网格换算、滚动历史、选区与文本提取，平台层只负责 ConPTY 会话和绘制。
+
+共享模块不引入任何平台 API：`graph_core`、`terminal_core`、`editor_core` 在三个平台上都参与编译，并由 Linux 上的 `cargo test` 覆盖；Win32 后端另外在 Linux runner 上通过 `cargo check --target x86_64-pc-windows-msvc` 做不链接的类型检查，避免 Windows 特有逻辑只能依赖远程实机编译。
 
 ## 平台边界
 
@@ -29,9 +34,9 @@ TC-IDE 不把 Linux 可执行文件改名后当作 Windows 或 macOS 包。入�
 | 文本/GPU 渲染 | Cairo/Pango | DirectWrite/Direct2D（基础编辑画布已接入） | CoreText/Metal（待实现） |
 | 系统剪贴板 | X11 selection | Windows Clipboard UTF-16（平台层已接入，待编辑器共享核心） | NSPasteboard（待实现） |
 | 文件选择 | zenity（将替换为适配器） | GetOpenFileNameW（已接入） | NSOpenPanel（待实现） |
-| 集成终端 | shell/PTY | ConPTY + PowerShell 输入输出流（已接入） | PTY + 用户 shell（待实现） |
+| 集成终端 | shell/PTY | ConPTY + PowerShell 输入输出流、滚动历史、选择复制、弹出共享窗口（已接入） | PTY + 用户 shell（待实现） |
 | 打开输出目录 | xdg-open/gio | Explorer/ShellExecuteW（已接入） | NSWorkspace/open（待实现） |
-| 安装包 | deb/AppImage（待接入真实打包） | MSIX/NSIS（待实现） | dmg/pkg（待实现） |
+| 安装包 | deb/AppImage（待接入真实打包） | Portable ZIP 与未签名 MSIX（已生成，签名待接入） | dmg/pkg（待实现） |
 
 Windows 后端还启用了 Per-monitor DPI V2，并处理 `WM_DPICHANGED` 推荐窗口尺寸。其原生菜单和快捷键会实际执行文件选择、UTF-16 剪贴板读写与 Explorer 打开目录。Direct2D 将项目树、可编辑代码、调用层级和底部终端统一绘制；文本模型保留跨行选区、Unicode 光标、200 步撤销/重做和 IME 组合文本。ConPTY 在项目目录启动 PowerShell，通过管道双向传输输入输出，并使用有光标状态的增量 VT 解析器保留未换行提示符。当前仍需在真实 Windows 设备上验证不同 IME、终端全屏应用和字形精确度。
 
@@ -50,6 +55,8 @@ TC-IDE project
 ```
 
 缩放只改变信息密度，不改变数据结构：远景显示项目和文件，中景加入 Class，近景显示函数、调用方向和声明位置。指针移动到代码符号或图节点后，焦点自动切换。
+
+范围由 `graph_core::auto_scope` 决定：用户显式选择的范围优先，其次是搜索，其次是悬停符号，最后回退到当前文件；`graph_core::build_graph` 只产出节点（层级、缩进、详情、跳转目标），每个后端自行决定卡片样式与绘制方式。节点总数受 `MAX_NODES` 限制，绘制只取当前视口内的节点。
 
 ## 性能目标
 

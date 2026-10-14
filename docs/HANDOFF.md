@@ -1,9 +1,9 @@
 # TC-IDE 项目交接与后续任务
 
-> 最后更新：2026-10-14  
+> 最后更新：2026-10-15  
 > 仓库：<https://github.com/tianchuangya/TC-IDE>  
 > 当前分支：`main`  
-> 交接基线：`a87722c` 及其后续文档提交  
+> 交接基线：`a87722c` 及其后续提交（终端批次与关系图批次见第 5 节勾选状态）  
 > 当前阶段：Windows 原生后端功能对齐中，**尚未达到正式发布条件**
 
 ## 1. 必须遵守的项目约束
@@ -47,7 +47,9 @@ TC-IDE/
 │   └── HANDOFF.md             # 本交接文档
 ├── src/
 │   ├── main.rs                # 按目标系统选择平台入口
-│   ├── editor_core.rs         # 共享语言识别、注释、语法 token、补全和符号关系
+│   ├── editor_core.rs         # 共享语言识别、注释、语法 token、补全、符号关系与声明分类
+│   ├── graph_core.rs          # 共享关系图范围、搜索、层级、视口裁剪和节点预算
+│   ├── terminal_core.rs       # 共享终端网格换算、滚动历史、选区和文本提取
 │   ├── linux_app.rs           # X11/Cairo/Pango Linux 实现，文件较大
 │   ├── windows_app.rs         # Win32 状态、事件、编辑、项目、终端和流程编排
 │   ├── windows_platform.rs    # Windows 文件对话框、菜单、剪贴板、Shell/DPI API
@@ -56,13 +58,15 @@ TC-IDE/
 │   ├── windows_terminal.rs    # ConPTY 与 VT 输出解析
 │   └── macos_app.rs           # macOS 隔离入口，功能仍明显落后
 └── .github/workflows/
-    ├── build.yml              # push/PR 三平台编译测试
+    ├── build.yml              # push/PR：格式检查、Linux 编译测试、Windows 类型检查、三平台编译测试
     └── release.yml            # 仅手动发布；未获授权不得触发
 ```
 
 ### 当前分层现实
 
-`editor_core.rs` 已经是共享纯 Rust 核心，但 Linux 和 Windows 仍各自保存大量 UI、项目与交互逻辑。`windows_app.rs`、`windows_renderer.rs`、`linux_app.rs` 都偏大，后续需要逐步拆分；不要为了“重构漂亮”一次性重写整个后端，应在测试保护下按模块迁移。
+`editor_core.rs`、`graph_core.rs`、`terminal_core.rs` 已经是共享纯 Rust 核心，且都在三个平台上参与编译、由 Linux 上的 `cargo test` 覆盖；但 Linux 和 Windows 仍各自保存大量 UI、项目与交互逻辑。`windows_app.rs`、`windows_renderer.rs`、`linux_app.rs` 都偏大，后续需要逐步拆分；不要为了“重构漂亮”一次性重写整个后端，应在测试保护下按模块迁移。
+
+Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets --target x86_64-pc-windows-msvc`（需要 `rustup target add x86_64-pc-windows-msvc`）可以在 Linux 上对 `cfg(windows)` 代码做不链接的类型检查，CI 的 `windows-typecheck` job 也会执行同一命令。它只能证明类型与 API 正确，不能替代 Windows 实机验收。
 
 ## 4. 已完成并经过 CI 的能力
 
@@ -104,6 +108,8 @@ TC-IDE/
 - 右侧关系图显示项目、文件、声明/调用位置和真实相对路径。
 - 图节点支持滚轮分页和点击跨文件跳转。
 - 切换项目会刷新符号缓存，避免显示旧项目关系。
+- 关系图由共享 `graph_core` 驱动（Windows 已接入）：`auto_scope` 决定范围（显式选择 > 搜索 > 悬停符号 > 当前文件），支持按符号名或路径的范围内搜索、`项目 → 文件夹 → 文件 → Class → 函数/变量` 缩进层级、`declare/call` 角色区分、视口裁剪与 `MAX_NODES` 预算；点击卡片按节点自带目标跳转，不再用行号反推符号。
+- `editor_core` 现在还会识别 `let/const/var/static` 变量声明并按行分类声明种类（Class/Function/Variable），同时排除 `if let ...` 一类流程语句，变量因此能出现在关系图里。
 
 ### 4.5 扩展中心
 
@@ -118,6 +124,9 @@ TC-IDE/
 - 多个真实 ConPTY 会话；Build、Run、Output 和用户新增终端。
 - 终端输入输出、VT/CSI/OSC 基础解析、方向键、Home/End/Delete/Tab。
 - `Ctrl+C/V/A/L` 交给终端；`Ctrl+Tab`/`Ctrl+Shift+Tab` 切换终端。
+- 终端网格由窗口尺寸换算：底部面板使用共享的 `terminal_core::panel_metrics` 几何与 `GridSize`，弹出窗口用 GDI 实测等宽字体字宽/行高；`WM_TIMER`/`WM_SIZE` 上的签名比较保证窗口缩放、DPI 变化、字号变化和新增会话都会同步 `ConPtySession::resize`。
+- 底部面板保留滚动历史：滚轮在面板正文上翻看输出、输入时自动回到底部，标题显示偏移行数。
+- 弹出终端窗口拥有独立滚动偏移、鼠标拖选（按等宽单元格高亮）、`Ctrl+Shift+C` 复制（`Ctrl+C` 仍是中断）、中文 IME 组合，并在弹窗存在期间接管所显示会话的网格；关闭弹窗后 IDE 会重新按面板尺寸同步该会话。
 - Build/Run 根据 Cargo、npm、Go、Python、C、C++、Java 项目选择命令。
 - 活动 ConPTY 可弹出为独立原生 Windows 窗口；弹窗与 IDE 共用同一会话，关闭弹窗不会终止 IDE 或 shell。
 - Windows 打包目标默认全不选，并按项目保存选择。
@@ -132,10 +141,10 @@ TC-IDE/
 ### P0：Windows 正确性与实机验收准备
 
 - [ ] 在 Windows 11 实机逐项测试：高 DPI、多显示器、窗口最大化/缩放、中文 IME、剪贴板、拖选、保存、新建项目、关系跳转、多终端、Detach、Build/Run、ZIP/MSIX。
-- [ ] 为独立 ConPTY 窗口补充滚动历史、鼠标文本选择、复制、IME、窗口尺寸到终端行列的同步。
-- [ ] 验证关闭 IDE 时弹出终端和 ConPTY 子进程的清理顺序，防止孤儿进程或二次释放。
+- [x] 为独立 ConPTY 窗口补充滚动历史、鼠标文本选择、复制、IME、窗口尺寸到终端行列的同步。（已实现：独立滚动偏移与滚轮、拖选与 `Ctrl+Shift+C`、IME 组合、按实测字宽换算并 `resize`；仍需在 Windows 实机确认高 DPI 与多显示器下的观感）
+- [ ] 验证关闭 IDE 时弹出终端和 ConPTY 子进程的清理顺序，防止孤儿进程或二次释放。（当前实现：弹出窗口 `WM_DESTROY` 释放 GDI 字体并把会话交还 IDE，IDE `WM_DESTROY` 清空会话列表；实机仍需确认无孤儿 `powershell.exe`）
 - [ ] 修复实机发现的光标字形宽度偏差；当前 `code_cell` 仍含经验值，应逐步改为 DirectWrite 实际字形测量。
-- [ ] 为 Windows 特有逻辑增加可测试的纯函数，避免所有正确性只依赖远程编译。
+- [x] 为 Windows 特有逻辑增加可测试的纯函数，避免所有正确性只依赖远程编译。（已实现：`terminal_core`、`graph_core` 承载网格/滚动/选区/关系图范围与搜索，Linux 上 `cargo test` 覆盖；CI 新增 `windows-typecheck` 与 `format` job）
 
 ### P1：编辑器达到可日常使用
 
@@ -148,11 +157,13 @@ TC-IDE/
 
 ### P1：关系图可扩展性
 
-- [ ] 增加关系图搜索框和自动范围：悬停符号时自动聚焦该符号；无悬停时以当前文件/当前文件夹为范围，而非始终从项目根铺满。
-- [ ] 增加 `项目 → 文件夹 → 文件 → Class → 函数/变量` 的明确层级、主从关系、同级路径和折叠。
+- [x] 增加关系图搜索框和自动范围：悬停符号时自动聚焦该符号；无悬停时以当前文件/当前文件夹为范围，而非始终从项目根铺满。（Windows 已接入共享 `graph_core`：顶部搜索框、范围 chip（项目/文件夹/文件/符号/自动）、`Tab` 或方向键切换范围；Linux 仍是自己的节点模型，尚未迁移到 `graph_core`）
+- [x] 增加 `项目 → 文件夹 → 文件 → Class → 函数/变量` 的明确层级、主从关系、同级路径和折叠。（Windows 已按 `GraphNode.depth` 缩进并显示路径:行号；折叠交互尚未实现，见新增队列项）
 - [ ] 大项目使用后台增量索引、视口裁剪、聚类和层级细节，禁止一次绘制全部节点。
 - [ ] 补充声明、调用者、被调用者、弱定义/AI 推断边的不同但克制的视觉表达。
-- [ ] 让跨文件路径点击、键盘导航和当前文件切换保持一致。
+- [ ] 让跨文件路径点击、键盘导航和当前文件切换保持一致。（Windows 点击已改为按节点目标跳转；键盘上下选择与 Linux 节点的 `graph_core` 迁移仍待做）
+- [ ] 关系图节点折叠/展开：类与文件夹节点可折叠，折叠状态与当前文件切换保持一致。
+- [ ] 把 Linux 的关系图节点模型迁移到 `graph_core`，删除 `linux_app.rs` 里重复的范围/搜索实现。
 
 ### P1：扩展与 AI
 
@@ -175,6 +186,7 @@ TC-IDE/
 - [ ] 文件树折叠/展开加入真正的行位置弹簧过渡，不能只旋转箭头后瞬间消失。
 - [ ] 输入和删除动画扩展到多字符粘贴、撤销/重做，同时保证高频输入不积压动画。
 - [ ] 背景图增加可视化裁剪框、拖拽和缩放预览，而不仅是数值调节。
+- [ ] 底部终端面板的鼠标选择与复制（弹出窗口已支持，面板仍只有滚动）。
 - [ ] 所有可点击控件增加悬停/按下/禁用/键盘焦点状态，并检查浅色主题对比度。
 - [ ] 设置和扩展面板需要完整中文文案，不只是标题切换。
 
@@ -188,20 +200,22 @@ TC-IDE/
 ### P2：自动化与发布前门槛
 
 - [ ] 添加 Windows GUI smoke test 或可脚本化的状态层测试。
-- [ ] 对偏好设置解析、项目模板、打包命令、语言注册表、VT 解析、关系图过滤增加单元测试。
-- [ ] CI 加入 `cargo fmt --check`、Clippy（先清零现有警告）和产物结构检查。
+- [ ] 对偏好设置解析、项目模板、打包命令、语言注册表、VT 解析、关系图过滤增加单元测试。（`graph_core` 范围/搜索/层级/视口、`terminal_core` 网格/滚动/选区、`editor_core` 声明分类已覆盖；VT 解析仍在 `windows_terminal.rs` 内，需要 Windows job 或抽出纯解析器）
+- [x] CI 加入 `cargo fmt --check`、Clippy（先清零现有警告）和产物结构检查。（`cargo fmt --check` 与 `windows-typecheck` 已加入；Clippy 仍待清零现有警告后接入，当前 Linux 侧仍有 18 条、Windows 侧 2 条 dead_code 类警告）
 - [ ] 正式发布前准备清晰的版本号、变更记录、安装/卸载说明和已知问题。
 - [ ] 只有用户明确说“正式开始”后，才允许触发 `release.yml` 或创建 GitHub Release。
 
 ## 6. 下一位开发者的第一批任务
 
-建议从以下小批次继续，避免同时改动所有后端：
+第 1–5 项（终端滚动/选择/复制/网格同步、关系图范围与搜索）已完成并推送，基线见第 4 节。建议接下来按以下小批次继续，避免同时改动所有后端：
 
-1. 先为 Detached ConPTY 窗口增加独立滚动偏移和鼠标滚轮；不改终端进程所有权。
-2. 增加 Detached 窗口的选择与 `Ctrl+Shift+C` 复制，同时保留 `Ctrl+C` 作为终端中断。
-3. 将终端窗口尺寸换算为列/行并调用 `ConPtySession::resize`。
-4. 每完成一个批次执行本地测试、推送并等待 Windows job 成功。
-5. 然后开始关系图范围/搜索，不要先做新的视觉概念页。
+1. 在 Windows 实机验收本批次：高 DPI、多显示器、弹出终端滚动与选择、`Ctrl+Shift+C` 与 `Ctrl+C` 的区别、IME、终端网格换行是否正确。
+2. 给底部终端面板补鼠标选择与复制（可复用 `terminal_core::TerminalSelection`，绘制层需要按单元格高亮）。
+3. 关系图折叠：类/文件夹节点可折叠，并与当前文件切换保持一致。
+4. 把 Linux 关系图迁移到 `graph_core`，删除重复实现。
+5. 每完成一个批次执行本地测试、`cargo fmt --check`、Windows 类型检查、推送并等待 Windows job 成功。
+
+不要先做新的视觉概念页。
 
 ## 7. 代码风格与实现规范
 
@@ -248,6 +262,15 @@ sudo apt install build-essential libx11-dev libcairo2-dev libpango1.0-dev
 cargo run --release
 ```
 
+### Linux 上校验 Windows 代码（不链接）
+
+```bash
+rustup target add x86_64-pc-windows-msvc
+cargo check --all-targets --target x86_64-pc-windows-msvc
+cargo fmt --check
+cargo test --all-targets   # 覆盖 graph_core / terminal_core / editor_core
+```
+
 ### Windows
 
 ```powershell
@@ -261,7 +284,9 @@ cargo run --release
 
 普通 push 会执行：
 
-- Ubuntu 24.04：`cargo check --all-targets` + `cargo test --all-targets`
+- Ubuntu 24.04（format）：`cargo fmt --check`
+- Ubuntu 24.04（linux）：`cargo check --all-targets` + `cargo test --all-targets`
+- Ubuntu 24.04（windows-typecheck）：`cargo check --all-targets --target x86_64-pc-windows-msvc`
 - Windows 2025：`cargo test --all-targets` + `cargo build --release`
 - macOS 15：`cargo build --release`
 
@@ -274,5 +299,7 @@ cargo run --release
 ## 10. 当前交接结论
 
 TC-IDE 已经从静态概念预览进入可编译的多平台原生原型阶段。Windows 后端拥有编辑、项目树、语义关系、注释气泡、设置/扩展、多 ConPTY、独立共享终端窗口、Build/Run、ZIP 和未签名 MSIX 等真实路径；但它仍缺少 Windows 实机全面验收、成熟文本缓冲、Tree-sitter/LSP、真实扩展下载、DAP、完整 AI Agent、签名安装包和大项目性能验证。
+
+2026-10-15 的终端批次与关系图批次之后，Windows 后端的终端（网格/滚动/选择/复制/IME/弹出共享窗口）与关系图（范围/搜索/层级/点击跳转）已经从"演示状态"推进到有共享核心与单元测试支撑的实现，但两者都还没有经过 Windows 实机验收，Linux 关系图也尚未迁移到共享模型。
 
 因此当前正确表述是：**Windows 原生功能已大幅推进并持续通过 CI，但项目尚未完成，也尚未获准发布。**
