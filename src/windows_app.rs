@@ -5935,6 +5935,9 @@ mod tests {
         assert_eq!(app.lines, ["one!", "inserte", "two"]);
         app.undo();
         assert_eq!(app.lines, ["one!", "inserted", "two"]);
+        // The typed word, then the line break, then the "!" each undo once.
+        app.undo();
+        assert_eq!(app.lines, ["one!", "", "two"]);
         app.undo();
         assert_eq!(app.lines, ["one!", "two"]);
         app.undo();
@@ -5955,6 +5958,7 @@ mod tests {
     fn multiline_selection_cut_and_undo_are_lossless() {
         let mut app = WindowsAppState::new();
         app.lines = vec!["alpha".into(), "beta".into()];
+        app.buffer = text_buffer::TextBuffer::from_lines(&app.lines);
         app.selection_anchor = Some(TextPosition { line: 0, column: 2 });
         app.caret_line = 1;
         app.caret_column = 2;
@@ -5969,6 +5973,7 @@ mod tests {
     fn unicode_edits_stay_on_character_boundaries() {
         let mut app = WindowsAppState::new();
         app.lines = vec!["你好 world".into()];
+        app.buffer = text_buffer::TextBuffer::from_lines(&app.lines);
         app.caret_line = 0;
         app.caret_column = 2;
         app.insert_text("真的");
@@ -5981,6 +5986,7 @@ mod tests {
     fn arrow_navigation_crosses_line_boundaries() {
         let mut app = WindowsAppState::new();
         app.lines = vec!["one".into(), "two".into()];
+        app.buffer = text_buffer::TextBuffer::from_lines(&app.lines);
         app.caret_line = 1;
         app.caret_column = 0;
         app.move_left();
