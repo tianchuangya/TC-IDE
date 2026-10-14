@@ -163,7 +163,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 
 - [x] 将文本缓冲升级为适合大文件的 piece table（`text_buffer`）：Unicode 字符边界、分组编辑、按编辑的撤销/重做历史，编辑不再复制整个文档；Windows 编辑器已接入。
 - [ ] 接入 Tree-sitter 或等价增量解析，替换正则/启发式语义关系。
-- [~] 接入真实 LSP：`lsp_core` 提供客户端（stdio 管道、分帧、自动应答服务端请求）与请求/响应解析；Windows 已接入补全、诊断（行标记与状态栏）、F12 跳转定义与 Ctrl+I 悬停；引用、重命名与诊断面板仍未接入。
+- [x] 接入真实 LSP：`lsp_core` 客户端（stdio 管道、分帧、自动应答服务端请求）已在 Windows 侧驱动补全、诊断（行标记与状态栏、光标所在行的诊断信息）、F12 跳转定义、Ctrl+I 悬停、Ctrl+R 引用列表（再次按 Ctrl+R 依次跳转）与 F2 重命名（编辑应用到当前缓冲与其他文件）。仍未实现独立的诊断面板与重命名预览。
 - [ ] 为 C/C++ 正确连接 clangd，为 Python 连接 basedpyright/pyright，为 Rust 连接 rust-analyzer；扩展安装状态必须与真实可执行文件状态一致。
 - [x] 加入文件脏状态、关闭未保存确认、多文件标签、最近项目和会话恢复。（Windows 已实现标签栏、脏标记、Ctrl+W、原生确认框与 session.conf 恢复；Linux 仍未实现）
 - [~] 编辑器滚动条、大文件虚拟化与水平滚动已完成（`Viewport` + `line_window`，渲染器只绘制可见行并裁剪代码列）；项目树滚动条仍未实现。
@@ -182,8 +182,8 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 
 - [~] 扩展安装：extension_core 已实现下载/校验/解包/卸载命令与运行时缓存清单，Windows 面板执行真实命令并校验摘要；**目录需用户提供（<项目>/.tc-ide-catalog.conf），仓库不内置编造的 URL 与校验和**，升级/卸载的界面入口也还没有
 - [x] 用户级运行时缓存清单：记录 id/版本/校验和/字节数/目录，支持复用、修剪与序列化（Windows 已接入，Linux 待接入）。
-- [~] Debugger/Formatter：新增“格式化当前文件”（真实调用 rustfmt/clang-format/ruff/biome/gofmt 并刷新编辑器）与“启动调试适配器”（debugpy/lldb-dap/dlv）；**DAP 界面（断点/调用栈/变量）与选区格式化仍未实现**
-- [~] AI：新增提问框、流式发送、连接测试、--max-time 超时、终端内 Ctrl+C 取消与按状态码的可读错误；**回答显示在终端，尚无独立聊天面板与会话历史**
+- [~] Debugger/Formatter：格式化当前文件已完成；调试改为真正的 DAP 会话（`dap_core`：启动 debugpy/lldb-dap/dlv、F9 断点并在行槽标记、F5 启动/继续、Shift+F5 停止、F10 单步跳过、F11/Shift+F11 步入步出、停止后自动取调用栈/作用域/变量并跳到停下的帧，状态栏显示停止原因与前几个变量）；**仍缺独立的调用栈/变量面板与选区格式化**
+- [~] AI：`ai_core::ChatSession` 作为子进程运行 curl（Key 走环境变量、SSE 增量、HTTP 状态、可取消），Windows 新增 Ctrl+Shift+A 的 AI 面板：内联输入、Enter 发送、Esc 取消、回答流式增长、错误显示在输入框下方；**会话历史尚未持久化，也没有多轮上下文**
 - [x] API 请求使用用户选择的 Endpoint；Key 仅驻内存并通过子进程环境变量 TC_IDE_AI_KEY 传递，不出现在命令行、配置文件或日志。
 
 ### P1：打包与动画
@@ -228,8 +228,8 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 2. **LSP 剩余部分**：传输层与界面接入已完成（补全、诊断、F12 跳转、Ctrl+I 悬停、didOpen/didChange），仍缺重命名、引用列表与独立诊断面板。
 3. **编辑器剩余部分**：piece table、虚拟化、编辑器滚动条与水平滚动已完成；仍缺项目树滚动条。
 4. **Tree-sitter 或等价增量解析**：替换正则/启发式语义关系。
-5. **DAP 界面**：断点、调用栈、变量、继续/单步，复用 `workspace_core::debug_adapter_for`。
-6. **AI 聊天面板**：把终端里的回答搬进面板，加入会话历史与取消按钮。
+5. **调试面板**：调用栈与变量已经有数据（`dap_core::DebugState`），缺的是一个独立面板与断点管理界面。
+6. **AI 会话**：面板与流式回答已完成；仍缺多轮上下文与历史持久化。
 7. **关系图真正的增量索引**：现在是整项目重扫（在后台线程），可以按文件变更增量更新。
 8. **视觉细节**：文件树行位置弹簧、多字符粘贴/撤销动画、背景图可视化裁剪框、
    控件悬停/按下/禁用状态、设置与扩展面板完整中文文案。
@@ -337,7 +337,7 @@ cargo run --release
 
 ```bash
 cargo fmt --check
-cargo test --all-targets                                   # 135 项共享内核与后端测试
+cargo test --all-targets                                   # 142 项共享内核与后端测试
 cargo clippy --all-targets -- -D warnings                   # 共享内核 + Linux 后端
 cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo check --all-targets --target x86_64-pc-windows-msvc    # Windows 类型检查

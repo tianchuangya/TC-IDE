@@ -55,6 +55,13 @@
 - 编辑器按可见窗口绘制（`Viewport` + `line_window`）：只取出并绘制屏幕上的行，新增编辑器滚动条，
   滚轮在代码列滚动（Shift 为水平滚动），光标始终保持在视野内。
 
+- LSP 补齐：Ctrl+R 引用列表（再按一次依次跳转）、F2 重命名（编辑应用到打开缓冲与其他文件并刷新索引）、
+  状态栏显示光标所在行的诊断。
+- 调试：新增 `dap_core` 真实 DAP 会话（debugpy/lldb-dap/dlv），F9 断点、F5 启动/继续、Shift+F5 停止、
+  F10 单步跳过、F11/Shift+F11 步入步出，停止后自动读取调用栈、作用域与变量并跳到停下的帧。
+- AI：新增 Ctrl+Shift+A 的 AI 面板，回答由 `ai_core::ChatSession` 以子进程 curl 流式读入（Key 只走环境变量，
+  Esc 可取消并保留已收到的部分回答），错误按 HTTP 状态给出可读说明。
+
 ### 工程与 CI
 
 - CI 新增 `cargo fmt --check`、Linux 与 Windows 目标的 Clippy（`-D warnings`）、
