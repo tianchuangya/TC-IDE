@@ -478,9 +478,158 @@ impl TextBuffer {
         (self.pieces.len(), false)
     }
 
+    /// Text of a line range without rebuilding the whole document.
+    pub fn line_window(&self, first: usize, count: usize) -> Vec<String> {
+        if count == 0 {
+            return Vec::new();
+        }
+        let limit = first.saturating_add(count);
+        let mut window = Vec::new();
+        let mut line = 0usize;
+        let mut current = String::new();
+        'pieces: for piece in &self.pieces {
+            let source = if piece.added {
+                &self.added
+            } else {
+                &self.original
+            };
+            let Some(slice) = source.get(piece.start..piece.start + piece.length) else {
+                continue;
+            };
+            for character in slice.chars() {
+                if line >= limit {
+                    break 'pieces;
+                }
+                if character == '\n' {
+                    if line >= first {
+                        window.push(std::mem::take(&mut current));
+                    }
+                    line += 1;
+                    continue;
+                }
+                if line >= first {
+                    current.push(character);
+                }
+            }
+        }
+        if line >= first && window.len() < count {
+            window.push(current);
+        }
+        window
+    }
+
     /// Number of pieces, exposed so tests can prove edits stay local.
     pub fn piece_count(&self) -> usize {
         self.pieces.len()
+    }
+}
+
+/// How much of a document an editor shows.
+///
+/// Scrolling rules are plain arithmetic: keep the caret visible, never scroll
+/// past the last line, and shift horizontally only as far as the document is
+/// wider than the view. Keeping them here means both backends share one tested
+/// behaviour instead of two ad hoc implementations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Viewport {
+    /// First visible line.
+    pub first_line: usize,
+    /// Visible rows.
+    pub height: usize,
+    /// First visible column, in characters.
+    pub first_column: usize,
+    /// Visible columns, in characters.
+    pub width: usize,
+}
+
+impl Default for Viewport {
+    fn default() -> Self {
+        Self {
+            first_line: 0,
+            height: 1,
+            first_column: 0,
+            width: 1,
+        }
+    }
+}
+
+impl Viewport {
+    pub fn new(height: usize, width: usize) -> Self {
+        Self {
+            first_line: 0,
+            height: height.max(1),
+            first_column: 0,
+            width: width.max(1),
+        }
+    }
+
+    /// Largest first line that still fills the view.
+    pub fn max_first_line(&self, line_count: usize) -> usize {
+        line_count.saturating_sub(self.height.max(1))
+    }
+
+    /// Clamp the scroll offset into the document.
+    pub fn clamped(&self, line_count: usize) -> Self {
+        Self {
+            first_line: self.first_line.min(self.max_first_line(line_count)),
+            ..*self
+        }
+    }
+
+    /// Scroll by a number of lines, stopping at both ends.
+    pub fn scrolled(&self, lines: i32, line_count: usize) -> Self {
+        let first_line = if lines >= 0 {
+            self.first_line.saturating_add(lines as usize)
+        } else {
+            self.first_line
+                .saturating_sub(lines.saturating_neg() as usize)
+        };
+        Self {
+            first_line,
+            ..*self
+        }
+        .clamped(line_count)
+    }
+
+    /// Scroll so a caret line is inside the view.
+    pub fn revealed(&self, caret_line: usize, line_count: usize) -> Self {
+        let height = self.height.max(1);
+        let first_line = if caret_line < self.first_line {
+            caret_line
+        } else if caret_line >= self.first_line + height {
+            caret_line + 1 - height
+        } else {
+            self.first_line
+        };
+        Self {
+            first_line,
+            ..*self
+        }
+        .clamped(line_count)
+    }
+
+    /// Scroll horizontally so a caret column is inside the view.
+    pub fn revealed_column(&self, caret_column: usize, line_chars: usize) -> Self {
+        let width = self.width.max(1);
+        let max_first = line_chars.saturating_sub(width).saturating_add(4);
+        let first_column = if caret_column < self.first_column {
+            caret_column
+        } else if caret_column >= self.first_column + width {
+            caret_column + 1 - width
+        } else {
+            self.first_column
+        };
+        Self {
+            first_column: first_column.min(max_first),
+            ..*self
+        }
+    }
+
+    /// Lines currently visible, as `(index, text)`.
+    pub fn rows<'a>(&self, lines: &'a [String]) -> impl Iterator<Item = (usize, &'a String)> {
+        let first = self.first_line.min(lines.len());
+        let last = first.saturating_add(self.height.max(1)).min(lines.len());
+        (first..last).map(move |index| (index, &lines[index]))
     }
 }
 
@@ -672,6 +821,82 @@ mod tests {
         let text = buffer.to_text();
         assert!(text.contains("xline 199"));
         assert!(started.elapsed().as_secs_f32() < 2.0);
+    }
+
+    #[test]
+    fn line_windows_come_straight_out_of_the_pieces() {
+        let mut buffer = TextBuffer::from_lines(&lines(&["one", "two", "three", "four"]));
+        assert_eq!(buffer.line_window(0, 2), lines(&["one", "two"]));
+        assert_eq!(buffer.line_window(2, 2), lines(&["three", "four"]));
+        assert_eq!(buffer.line_window(3, 5), lines(&["four"]));
+        assert!(buffer.line_window(9, 2).is_empty());
+        assert!(buffer.line_window(0, 0).is_empty());
+
+        // Editing in the middle must not disturb the window contents.
+        buffer.insert(1, 3, "!");
+        assert_eq!(buffer.line_window(1, 2), lines(&["two!", "three"]));
+        buffer.undo();
+        assert_eq!(buffer.line_window(1, 2), lines(&["two", "three"]));
+    }
+
+    #[test]
+    fn viewport_scrolls_and_reveals_the_caret() {
+        let viewport = Viewport::new(5, 20);
+        assert_eq!(viewport.max_first_line(12), 7);
+        assert_eq!(viewport.scrolled(3, 12).first_line, 3);
+        assert_eq!(viewport.scrolled(-4, 12).first_line, 0);
+        assert_eq!(viewport.scrolled(99, 12).first_line, 7);
+
+        // Revealing keeps the caret inside the view.
+        let scrolled = Viewport {
+            first_line: 4,
+            ..viewport
+        };
+        assert_eq!(scrolled.revealed(3, 12).first_line, 3);
+        assert_eq!(scrolled.revealed(20, 30).first_line, 16);
+        assert_eq!(scrolled.revealed(6, 12).first_line, 4);
+
+        let clamped = Viewport {
+            first_line: 40,
+            ..viewport
+        };
+        assert_eq!(clamped.clamped(12).first_line, 7);
+
+        // Horizontal reveal only moves when the caret leaves the view.
+        let wide = Viewport::new(5, 10);
+        assert_eq!(wide.revealed_column(4, 200).first_column, 0);
+        assert_eq!(wide.revealed_column(25, 200).first_column, 16);
+        let shifted = Viewport {
+            first_column: 30,
+            ..wide
+        };
+        assert_eq!(shifted.revealed_column(10, 200).first_column, 10);
+        assert!(shifted.revealed_column(199, 40).first_column <= 34);
+
+        // A short document never scrolls.
+        let empty = Viewport::new(10, 20);
+        assert_eq!(empty.scrolled(5, 3).first_line, 0);
+    }
+
+    #[test]
+    fn viewport_rows_only_cover_the_visible_lines() {
+        let document = lines(&["a", "b", "c", "d", "e"]);
+        let viewport = Viewport {
+            first_line: 1,
+            height: 2,
+            ..Viewport::new(2, 10)
+        };
+        let rows = viewport
+            .rows(&document)
+            .map(|(index, value)| (index, value.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(rows, [(1, "b".to_string()), (2, "c".to_string())]);
+        let past_end = Viewport {
+            first_line: 9,
+            height: 3,
+            ..Viewport::new(3, 10)
+        };
+        assert_eq!(past_end.rows(&document).count(), 0);
     }
 
     #[test]

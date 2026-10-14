@@ -7,10 +7,11 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1RenderTarget,
-    ID2D1SolidColorBrush, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
+    ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
@@ -46,6 +47,11 @@ pub struct WindowsScene<'a> {
     pub lines: &'a [String],
     pub caret_line: usize,
     pub caret_column: usize,
+    /// First visible column, in characters.
+    pub scroll_columns: usize,
+    /// First visible line and total line count of the document.
+    pub first_line: usize,
+    pub total_lines: usize,
     pub selection: Option<((usize, usize), (usize, usize))>,
     pub ime_composition: &'a str,
     pub completions: &'a [String],
@@ -495,6 +501,10 @@ impl DirectEditorRenderer {
         let editor_right = width - graph_w;
         let code_top = header_h + 58.0 * scale;
         let line_step = 25.0 * scale;
+        // Horizontal scroll shifts the whole code column; the gutter and the
+        // tree stay put, and the column is clipped while it is drawn.
+        let scroll_x = scene.scroll_columns as f32 * self.code_cell * scale;
+        let code_origin = tree_w - scroll_x;
         // Diagnostics from the language server, marked in the gutter.
         for (line, is_error) in scene.diagnostic_lines.iter().take(200) {
             let top = code_top + *line as f32 * line_step;
@@ -591,10 +601,10 @@ impl DirectEditorRenderer {
                 .get(focused.line)
                 .map(String::as_str)
                 .unwrap_or("");
-            let focused_left = tree_w
+            let focused_left = code_origin
                 + (49.0 + Self::visual_cells(focused_line, focused.start) as f32 * self.code_cell)
                     * scale;
-            let focused_right = tree_w
+            let focused_right = code_origin
                 + (55.0 + Self::visual_cells(focused_line, focused.end) as f32 * self.code_cell)
                     * scale;
             let focused_top = code_top + focused.line as f32 * line_step - 3.0 * scale;
@@ -638,11 +648,11 @@ impl DirectEditorRenderer {
                     .get(related.line)
                     .map(String::as_str)
                     .unwrap_or("");
-                let related_left = tree_w
+                let related_left = code_origin
                     + (49.0
                         + Self::visual_cells(line_value, related.start) as f32 * self.code_cell)
                         * scale;
-                let related_right = tree_w
+                let related_right = code_origin
                     + (55.0 + Self::visual_cells(line_value, related.end) as f32 * self.code_cell)
                         * scale;
                 let related_top = code_top + related.line as f32 * line_step - 3.0 * scale;
@@ -825,6 +835,15 @@ impl DirectEditorRenderer {
             )
         };
 
+        // The code column is clipped so horizontal scrolling never paints over
+        // the gutter, the tree or the relation graph.
+        let code_clip = D2D_RECT_F {
+            left: tree_w + 42.0 * scale,
+            top: code_top - 6.0 * scale,
+            right: editor_right - 10.0 * scale,
+            bottom: body_bottom,
+        };
+        unsafe { target_base.PushAxisAlignedClip(&code_clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         for (index, value) in scene.lines.iter().take(max_lines).enumerate() {
             let y = code_top + index as f32 * line_step;
             if index == scene.caret_line {
@@ -853,9 +872,9 @@ impl DirectEditorRenderer {
                         Self::fill(
                             &target_base,
                             &selected_text,
-                            tree_w + (52.0 + left_cells * self.code_cell) * scale,
+                            code_origin + (52.0 + left_cells * self.code_cell) * scale,
                             y - 2.0 * scale,
-                            tree_w + (52.0 + right_cells * self.code_cell) * scale,
+                            code_origin + (52.0 + right_cells * self.code_cell) * scale,
                             y + 21.0 * scale,
                         )
                     };
@@ -880,7 +899,7 @@ impl DirectEditorRenderer {
                 .filter(|_| index == scene.caret_line)
                 .map(|age| (1.0 - (age / 0.16).clamp(0.0, 1.0)) * 7.0 * scale)
                 .unwrap_or(0.0);
-            let mut token_x = tree_w + 52.0 * scale + edit_offset;
+            let mut token_x = code_origin + 52.0 * scale + edit_offset;
             for token in editor_core::syntax_tokens(value, scene.file_name) {
                 if token.kind == TokenKind::Comment {
                     unsafe {
@@ -938,7 +957,7 @@ impl DirectEditorRenderer {
                 let bubble_left = (bubble_right - 286.0 * scale).max(tree_w + 130.0 * scale);
                 let bubble_height = if expanded { 112.0 } else { 34.0 } * scale;
                 let marker_column = value[..marker_start].chars().count();
-                let anchor_x = tree_w
+                let anchor_x = code_origin
                     + (52.0 + Self::visual_cells(value, marker_column) as f32 * self.code_cell)
                         * scale;
                 unsafe {
@@ -993,7 +1012,7 @@ impl DirectEditorRenderer {
             .get(scene.caret_line)
             .map(|line| Self::visual_cells(line, scene.caret_column))
             .unwrap_or(0);
-        let caret_x = tree_w + (52.0 + caret_cells as f32 * self.code_cell) * scale;
+        let caret_x = code_origin + (52.0 + caret_cells as f32 * self.code_cell) * scale;
         let caret_y = code_top + scene.caret_line as f32 * line_step;
         if (scene.animation_seconds * 2.0) as u32 & 1 == 0 {
             unsafe {
@@ -1039,6 +1058,46 @@ impl DirectEditorRenderer {
                     caret_y + 23.0 * scale,
                 )
             };
+        }
+        unsafe { target_base.PopAxisAlignedClip() };
+        // Vertical scrollbar: only drawn when the document is taller than the view.
+        let total_lines = scene.total_lines.max(1);
+        if total_lines > max_lines.max(1) {
+            let track_top = code_top;
+            let track_bottom = body_bottom - 8.0 * scale;
+            let track = (track_bottom - track_top).max(24.0 * scale);
+            let visible = max_lines.min(total_lines) as f32 / total_lines as f32;
+            let thumb = (track * visible).clamp(16.0 * scale, track);
+            let scrollable = (track - thumb).max(1.0);
+            let offset = scene
+                .first_line
+                .min(total_lines.saturating_sub(max_lines.max(1))) as f32
+                / total_lines.saturating_sub(max_lines.max(1)).max(1) as f32;
+            let top = track_top + scrollable * offset.clamp(0.0, 1.0);
+            unsafe {
+                Self::rounded(
+                    &target_base,
+                    &line,
+                    D2D_RECT_F {
+                        left: editor_right - 7.0 * scale,
+                        top: track_top,
+                        right: editor_right - 3.0 * scale,
+                        bottom: track_bottom,
+                    },
+                    2.0 * scale,
+                );
+                Self::rounded(
+                    &target_base,
+                    &muted,
+                    D2D_RECT_F {
+                        left: editor_right - 8.0 * scale,
+                        top,
+                        right: editor_right - 2.0 * scale,
+                        bottom: top + thumb,
+                    },
+                    3.0 * scale,
+                );
+            }
         }
         if !scene.completions.is_empty() && scene.ime_composition.is_empty() {
             let popup_top = caret_y + 27.0 * scale;
@@ -1097,9 +1156,9 @@ impl DirectEditorRenderer {
                 .get(focused.line)
                 .map(String::as_str)
                 .unwrap_or("");
-            let left = tree_w
+            let left = code_origin
                 + (49.0 + Self::visual_cells(value, focused.start) as f32 * self.code_cell) * scale;
-            let right = tree_w
+            let right = code_origin
                 + (55.0 + Self::visual_cells(value, focused.end) as f32 * self.code_cell) * scale;
             let top = code_top + focused.line as f32 * line_step - 3.0 * scale;
             unsafe {

@@ -237,6 +237,7 @@ struct WindowsAppState {
     lines: Vec<String>,
     /// Text of the active document, stored as a piece table.
     buffer: text_buffer::TextBuffer,
+    viewport: text_buffer::Viewport,
     caret_line: usize,
     caret_column: usize,
     selection_anchor: Option<TextPosition>,
@@ -484,6 +485,7 @@ impl WindowsAppState {
                 "    }".into(),
                 "}".into(),
             ],
+            viewport: text_buffer::Viewport::new(24, 96),
             buffer: text_buffer::TextBuffer::from_text(
                 "use tc_ide::workspace::Project;\n\npub struct Editor {\n    project: Project,\n}\n\nimpl Editor {\n    pub fn render(&mut self) {\n        self.project.resolve_symbols();\n    }\n}\n",
             ),
@@ -816,7 +818,73 @@ impl WindowsAppState {
     fn finish_edit(&mut self) {
         self.buffer.end_group();
         self.sync_lines();
+        self.reveal_caret();
         self.last_edit = Some(Instant::now());
+    }
+
+    /// Scroll so the caret is inside the window.
+    fn reveal_caret(&mut self) {
+        let line_count = self.lines.len();
+        let line_chars = self
+            .lines
+            .get(self.caret_line)
+            .map(|value| value.chars().count())
+            .unwrap_or(0);
+        self.viewport = self
+            .viewport
+            .revealed(self.caret_line, line_count)
+            .revealed_column(self.caret_column, line_chars);
+    }
+
+    /// Scroll the editor, for the wheel and the scrollbar.
+    fn scroll_editor(&mut self, lines: i32) {
+        let line_count = self.lines.len();
+        self.viewport = self.viewport.scrolled(lines, line_count);
+    }
+
+    /// Scroll the editor horizontally, for the mouse wheel with shift.
+    fn scroll_editor_columns(&mut self, columns: i32) {
+        let line_chars = self
+            .lines
+            .get(self.caret_line)
+            .map(|value| value.chars().count())
+            .unwrap_or(0);
+        let first = if columns >= 0 {
+            self.viewport.first_column.saturating_add(columns as usize)
+        } else {
+            self.viewport
+                .first_column
+                .saturating_sub(columns.saturating_neg() as usize)
+        };
+        let maximum = line_chars.saturating_sub(self.viewport.width.max(1));
+        self.viewport.first_column = first.min(maximum);
+    }
+
+    /// Resize the visible window and clamp the scroll offset.
+    ///
+    /// Uses the same geometry as the renderer: the project tree on the left, the
+    /// relation graph on the right, and a gutter before the code column.
+    fn resize_viewport(&mut self, width: i32, height: i32, scale: f32) {
+        let width = width as f32;
+        let height = height as f32;
+        let tree_w = (width * 0.19).max(220.0 * scale);
+        let graph_w = (width * 0.27).max(300.0 * scale);
+        let editor_right = width - graph_w;
+        let code_left = tree_w + 52.0 * scale;
+        let line_step = 25.0 * scale;
+        let rows = (((height - 106.0 * scale) / line_step).floor().max(1.0)) as usize;
+        let cell = (self.code_cell_width() * scale).max(1.0);
+        let columns = (((editor_right - code_left - 12.0 * scale) / cell)
+            .floor()
+            .max(8.0)) as usize;
+        self.viewport.height = rows;
+        self.viewport.width = columns;
+        self.viewport = self.viewport.clamped(self.lines.len());
+        self.reveal_caret();
+    }
+
+    fn code_cell_width(&self) -> f32 {
+        8.9 + self.code_zoom.clamp(-2, 8) as f32 * 0.6
     }
 
     fn selection_range(&self) -> Option<(TextPosition, TextPosition)> {
@@ -1069,6 +1137,7 @@ impl WindowsAppState {
     }
 
     fn set_caret(&mut self, position: TextPosition, extend_selection: bool) {
+        self.reveal_caret();
         if extend_selection {
             if self.selection_anchor.is_none() {
                 self.selection_anchor = Some(self.position());
@@ -2981,7 +3050,34 @@ fn render_window(window: Hwnd) {
                 .map(|tab| tab.name.clone())
                 .collect::<Vec<_>>();
             let completions = app.completions();
-            let symbols = editor_core::symbol_occurrences(&app.lines, &app.file_name);
+            let first_line = app.viewport.clamped(app.lines.len()).first_line;
+            let visible_lines = app
+                .buffer
+                .line_window(first_line, app.viewport.height.max(1));
+            let visible_lines = if visible_lines.is_empty() {
+                vec![String::new()]
+            } else {
+                visible_lines
+            };
+            let all_symbols = editor_core::symbol_occurrences(&app.lines, &app.file_name);
+            // Symbol rails only make sense for lines that are on screen.
+            let symbols = all_symbols
+                .iter()
+                .filter(|symbol| symbol.line >= first_line)
+                .map(|symbol| {
+                    let mut symbol = symbol.clone();
+                    symbol.line -= first_line;
+                    symbol
+                })
+                .collect::<Vec<_>>();
+            let hovered_symbol = app.hovered_symbol.as_ref().and_then(|symbol| {
+                if symbol.line < first_line {
+                    return None;
+                }
+                let mut symbol = symbol.clone();
+                symbol.line -= first_line;
+                Some(symbol)
+            });
             let graph_rows = graph_visible_rows(&area, dpi as f32 / 96.0, app.terminal_motion);
             let graph = build_graph(&app, &symbols);
             let tabs = app
@@ -3002,7 +3098,12 @@ fn render_window(window: Hwnd) {
                 app.runtime_cache.entries().len(),
                 extension_core::format_bytes(app.runtime_cache.total_bytes())
             );
-            let diagnostic_lines = app.diagnostic_lines();
+            let diagnostic_lines = app
+                .diagnostic_lines()
+                .into_iter()
+                .filter(|(line, _)| *line >= first_line)
+                .map(|(line, is_error)| (line - first_line, is_error))
+                .collect::<Vec<_>>();
             let status_line = match &app.lsp_hover {
                 Some((_, _, text)) => text.lines().next().unwrap_or("").to_string(),
                 None => app.status.clone(),
@@ -3015,7 +3116,12 @@ fn render_window(window: Hwnd) {
             } else {
                 graph.scope_label().to_string()
             };
-            let expanded_comments = app.expanded_comments.iter().copied().collect::<Vec<_>>();
+            let expanded_comments = app
+                .expanded_comments
+                .iter()
+                .filter(|line| **line >= first_line)
+                .map(|line| line - first_line)
+                .collect::<Vec<_>>();
             let create_location = app.create_location.to_string_lossy().into_owned();
             let background_path = app
                 .background_path
@@ -3055,12 +3161,20 @@ fn render_window(window: Hwnd) {
                 create_environment: app.project_environments()[app
                     .project_environment
                     .min(app.project_environments().len() - 1)],
-                lines: &app.lines,
-                caret_line: app.caret_line,
+                lines: &visible_lines,
+                caret_line: app.caret_line.saturating_sub(first_line),
                 caret_column: app.caret_column,
-                selection: app
-                    .selection_range()
-                    .map(|(start, end)| ((start.line, start.column), (end.line, end.column))),
+                scroll_columns: app.viewport.first_column,
+                first_line,
+                total_lines: app.lines.len(),
+                selection: app.selection_range().and_then(|(start, end)| {
+                    if end.line < first_line {
+                        return None;
+                    }
+                    let start_line = start.line.max(first_line) - first_line;
+                    let end_line = end.line - first_line;
+                    Some(((start_line, start.column), (end_line, end.column)))
+                }),
                 ime_composition: &app.ime_composition,
                 completions: &completions,
                 light_theme: app.light_theme,
@@ -3088,7 +3202,7 @@ fn render_window(window: Hwnd) {
                 ai_cache_summary: &ai_cache_summary,
                 ai_field_focused: app.ai_field_focused,
                 symbols: &symbols,
-                hovered_symbol: app.hovered_symbol.as_ref(),
+                hovered_symbol: hovered_symbol.as_ref(),
                 tabs: &tabs,
                 active_tab,
                 tab_dirty: app
@@ -3105,7 +3219,10 @@ fn render_window(window: Hwnd) {
                 graph_scope_label: &graph_scope_label,
                 graph_summary: &graph_summary,
                 expanded_comments: &expanded_comments,
-                editing_comment: app.editing_comment,
+                editing_comment: app
+                    .editing_comment
+                    .filter(|line| *line >= first_line)
+                    .map(|line| line - first_line),
                 pointer_x: app.pointer_x,
                 package_motion: app.package_motion,
                 package_targets: app.package_targets,
@@ -4708,6 +4825,7 @@ unsafe extern "system" fn window_proc(
                         _ => return,
                     }
                     app.clamp_caret();
+                    app.reveal_caret();
                     if app.editing_comment.is_some() {
                         app.clamp_comment_caret();
                     }
@@ -5420,6 +5538,16 @@ unsafe extern "system" fn window_proc(
                         let graph = build_graph(&app, &symbols);
                         app.graph_scroll = (app.graph_scroll + 1).min(graph.max_scroll(rows));
                     }
+                } else if app.pointer_x as f32 > (area.right as f32 * 0.19).max(220.0 * scale)
+                    && (app.pointer_x as f32) < graph_left
+                {
+                    if platform::shift_pressed() {
+                        let columns = if delta > 0 { -4 } else { 4 };
+                        app.scroll_editor_columns(columns);
+                    } else {
+                        let lines = if delta > 0 { -3 } else { 3 };
+                        app.scroll_editor(lines);
+                    }
                 } else if delta > 0 {
                     app.project_scroll = app.project_scroll.saturating_sub(3);
                 } else if delta < 0 {
@@ -5566,6 +5694,11 @@ unsafe extern "system" fn window_proc(
                 if let Some(renderer) = cell.borrow_mut().as_mut() {
                     unsafe { renderer.resize(width, height, platform::dpi_for_window(window)) };
                 }
+            });
+            APP.with(|cell| {
+                let scale = platform::dpi_for_window(window) as f32 / 96.0;
+                cell.borrow_mut()
+                    .resize_viewport(width as i32, height as i32, scale);
             });
             sync_terminal_grid(window);
             invalidate(window);
