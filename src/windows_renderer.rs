@@ -58,6 +58,7 @@ pub struct WindowsScene<'a> {
     pub symbols: &'a [SymbolOccurrence],
     pub project_symbols: &'a [ProjectSymbolOccurrence],
     pub hovered_symbol: Option<&'a SymbolOccurrence>,
+    pub graph_scroll: usize,
     pub expanded_comments: &'a [usize],
     pub editing_comment: Option<usize>,
     pub pointer_x: i32,
@@ -1027,6 +1028,7 @@ impl DirectEditorRenderer {
                 .project_symbols
                 .iter()
                 .filter(|entry| entry.symbol.name == focused.name)
+                .skip(scene.graph_scroll)
                 .take(7)
                 .map(|entry| {
                     format!(
@@ -1070,6 +1072,7 @@ impl DirectEditorRenderer {
                 .symbols
                 .iter()
                 .filter(|symbol| symbol.role == SymbolRole::Declaration)
+                .skip(scene.graph_scroll)
             {
                 if names.contains(&symbol.name) {
                     continue;
@@ -1127,6 +1130,20 @@ impl DirectEditorRenderer {
                 )
             };
         }
+        unsafe {
+            Self::text(
+                &target_base,
+                &self.small_format,
+                &muted,
+                &format!("wheel browse  ·  offset {}", scene.graph_scroll),
+                D2D_RECT_F {
+                    left: editor_right + 18.0 * scale,
+                    top: body_bottom - 34.0 * scale,
+                    right: width - 12.0 * scale,
+                    bottom: body_bottom - 8.0 * scale,
+                },
+            )
+        };
 
         unsafe {
             Self::fill(

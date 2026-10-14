@@ -141,6 +141,7 @@ struct WindowsAppState {
     expanded_comments: HashSet<usize>,
     editing_comment: Option<usize>,
     pointer_x: i32,
+    graph_scroll: usize,
     background_path: Option<PathBuf>,
     background_opacity: f32,
     background_offset_x: f32,
@@ -262,6 +263,7 @@ impl WindowsAppState {
             expanded_comments: HashSet::new(),
             editing_comment: None,
             pointer_x: -1,
+            graph_scroll: 0,
             background_path: preferences.background_path,
             background_opacity: preferences.background_opacity,
             background_offset_x: preferences.background_offset_x,
@@ -1681,6 +1683,7 @@ fn render_window(window: Hwnd) {
                 symbols: &symbols,
                 project_symbols: &app.project_symbols,
                 hovered_symbol: app.hovered_symbol.as_ref(),
+                graph_scroll: app.graph_scroll,
                 expanded_comments: &expanded_comments,
                 editing_comment: app.editing_comment,
                 pointer_x: app.pointer_x,
@@ -2134,6 +2137,45 @@ unsafe extern "system" fn window_proc(
                     return 0;
                 }
             }
+            let graph_left = area.right as f32 - (area.right as f32 * 0.27).max(300.0 * scale);
+            if x as f32 >= graph_left {
+                let first_y = (48.0 + 86.0) * scale;
+                let row = ((y as f32 - first_y + 12.0 * scale) / (58.0 * scale)).floor();
+                if row >= 2.0 {
+                    let target = APP.with(|cell| {
+                        let app = cell.borrow();
+                        let focused = app.hovered_symbol.as_ref()?;
+                        app.project_symbols
+                            .iter()
+                            .filter(|entry| entry.symbol.name == focused.name)
+                            .skip(app.graph_scroll)
+                            .nth(row as usize - 2)
+                            .map(|entry| {
+                                (
+                                    app.project_root.join(&entry.file),
+                                    entry.symbol.line,
+                                    entry.symbol.start,
+                                )
+                            })
+                    });
+                    if let Some((path, line, column)) = target {
+                        APP.with(|cell| {
+                            let mut app = cell.borrow_mut();
+                            app.open_file(path);
+                            app.caret_line = line.min(app.lines.len().saturating_sub(1));
+                            app.caret_column = column;
+                            app.clamp_caret();
+                            app.status = format!(
+                                "Jumped to relation at {}:{}",
+                                app.file_name,
+                                app.caret_line + 1
+                            );
+                        });
+                        invalidate(window);
+                        return 0;
+                    }
+                }
+            }
             if let Some((line, toggle)) = comment_bubble_at(window, x, y) {
                 APP.with(|cell| {
                     let mut app = cell.borrow_mut();
@@ -2256,9 +2298,29 @@ unsafe extern "system" fn window_proc(
         }
         WM_MOUSEWHEEL => {
             let delta = ((w_param >> 16) as u16 as i16) as i32;
+            let mut area = unsafe { std::mem::zeroed::<Rect>() };
+            unsafe { GetClientRect(window, &mut area) };
+            let scale = platform::dpi_for_window(window) as f32 / 96.0;
+            let graph_left = area.right as f32 - (area.right as f32 * 0.27).max(300.0 * scale);
             APP.with(|cell| {
                 let mut app = cell.borrow_mut();
-                if delta > 0 {
+                if app.pointer_x as f32 >= graph_left {
+                    if delta > 0 {
+                        app.graph_scroll = app.graph_scroll.saturating_sub(1);
+                    } else if delta < 0 {
+                        let count = app
+                            .hovered_symbol
+                            .as_ref()
+                            .map(|focused| {
+                                app.project_symbols
+                                    .iter()
+                                    .filter(|entry| entry.symbol.name == focused.name)
+                                    .count()
+                            })
+                            .unwrap_or(0);
+                        app.graph_scroll = (app.graph_scroll + 1).min(count.saturating_sub(1));
+                    }
+                } else if delta > 0 {
                     app.project_scroll = app.project_scroll.saturating_sub(3);
                 } else if delta < 0 {
                     let query = app.workspace_search.to_ascii_lowercase();
@@ -2279,7 +2341,10 @@ unsafe extern "system" fn window_proc(
             let dragging = APP.with(|cell| cell.borrow().dragging_selection);
             let x = (l_param as u16 as i16) as i32;
             let y = ((l_param >> 16) as u16 as i16) as i32;
-            APP.with(|cell| cell.borrow_mut().pointer_x = x);
+            APP.with(|cell| {
+                let mut app = cell.borrow_mut();
+                app.pointer_x = x;
+            });
             if dragging && w_param & 1 != 0 {
                 if let Some(position) = editor_position_at(window, x, y) {
                     APP.with(|cell| cell.borrow_mut().set_caret(position, true));
@@ -2301,6 +2366,7 @@ unsafe extern "system" fn window_proc(
                         false
                     } else {
                         app.hovered_symbol = hovered;
+                        app.graph_scroll = 0;
                         true
                     }
                 });
