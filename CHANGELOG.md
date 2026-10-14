@@ -73,6 +73,10 @@
 - `editor_core` 能识别无关键字的定义（`start() {`）而不会把 `if let Some(x) {` 或普通调用误判为定义。
 - AI 面板按最近 12 轮携带多轮上下文，请求体由 `ai_core::chat_body_with_history` 构建（有上限）。
 
+- 新增 `Ctrl+Shift+D` 问题与调试面板：语言服务器诊断、调试停止原因、调用栈、作用域变量与已设断点
+  在同一列表中，方向键选择、回车跳转到对应文件与行。
+- AI 会话按项目保存到 `.tc-ide-ai/history.conf`，打开项目时恢复；请求按最近 12 轮携带上下文。
+
 ### 工程与 CI
 
 - CI 新增 `cargo fmt --check`、Linux 与 Windows 目标的 Clippy（`-D warnings`）、

@@ -182,8 +182,8 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 
 - [~] 扩展安装：extension_core 已实现下载/校验/解包/卸载命令与运行时缓存清单，Windows 面板执行真实命令并校验摘要；**目录需用户提供（<项目>/.tc-ide-catalog.conf），仓库不内置编造的 URL 与校验和**，升级/卸载的界面入口也还没有
 - [x] 用户级运行时缓存清单：记录 id/版本/校验和/字节数/目录，支持复用、修剪与序列化（Windows 已接入，Linux 待接入）。
-- [~] Debugger/Formatter：格式化当前文件已完成；调试改为真正的 DAP 会话（`dap_core`：启动 debugpy/lldb-dap/dlv、F9 断点并在行槽标记、F5 启动/继续、Shift+F5 停止、F10 单步跳过、F11/Shift+F11 步入步出、停止后自动取调用栈/作用域/变量并跳到停下的帧，状态栏显示停止原因与前几个变量）；**仍缺独立的调用栈/变量面板与选区格式化**
-- [~] AI：`ai_core::ChatSession` 作为子进程运行 curl（Key 走环境变量、SSE 增量、HTTP 状态、可取消），Windows 面板支持内联输入、Enter 发送、Esc 取消、流式回答与错误显示，并按最近 12 轮携带多轮上下文；**会话历史仍未持久化到磁盘**
+- [~] Debugger/Formatter：格式化当前文件已完成；调试是真正的 DAP 会话（F9 断点、F5/Shift+F5、F10、F11/Shift+F11、自动取调用栈/作用域/变量并跳到停下的帧），调用栈、变量与断点现在显示在 `Ctrl+Shift+D` 面板中并可回车跳转；**仍缺选区格式化与断点的就地编辑（增删/条件）**
+- [x] AI：`ai_core::ChatSession` 子进程 curl（Key 走环境变量、SSE 增量、HTTP 状态、可取消）+ Windows 面板（内联输入、Enter 发送、Esc 取消、流式回答、错误显示、最近 12 轮上下文），会话按项目保存到 `.tc-ide-ai/history.conf` 并在打开项目时恢复。
 - [x] API 请求使用用户选择的 Endpoint；Key 仅驻内存并通过子进程环境变量 TC_IDE_AI_KEY 传递，不出现在命令行、配置文件或日志。
 
 ### P1：打包与动画
@@ -338,7 +338,7 @@ cargo run --release
 
 ```bash
 cargo fmt --check
-cargo test --all-targets                                   # 157 项共享内核与后端测试
+cargo test --all-targets                                   # 158 项共享内核与后端测试
 cargo clippy --all-targets -- -D warnings                   # 共享内核 + Linux 后端
 cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo check --all-targets --target x86_64-pc-windows-msvc    # Windows 类型检查
