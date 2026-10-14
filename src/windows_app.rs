@@ -15,6 +15,7 @@ use crate::extension_core;
 use crate::graph_core;
 use crate::index_core;
 use crate::lsp_core;
+use crate::motion_core;
 use crate::session_core;
 use crate::syntax_core;
 use crate::terminal_core;
@@ -3298,16 +3299,10 @@ impl WindowsAppState {
         }
     }
 
+    /// Shared spring step, so overlays move the same way on every backend.
     fn step_overlay_motion(value: &mut f32, velocity: &mut f32, open: bool, dt: f32) {
         let target = if open { 1.0 } else { 0.0 };
-        *velocity += (target - *value) * 300.0 * dt;
-        *velocity *= (-19.0 * dt).exp();
-        *value += *velocity * dt;
-        *value = value.clamp(-0.04, 1.04);
-        if (target - *value).abs() < 0.0008 && velocity.abs() < 0.0008 {
-            *value = target;
-            *velocity = 0.0;
-        }
+        motion_core::step(value, velocity, target, dt, motion_core::OVERLAY);
     }
 }
 
@@ -6869,6 +6864,15 @@ pub fn self_check() -> i32 {
     report(
         "rename edits apply to a document",
         applied == "let answer = 1;\n",
+        &mut failures,
+    );
+    let mut spring = motion_core::Spring::new(0.0);
+    for _ in 0..120 {
+        spring.step(1.0, 1.0 / 60.0);
+    }
+    report(
+        "spring settles on its target",
+        spring.is_settled(1.0) && spring.value == 1.0,
         &mut failures,
     );
     let tooling = extension_core::language_tools("Rust", |tool| tool == "rustfmt");

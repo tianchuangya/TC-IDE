@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use crate::editor_core;
 use crate::extension_core;
 use crate::graph_core;
+use crate::motion_core;
 use crate::session_core;
 use crate::workspace_core;
 
@@ -1354,15 +1355,9 @@ impl App {
         amount
     }
 
+    /// Shared spring step, so drawers and trees move the same way everywhere.
     fn spring_step(value: &mut f32, velocity: &mut f32, target: f32, dt: f32) {
-        *velocity += (target - *value) * 235.0 * dt;
-        *velocity *= (-17.0 * dt).exp();
-        *value += *velocity * dt;
-        *value = value.clamp(-0.08, 1.08);
-        if (*value - target).abs() < 0.001 && velocity.abs() < 0.01 {
-            *value = target;
-            *velocity = 0.0;
-        }
+        motion_core::step(value, velocity, target, dt, motion_core::DRAWER);
     }
 
     fn step_ui_motion(motion: &mut UiMotion, visible: bool, dt: f32) {
