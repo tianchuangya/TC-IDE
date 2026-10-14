@@ -59,6 +59,42 @@ pub struct Declaration {
     pub scope: usize,
 }
 
+/// What a call is made on, when the scan can tell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallReceiver {
+    /// `self.run()` or `this.run()`.
+    SelfRef,
+    /// `Engine::new()` or `Engine::default().build()` style qualifiers.
+    Type(String),
+    /// `writer.flush()` on a value.
+    Value(String),
+}
+
+impl CallReceiver {
+    /// The owner the receiver names, when it is one.
+    ///
+    /// `self` belongs to the scope the call sits in, which the resolver knows.
+    pub fn owner(&self) -> Option<&str> {
+        match self {
+            CallReceiver::SelfRef => None,
+            CallReceiver::Type(name) | CallReceiver::Value(name) => Some(name),
+        }
+    }
+
+    /// Whether the receiver starts with a capital, which reads as a type.
+    pub fn looks_like_type(&self) -> bool {
+        match self {
+            CallReceiver::Type(_) => true,
+            CallReceiver::Value(name) => name
+                .chars()
+                .next()
+                .map(|value| value.is_uppercase())
+                .unwrap_or(false),
+            CallReceiver::SelfRef => false,
+        }
+    }
+}
+
 /// A call shaped identifier occurrence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Call {
@@ -67,6 +103,9 @@ pub struct Call {
     pub column: usize,
     /// Index of the innermost scope the call appears in.
     pub scope: usize,
+    /// What the call is made on, for `self.helper()`, `Engine::new()` or
+    /// `writer.flush()`. `None` for a plain `helper()`.
+    pub receiver: Option<CallReceiver>,
 }
 
 /// Everything the scan learned about one file.
@@ -152,6 +191,40 @@ impl FileScan {
         }
         depth
     }
+}
+
+/// Class-like scope a line opens without declaring a type of its own.
+///
+/// `impl Display for Engine {` opens the scope of `Engine`, and `namespace Foo {`
+/// opens `Foo`. Neither adds a symbol: the type itself is declared by its
+/// `struct`, `class` or `trait` line, and a second declaration would show the
+/// same class twice in the graph.
+fn scope_hint(masked: &str) -> Option<(String, ScopeKind)> {
+    let words = editor_core::identifier_ranges(masked);
+    let keyword = words.first()?.2.as_str();
+    if !matches!(
+        keyword,
+        "impl" | "namespace" | "module" | "object" | "extension"
+    ) {
+        return None;
+    }
+    let names = words
+        .iter()
+        .skip(1)
+        .map(|entry| entry.2.clone())
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        return None;
+    }
+    // `impl Display for Engine` belongs to Engine, not to the trait.
+    let name = match names.iter().position(|value| value == "for") {
+        Some(position) => names
+            .get(position + 1)
+            .cloned()
+            .unwrap_or_else(|| names[0].clone()),
+        None => names[0].clone(),
+    };
+    Some((name, ScopeKind::Class))
 }
 
 /// Replace comments and string literals with spaces, keeping column positions.
@@ -260,6 +333,7 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
 
         let declaration = editor_core::declaration_name(raw, file);
         let kind = editor_core::declaration_kind(raw, file);
+        let hint = scope_hint(trimmed);
         let symbol_kind = declaration.as_ref().map(|_| kind);
         let scope_index = *stack.last().unwrap_or(&0);
         let mut opened_function = None;
@@ -283,23 +357,28 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
         for (offset, character) in masked.char_indices() {
             match character {
                 '{' => {
-                    let kind = if first_open && opened_function.is_some() {
-                        if symbol_kind == Some(SymbolKind::Class) {
-                            ScopeKind::Class
+                    let (kind, name) = if first_open {
+                        if let Some((name, kind)) = hint.clone() {
+                            (kind, Some(name))
+                        } else if opened_function.is_some() {
+                            (
+                                if symbol_kind == Some(SymbolKind::Class) {
+                                    ScopeKind::Class
+                                } else {
+                                    ScopeKind::Function
+                                },
+                                opened_function.clone(),
+                            )
                         } else {
-                            ScopeKind::Function
+                            (ScopeKind::Block, None)
                         }
                     } else {
-                        ScopeKind::Block
+                        (ScopeKind::Block, None)
                     };
                     let parent = *stack.last().unwrap_or(&0);
                     scopes.push(Scope {
                         kind,
-                        name: if first_open {
-                            opened_function.clone()
-                        } else {
-                            None
-                        },
+                        name,
                         start_line: line_index,
                         end_line: lines.len().saturating_sub(1),
                         parent: Some(parent),
@@ -352,9 +431,11 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
         // Calls: an identifier followed by an opening parenthesis that is not
         // the declaration on this line and not a control keyword.
         let inner_scope = *stack.last().unwrap_or(&0);
-        for (start, end) in call_positions(&masked) {
+        for (start, end, receiver) in call_positions(&masked) {
             let name = &masked[start..end];
-            if declaration.as_deref() == Some(name) {
+            if declaration.as_deref() == Some(name) && receiver.is_none() {
+                // The declaration on this line opens the scope the call would
+                // otherwise be counted in; `Engine::run();` is not that.
                 continue;
             }
             if matches!(
@@ -381,6 +462,7 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
                 line: line_index,
                 column,
                 scope: inner_scope,
+                receiver,
             });
         }
     }
@@ -402,8 +484,13 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
     }
 }
 
-/// Byte ranges of `name(` patterns in masked text.
-fn call_positions(masked: &str) -> Vec<(usize, usize)> {
+/// Byte ranges of `name(` patterns in masked text, with what they are called on.
+///
+/// Member calls used to be skipped because they "belonged to the object", but
+/// that also lost every `self.helper()` and `Engine::new()` edge in the
+/// relation graph. They are reported now, together with the receiver, so the
+/// resolver can look the member up in the class that owns the call.
+fn call_positions(masked: &str) -> Vec<(usize, usize, Option<CallReceiver>)> {
     let mut positions = Vec::new();
     let bytes = masked.as_bytes();
     let mut index = 0usize;
@@ -424,15 +511,224 @@ fn call_positions(masked: &str) -> Vec<(usize, usize)> {
             next += 1;
         }
         if next < bytes.len() && bytes[next] == b'(' {
-            // Skip a member call like `self.run(`, which belongs to the object.
-            let before = &masked[..start];
-            let qualified = before.trim_end().ends_with('.') || before.trim_end().ends_with("::");
-            if !qualified {
-                positions.push((start, end));
-            }
+            positions.push((start, end, receiver_before(&masked[..start])));
         }
     }
     positions
+}
+
+/// The receiver written before a call site, if the text names one.
+fn receiver_before(before: &str) -> Option<CallReceiver> {
+    let trimmed = before.trim_end();
+    let separator = if trimmed.ends_with("->") || trimmed.ends_with("::") {
+        trimmed.len() - 2
+    } else if trimmed.ends_with('.') {
+        trimmed.len() - 1
+    } else {
+        return None;
+    };
+    let head = &trimmed[..separator];
+    let start = head
+        .char_indices()
+        .rev()
+        .find(|(_, value)| !value.is_alphanumeric() && *value != '_' && *value != ':')
+        .map(|(offset, value)| offset + value.len_utf8())
+        .unwrap_or(0);
+    let name = head[start..].trim_start_matches(':');
+    if name.is_empty() {
+        // A chained call such as `build().run()`: the receiver is a value the
+        // scan cannot name, so it stays unknown instead of guessed.
+        return None;
+    }
+    Some(match name {
+        "self" | "this" => CallReceiver::SelfRef,
+        _ => {
+            let last = name.rsplit("::").next().unwrap_or(name);
+            if last.chars().next().map(|value| value.is_uppercase()) == Some(true) {
+                CallReceiver::Type(last.to_string())
+            } else {
+                CallReceiver::Value(last.to_string())
+            }
+        }
+    })
+}
+
+/// A declaration somewhere in the project, as the index stores it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeclarationRef {
+    pub name: String,
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub kind: SymbolKind,
+    /// Class or function the declaration belongs to, when it has one.
+    pub owner: Option<String>,
+}
+
+/// How sure the resolver is about a call target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CallConfidence {
+    /// A member of the class the call sits in, reached through `self`.
+    Member,
+    /// A declaration of the file the call appears in.
+    SameFile,
+    /// A declaration of another file of the project.
+    Project,
+}
+
+/// One declaration a call may refer to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedCall {
+    pub declaration: DeclarationRef,
+    pub confidence: CallConfidence,
+}
+
+/// The class or function a scope belongs to, nearest first.
+pub fn owner_of(scan: &FileScan, scope: usize) -> Option<String> {
+    let mut current = Some(scope);
+    while let Some(index) = current {
+        let value = scan.scopes.get(index)?;
+        if value.kind == ScopeKind::Class || value.kind == ScopeKind::Function {
+            if let Some(name) = &value.name {
+                return Some(name.clone());
+            }
+        }
+        current = value.parent;
+    }
+    None
+}
+
+/// The declarations of one file, each with the owner it belongs to.
+pub fn declaration_refs(scan: &FileScan, file: &str) -> Vec<DeclarationRef> {
+    scan.declarations
+        .iter()
+        .map(|declaration| DeclarationRef {
+            name: declaration.name.clone(),
+            file: file.to_string(),
+            line: declaration.line,
+            column: declaration.column,
+            kind: declaration.kind,
+            owner: owner_of_declaration(scan, declaration),
+        })
+        .collect()
+}
+
+/// The class or function a declaration belongs to.
+///
+/// A method owns the scope it opens, so the walk starts above that scope: the
+/// owner of `impl Engine { fn build() }` is `Engine`, not `build`.
+fn owner_of_declaration(scan: &FileScan, declaration: &Declaration) -> Option<String> {
+    let owned = scan.scopes.get(declaration.scope).and_then(|scope| {
+        let owns = scope.start_line == declaration.line
+            && scope.name.as_deref() == Some(declaration.name.as_str());
+        if owns {
+            scope.parent
+        } else {
+            Some(declaration.scope)
+        }
+    });
+    owner_of(scan, owned?)
+}
+
+/// Rank the declarations a call site may refer to, best match first.
+///
+/// The rules follow what a reader would assume: `self.helper()` is a member of
+/// the class the call sits in, a capitalized qualifier such as `Engine::new()`
+/// is an associated item of that type, and anything else is looked up in the
+/// file first and in the rest of the project afterwards. The scan cannot see
+/// types, so a name with several declarations keeps all of them, ranked, and the
+/// relation graph shows the weaker ones as weak edges instead of inventing one.
+pub fn resolve_call(
+    call: &Call,
+    scan: &FileScan,
+    file: &str,
+    project: &[DeclarationRef],
+    limit: usize,
+) -> Vec<ResolvedCall> {
+    let mut candidates: Vec<DeclarationRef> = declaration_refs(scan, file)
+        .into_iter()
+        .chain(project.iter().cloned())
+        .filter(|declaration| declaration.name == call.name)
+        .collect();
+    candidates.sort_by(|left, right| {
+        left.file
+            .cmp(&right.file)
+            .then_with(|| left.line.cmp(&right.line))
+            .then_with(|| left.column.cmp(&right.column))
+    });
+    candidates.dedup_by(|left, right| {
+        left.file == right.file && left.line == right.line && left.name == right.name
+    });
+    if candidates.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+
+    // `self.helper()` belongs to the class the call sits in, which is the
+    // enclosing class even when the call is inside a nested function.
+    let self_owner = call
+        .receiver
+        .as_ref()
+        .filter(|receiver| **receiver == CallReceiver::SelfRef)
+        .and_then(|_| owning_class(scan, call.scope));
+    let named_owner = call
+        .receiver
+        .as_ref()
+        .filter(|receiver| receiver.looks_like_type())
+        .and_then(|receiver| receiver.owner());
+
+    let mut ranked = candidates
+        .into_iter()
+        .map(|declaration| {
+            let confidence = if let Some(owner) = self_owner.as_deref() {
+                if declaration.owner.as_deref() == Some(owner) && declaration.file == file {
+                    CallConfidence::Member
+                } else if declaration.file == file {
+                    CallConfidence::SameFile
+                } else {
+                    CallConfidence::Project
+                }
+            } else if let Some(owner) = named_owner {
+                if declaration.owner.as_deref() == Some(owner) {
+                    CallConfidence::Member
+                } else if declaration.file == file {
+                    CallConfidence::SameFile
+                } else {
+                    CallConfidence::Project
+                }
+            } else if declaration.file == file {
+                CallConfidence::SameFile
+            } else {
+                CallConfidence::Project
+            };
+            ResolvedCall {
+                declaration,
+                confidence,
+            }
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        left.confidence
+            .cmp(&right.confidence)
+            .then_with(|| left.declaration.file.cmp(&right.declaration.file))
+            .then_with(|| left.declaration.line.cmp(&right.declaration.line))
+    });
+    ranked.truncate(limit);
+    ranked
+}
+
+/// The class a scope belongs to, even when the call is inside a method.
+fn owning_class(scan: &FileScan, scope: usize) -> Option<String> {
+    let mut current = Some(scope);
+    while let Some(index) = current {
+        let value = scan.scopes.get(index)?;
+        if value.kind == ScopeKind::Class {
+            if let Some(name) = &value.name {
+                return Some(name.clone());
+            }
+        }
+        current = value.parent;
+    }
+    None
 }
 
 /// Occurrences of a name that look like calls, for one file.
@@ -616,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn calls_ignore_comments_strings_and_member_prefixes() {
+    fn calls_ignore_comments_and_strings_but_keep_their_receiver() {
         let source = lines(&[
             "pub fn run() {",
             "    helper();",
@@ -632,7 +928,25 @@ mod tests {
             .iter()
             .position(|scope| scope.name.as_deref() == Some("run"))
             .expect("run");
-        assert_eq!(scan.called_names(function), ["helper"]);
+        assert_eq!(
+            scan.called_names(function),
+            ["helper", "method", "fourth"],
+            "a comment and a string are not calls, a member call is"
+        );
+        let call = |name: &str| {
+            scan.calls
+                .iter()
+                .find(|call| call.name == name)
+                .expect("the call")
+        };
+        assert_eq!(call("helper").receiver, None);
+        assert_eq!(call("method").receiver, Some(CallReceiver::SelfRef));
+        assert_eq!(
+            call("fourth").receiver,
+            Some(CallReceiver::Value("crate".into()))
+        );
+        assert!(!scan.calls.iter().any(|call| call.name == "other"));
+        assert!(!scan.calls.iter().any(|call| call.name == "third"));
     }
 
     #[test]
@@ -681,5 +995,184 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(declarations, ["run", "helper"]);
         assert_eq!(references, ["helper"]);
+    }
+
+    #[test]
+    fn a_scan_reports_what_a_call_is_made_on() {
+        let source = lines(&[
+            "struct Engine {",
+            "    name: String,",
+            "}",
+            "impl Engine {",
+            "    fn build(&self) {",
+            "        self.prepare();",
+            "        Engine::default();",
+            "        writer.flush();",
+            "        helper();",
+            "        std::mem::drop(value);",
+            "        make().run();",
+            "    }",
+            "    fn prepare(&self) {}",
+            "}",
+        ]);
+        let scan = scan(&source, "engine.rs");
+        let receiver = |name: &str| {
+            scan.calls
+                .iter()
+                .find(|call| call.name == name)
+                .and_then(|call| call.receiver.clone())
+        };
+        assert_eq!(receiver("prepare"), Some(CallReceiver::SelfRef));
+        assert_eq!(
+            receiver("default"),
+            Some(CallReceiver::Type("Engine".into()))
+        );
+        assert_eq!(
+            receiver("flush"),
+            Some(CallReceiver::Value("writer".into()))
+        );
+        assert_eq!(receiver("helper"), None);
+        assert_eq!(
+            receiver("drop"),
+            Some(CallReceiver::Value("mem".into())),
+            "a module path keeps its last segment"
+        );
+        assert_eq!(
+            receiver("run"),
+            None,
+            "a chained call has no nameable receiver"
+        );
+        assert!(
+            scan.calls.iter().any(|call| call.name == "prepare"),
+            "member calls are no longer dropped"
+        );
+    }
+
+    #[test]
+    fn declarations_carry_the_owner_they_belong_to() {
+        let source = lines(&[
+            "impl Engine {",
+            "    fn build(&self) {",
+            "        let nested = |value: i32| value + 1;",
+            "    }",
+            "    fn prepare(&self) {}",
+            "}",
+            "fn free() {}",
+        ]);
+        let scan = scan(&source, "engine.rs");
+        let refs = declaration_refs(&scan, "engine.rs");
+        let owner = |name: &str| {
+            refs.iter()
+                .find(|declaration| declaration.name == name)
+                .and_then(|declaration| declaration.owner.clone())
+        };
+        assert_eq!(owner("build").as_deref(), Some("Engine"));
+        assert_eq!(owner("prepare").as_deref(), Some("Engine"));
+        assert_eq!(owner("Engine"), None, "a class has no owner");
+        assert!(refs
+            .iter()
+            .all(|declaration| declaration.file == "engine.rs"));
+    }
+
+    #[test]
+    fn a_self_call_resolves_to_the_member_of_its_own_class() {
+        let source = lines(&[
+            "impl Engine {",
+            "    fn build(&self) {",
+            "        self.prepare();",
+            "    }",
+            "    fn prepare(&self) {}",
+            "}",
+            "impl Other {",
+            "    fn prepare(&self) {}",
+            "}",
+        ]);
+        let scan = scan(&source, "engine.rs");
+        let project = declaration_refs(&scan, "engine.rs");
+        let call = scan
+            .calls
+            .iter()
+            .find(|call| call.name == "prepare")
+            .expect("the self call");
+        let resolved = resolve_call(call, &scan, "engine.rs", &project, 4);
+        assert_eq!(resolved.len(), 2, "both members are candidates");
+        assert_eq!(resolved[0].confidence, CallConfidence::Member);
+        assert_eq!(resolved[0].declaration.owner.as_deref(), Some("Engine"));
+        assert_eq!(resolved[1].confidence, CallConfidence::SameFile);
+        assert_eq!(resolved[1].declaration.owner.as_deref(), Some("Other"));
+    }
+
+    #[test]
+    fn a_qualified_call_prefers_the_named_type_and_otherwise_falls_back() {
+        let source = lines(&[
+            "impl Engine {",
+            "    fn run(&self) {}",
+            "}",
+            "fn start() {",
+            "    Engine::run();",
+            "    helper();",
+            "}",
+        ]);
+        let scan = scan(&source, "engine.rs");
+        let mut project = declaration_refs(&scan, "engine.rs");
+        project.push(DeclarationRef {
+            name: "helper".into(),
+            file: "src/other.rs".into(),
+            line: 12,
+            column: 0,
+            kind: SymbolKind::Function,
+            owner: Some("Worker".into()),
+        });
+        let call = |name: &str| {
+            scan.calls
+                .iter()
+                .find(|call| call.name == name)
+                .expect("the call")
+        };
+        let qualified = resolve_call(call("run"), &scan, "engine.rs", &project, 4);
+        assert_eq!(qualified.len(), 1);
+        assert_eq!(qualified[0].confidence, CallConfidence::Member);
+        assert_eq!(qualified[0].declaration.owner.as_deref(), Some("Engine"));
+
+        // A plain call finds the helper in the other file when this one has none.
+        let plain = resolve_call(call("helper"), &scan, "engine.rs", &project, 4);
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].confidence, CallConfidence::Project);
+        assert_eq!(plain[0].declaration.file, "src/other.rs");
+    }
+
+    #[test]
+    fn resolution_prefers_this_file_then_the_project_and_stays_bounded() {
+        let source = lines(&["fn start() {", "    helper();", "}", "fn helper() {}"]);
+        let scan = scan(&source, "main.rs");
+        let mut project = declaration_refs(&scan, "main.rs");
+        for index in 0..6 {
+            project.push(DeclarationRef {
+                name: "helper".into(),
+                file: format!("src/module{index}.rs"),
+                line: index,
+                column: 0,
+                kind: SymbolKind::Function,
+                owner: None,
+            });
+        }
+        let call = scan.calls.first().expect("the call");
+        let resolved = resolve_call(call, &scan, "main.rs", &project, 4);
+        assert_eq!(resolved.len(), 4, "the list is capped");
+        assert_eq!(resolved[0].confidence, CallConfidence::SameFile);
+        assert_eq!(resolved[0].declaration.file, "main.rs");
+        assert!(resolved[1..]
+            .iter()
+            .all(|entry| entry.confidence == CallConfidence::Project));
+        assert!(resolve_call(call, &scan, "main.rs", &project, 0).is_empty());
+
+        let unknown = Call {
+            name: "nowhere".into(),
+            line: 1,
+            column: 0,
+            scope: 0,
+            receiver: None,
+        };
+        assert!(resolve_call(&unknown, &scan, "main.rs", &project, 4).is_empty());
     }
 }

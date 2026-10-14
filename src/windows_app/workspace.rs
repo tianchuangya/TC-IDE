@@ -20,8 +20,14 @@ impl WindowsAppState {
             self.started.elapsed().as_millis() as u64,
         );
         if self.project_index.update_file(fingerprint, &self.lines) {
-            self.project_symbols = self.project_index.symbols();
+            self.refresh_index_tables();
         }
+    }
+
+    /// Re-read both index tables after a file changed.
+    pub(super) fn refresh_index_tables(&mut self) {
+        self.project_symbols = self.project_index.symbols();
+        self.project_declarations = self.project_index.declarations();
     }
 
     pub(super) fn scan_project(
@@ -363,6 +369,7 @@ impl WindowsAppState {
             // The project changed while the scan was running; drop the result.
             return;
         }
+        self.project_declarations = index.declarations();
         self.project_symbols = index.symbols();
         self.project_index = index;
         self.status = format!(

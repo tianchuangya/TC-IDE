@@ -258,6 +258,9 @@ struct WindowsAppState {
     collapsed_directories: HashSet<PathBuf>,
     project_scroll: usize,
     project_symbols: Vec<editor_core::ProjectSymbolOccurrence>,
+    /// Declarations of the indexed project, with their owners, for resolving
+    /// callees across files.
+    project_declarations: Vec<syntax_core::DeclarationRef>,
     project_index: index_core::IncrementalIndex,
     workspace_search: String,
     workspace_search_focused: bool,
@@ -516,6 +519,7 @@ impl WindowsAppState {
             Self::read_project_file(&project_root, relative)
         });
         let project_symbols = project_index.symbols();
+        let project_declarations = project_index.declarations();
         let package_targets = Self::load_package_targets(&project_root);
         let create_location = project_root.clone();
         Self {
@@ -530,6 +534,7 @@ impl WindowsAppState {
             collapsed_directories,
             project_scroll: 0,
             project_symbols,
+            project_declarations,
             project_index,
             workspace_search: String::new(),
             workspace_search_focused: false,
@@ -982,6 +987,12 @@ pub fn self_check() -> i32 {
         ],
     )];
     let project = editor_core::project_symbol_occurrences(&sources);
+    let declarations = sources
+        .iter()
+        .flat_map(|(name, lines)| {
+            syntax_core::declaration_refs(&syntax_core::scan(lines, name), name)
+        })
+        .collect::<Vec<_>>();
     let lines = sources[0].1.clone();
     let symbols = editor_core::symbol_occurrences(&lines, "src/main.rs");
     let folded = vec![graph_core::file_key("src/main.rs")];
@@ -993,6 +1004,7 @@ pub fn self_check() -> i32 {
         file_lines: &lines,
         file_symbols: &symbols,
         project_symbols: &project,
+        project_declarations: &declarations,
         folded: &folded,
         relation: graph_core::GraphRelation::Follow,
     };

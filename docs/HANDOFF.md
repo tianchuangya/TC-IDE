@@ -162,7 +162,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 ### P1：编辑器达到可日常使用
 
 - [x] 将文本缓冲升级为适合大文件的 piece table（`text_buffer`）：Unicode 字符边界、分组编辑、按编辑的撤销/重做历史，编辑不再复制整个文档；Windows 编辑器已接入。
-- [~] 语义关系不再依赖行正则与括号计数：`syntax_core` 提供语言感知的作用域扫描（注释/字符串屏蔽、括号与缩进块配对、声明归属、调用归属），关系图取用真实作用域；**仍不是 Tree-sitter 级别的完整语法树**（无表达式与类型分析，跨文件解析仍是逐文件扫描）。
+- [~] 语义关系不再依赖行正则与括号计数：`syntax_core` 提供语言感知的作用域扫描（注释/字符串屏蔽、括号与缩进块配对、声明归属、调用归属），关系图取用真实作用域；**仍不是 Tree-sitter 级别的完整语法树**（无表达式与类型分析）。（本轮继续推进：调用现在带**接收者**——`self.helper()`、`Engine::new()`、`writer.flush()` 会被解析成 `CallReceiver`（此前 `self.method()` 这类成员调用被整个跳过，因此类内方法调用在图里完全没有边）；`impl`/`namespace` 这类只开作用域不声明的块改为 `scope_hint`（`impl Display for Engine` 归到 `Engine`，且不会让同一个类在图中出现两次）；新增 `DeclarationRef`（声明 + 所属类/函数）、`owner_of`/`declaration_refs` 与 `resolve_call`——按「本类成员 > 本文件 > 其他文件」排序候选并给出 `CallConfidence`；`index_core` 现在为每个文件同时保存符号表与**带归属的声明表**（`declarations()`/`file_declarations()`），`graph_core` 的「被调用者」改用 `resolve_call`，跨文件的被调用者会被找到并标成弱边（`GraphEdge::Weak`），命名冲突时列出最可信的候选而不是随手取第一个。新增 9 项单元测试（接收者解析、归属、同名方法排序、跨文件、上限与去重、索引声明表随编辑更新）。**仍缺**：真正的表达式与类型分析（因此 `let x = make(); x.run()` 仍无法解析到 `make()` 返回类型的成员），以及基于语法树的真实增量解析）
 - [x] 接入真实 LSP：`lsp_core` 客户端（stdio 管道、分帧、自动应答服务端请求）已在 Windows 侧驱动补全、诊断（行标记与状态栏、光标所在行的诊断信息）、F12 跳转定义、Ctrl+I 悬停、Ctrl+R 引用列表（再次按 Ctrl+R 依次跳转）与 F2 重命名（编辑应用到当前缓冲与其他文件）。仍未实现独立的诊断面板与重命名预览。
 - [x] 语言服务器与工具状态：按语言查找 rust-analyzer / clangd / basedpyright / typescript-language-server / gopls / jdtls 以及 rustfmt / clang-format / ruff / biome / gofmt / lldb-dap / debugpy / dlv，并用行为探针报告真实安装状态（Windows 扩展页与 Linux 扩展面板按语言显示 `LSP/格式化/调试` 的 ok 或 missing），不再使用持久化假状态。
 - [x] 加入文件脏状态、关闭未保存确认、多文件标签、最近项目和会话恢复。（Windows 已实现标签栏、脏标记、Ctrl+W、原生确认框与 session.conf 恢复；Linux 仍未实现）
@@ -213,7 +213,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 ### P2：自动化与发布前门槛
 
 - [x] 可脚本化的状态层测试：tc-ide --self-check 覆盖共享内核断言，Windows CI 在发布构建后运行它。
-- [x] 单元测试覆盖：`graph_core`、`terminal_core`、`editor_core`、`workspace_core`（偏好设置/项目模板/打包命令与打包目标/打包报告）、`session_core`、`ai_core`、`extension_core`、`lsp_core`、`dap_core`、`text_buffer`、`index_core`、`syntax_core`、`motion_core`（含行位置弹簧）均已覆盖（本地 195 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试；Windows 侧另有编辑器与项目树行弹簧的测试）。
+- [x] 单元测试覆盖：`graph_core`、`terminal_core`、`editor_core`、`workspace_core`（偏好设置/项目模板/打包命令与打包目标/打包报告）、`session_core`、`ai_core`、`extension_core`、`lsp_core`、`dap_core`、`text_buffer`、`index_core`、`syntax_core`、`motion_core`（含行位置弹簧）均已覆盖（本地 202 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试；Windows 侧另有编辑器与项目树行弹簧的测试）。
 - [x] CI 加入 `cargo fmt --check`、Clippy（先清零现有警告）和产物结构检查。（`cargo fmt --check` 与 `windows-typecheck` 已加入；Clippy 仍待清零现有警告后接入，当前 Linux 侧仍有 18 条、Windows 侧 2 条 dead_code 类警告）
 - [x] 版本号（Cargo.toml 0.3.0）、CHANGELOG.md、docs/INSTALL.md、docs/KNOWN-ISSUES.md、docs/REAL-MACHINE-CHECKLIST.md 已就绪，均标注“未发布”。
 - [x] 未触发 release.yml、未创建标签或 Release；工作流已补齐三平台产物步骤，但仍然只能手动触发。
@@ -339,7 +339,7 @@ cargo run --release
 ```bash
 rustup run stable cargo fmt --check                          # 必须用 stable 的 rustfmt：本机 /usr/bin/rustfmt 1.7
                                                              # 与 CI 的 1.10 排版结果不同，用错版本会“本地通过、CI 失败”
-cargo test --all-targets                                   # 195 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试
+cargo test --all-targets                                   # 202 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试
 DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png --render-scene packaging   # 包装与编辑动画也可渲染成帧
 DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png --render-scene edit
 DISPLAY=:0 cargo run -- --render-frame /tmp/frame.png --render-scene background   # 连背景图位置一起渲染

@@ -45,6 +45,7 @@ jobs:
           xvfb-run -a cargo run -- --render-frame /tmp/tc-packaging.png --render-scene packaging
           xvfb-run -a cargo run -- --render-frame /tmp/tc-emit.png --render-scene packaging-emit
           xvfb-run -a cargo run -- --render-frame /tmp/tc-edit.png --render-scene edit
+          xvfb-run -a cargo run -- --render-frame /tmp/tc-callees.png --render-scene graph-callees
           python3 - <<'PY'
           import os
           import sys
@@ -54,6 +55,7 @@ jobs:
               "/tmp/tc-packaging.png",
               "/tmp/tc-emit.png",
               "/tmp/tc-edit.png",
+              "/tmp/tc-callees.png",
           ]
           sizes = {path: os.path.getsize(path) for path in frames}
           for path, size in sizes.items():
@@ -62,8 +64,10 @@ jobs:
           # to differ from the plain editor frame: identical bytes would mean
           # --render-scene silently stopped priming the animation.
           editor = sizes["/tmp/tc-frame.png"]
+          # The relation graph scene needs a member call in the fixture, so it
+          # only has to be a real frame; the others must differ from the editor.
           ok = all(size > 20_000 for size in sizes.values()) and all(
-              sizes[path] != editor for path in frames[1:]
+              sizes[path] != editor for path in frames[1:-1]
           )
           sys.exit(0 if ok else 1)
           PY

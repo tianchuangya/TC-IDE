@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 
 use crate::editor_core::{self, ProjectSymbolOccurrence};
+use crate::syntax_core::{self, DeclarationRef};
 
 /// Identity of a file version, cheap enough to compute while scanning.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,12 +50,23 @@ pub struct IndexStats {
     pub skipped: usize,
     /// Symbol occurrences in the index afterwards.
     pub symbols: usize,
+    /// Declarations in the index afterwards.
+    pub declarations: usize,
+}
+
+/// Symbols and declarations of one file.
+#[derive(Clone, Debug, Default)]
+struct IndexedFile {
+    symbols: Vec<ProjectSymbolOccurrence>,
+    /// Declarations with the class or function each one belongs to, which the
+    /// relation graph needs to resolve `self.helper()` across files.
+    declarations: Vec<DeclarationRef>,
 }
 
 /// Symbols of every known file, keyed by the file's relative path.
 #[derive(Clone, Debug, Default)]
 pub struct IncrementalIndex {
-    files: BTreeMap<String, (FileFingerprint, Vec<ProjectSymbolOccurrence>)>,
+    files: BTreeMap<String, (FileFingerprint, IndexedFile)>,
 }
 
 impl IncrementalIndex {
@@ -75,7 +87,7 @@ impl IncrementalIndex {
         let mut symbols = self
             .files
             .values()
-            .flat_map(|(_, symbols)| symbols.iter().cloned())
+            .flat_map(|(_, file)| file.symbols.iter().cloned())
             .collect::<Vec<_>>();
         symbols.sort_by(|left, right| {
             left.file
@@ -85,9 +97,34 @@ impl IncrementalIndex {
         symbols
     }
 
+    /// Declarations of every known file, in path order.
+    pub fn declarations(&self) -> Vec<DeclarationRef> {
+        let mut declarations = self
+            .files
+            .values()
+            .flat_map(|(_, file)| file.declarations.iter().cloned())
+            .collect::<Vec<_>>();
+        declarations.sort_by(|left, right| {
+            left.file
+                .cmp(&right.file)
+                .then_with(|| left.line.cmp(&right.line))
+                .then_with(|| left.column.cmp(&right.column))
+        });
+        declarations
+    }
+
     /// Symbols of one file, when it is indexed.
     pub fn file_symbols(&self, path: &str) -> Option<&[ProjectSymbolOccurrence]> {
-        self.files.get(path).map(|(_, symbols)| symbols.as_slice())
+        self.files
+            .get(path)
+            .map(|(_, file)| file.symbols.as_slice())
+    }
+
+    /// Declarations of one file, when it is indexed.
+    pub fn file_declarations(&self, path: &str) -> Option<&[DeclarationRef]> {
+        self.files
+            .get(path)
+            .map(|(_, file)| file.declarations.as_slice())
     }
 
     /// Fingerprint the index holds for a file.
@@ -117,16 +154,10 @@ impl IncrementalIndex {
                 stats.skipped += 1;
                 continue;
             };
-            let symbols =
-                editor_core::project_symbol_occurrences(&[(fingerprint.path.clone(), lines)]);
-            if symbols.is_empty() {
-                // Keep the file in the index so a later refresh knows it was seen.
-                self.files
-                    .insert(fingerprint.path.clone(), (fingerprint, Vec::new()));
-            } else {
-                self.files
-                    .insert(fingerprint.path.clone(), (fingerprint, symbols));
-            }
+            let indexed = index_file(&fingerprint.path, &lines);
+            // A file without symbols is kept so a later refresh knows it was seen.
+            self.files
+                .insert(fingerprint.path.clone(), (fingerprint, indexed));
             stats.reparsed += 1;
         }
         let known = self.files.keys().cloned().collect::<Vec<_>>();
@@ -136,7 +167,16 @@ impl IncrementalIndex {
                 stats.removed += 1;
             }
         }
-        stats.symbols = self.files.values().map(|(_, symbols)| symbols.len()).sum();
+        stats.symbols = self
+            .files
+            .values()
+            .map(|(_, file)| file.symbols.len())
+            .sum();
+        stats.declarations = self
+            .files
+            .values()
+            .map(|(_, file)| file.declarations.len())
+            .sum();
         stats
     }
 
@@ -150,16 +190,25 @@ impl IncrementalIndex {
         if unchanged {
             return false;
         }
-        let symbols =
-            editor_core::project_symbol_occurrences(&[(fingerprint.path.clone(), lines.to_vec())]);
+        let indexed = index_file(&fingerprint.path, lines);
         let path = fingerprint.path.clone();
-        self.files.insert(path, (fingerprint, symbols));
+        self.files.insert(path, (fingerprint, indexed));
         true
     }
 
     /// Drop everything, for a project change.
     pub fn clear(&mut self) {
         self.files.clear();
+    }
+}
+
+/// Parse a file once, for both the symbol list and the declaration table.
+fn index_file(path: &str, lines: &[String]) -> IndexedFile {
+    let symbols = editor_core::project_symbol_occurrences(&[(path.to_string(), lines.to_vec())]);
+    let scan = syntax_core::scan(lines, path);
+    IndexedFile {
+        symbols,
+        declarations: syntax_core::declaration_refs(&scan, path),
     }
 }
 
@@ -300,5 +349,77 @@ mod tests {
         index.clear();
         assert!(index.is_empty());
         assert!(index.symbols().is_empty());
+    }
+
+    #[test]
+    fn the_index_keeps_declarations_with_their_owners() {
+        let mut index = IncrementalIndex::new();
+        let engine = source(&[
+            "impl Engine {",
+            "    fn run(&self) {}",
+            "    fn prepare(&self) {}",
+            "}",
+            "fn free() {}",
+        ]);
+        index.update_file(fingerprint("src/engine.rs", 1), &engine);
+        let declarations = index.declarations();
+        let owner = |name: &str| {
+            declarations
+                .iter()
+                .find(|declaration| declaration.name == name)
+                .and_then(|declaration| declaration.owner.clone())
+        };
+        assert_eq!(owner("run").as_deref(), Some("Engine"));
+        assert_eq!(owner("prepare").as_deref(), Some("Engine"));
+        assert_eq!(owner("free"), None);
+        assert_eq!(
+            index
+                .file_declarations("src/engine.rs")
+                .map(|list| list.len()),
+            Some(declarations.len())
+        );
+
+        // A file declared in another module is visible to the resolver too.
+        let other = source(&["pub fn helper() {}"]);
+        index.update_file(fingerprint("src/other.rs", 2), &other);
+        assert!(index
+            .declarations()
+            .iter()
+            .any(|declaration| declaration.name == "helper" && declaration.file == "src/other.rs"));
+
+        // Editing a file replaces its declarations instead of appending them.
+        let edited = source(&["impl Engine {", "    fn run(&self) {}", "}"]);
+        assert!(index.update_file(fingerprint("src/engine.rs", 3), &edited));
+        let declarations = index.declarations();
+        assert_eq!(
+            declarations
+                .iter()
+                .filter(|declaration| declaration.file == "src/engine.rs")
+                .count(),
+            1,
+            "the edited file only declares run: {declarations:?}"
+        );
+        assert!(!declarations
+            .iter()
+            .any(|declaration| declaration.name == "free"));
+
+        // And a refresh reports how many declarations the index holds.
+        let stats = index.refresh(
+            vec![
+                fingerprint("src/engine.rs", 3),
+                fingerprint("src/other.rs", 2),
+            ],
+            |path| match path {
+                "src/engine.rs" => Some(edited.clone()),
+                "src/other.rs" => Some(other.clone()),
+                _ => None,
+            },
+        );
+        assert_eq!(stats.reparsed, 0, "unchanged files are reused");
+        assert_eq!(stats.declarations, index.declarations().len());
+        assert_eq!(stats.declarations, 2, "run and helper");
+
+        index.clear();
+        assert!(index.declarations().is_empty());
     }
 }

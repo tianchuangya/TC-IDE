@@ -20,6 +20,7 @@ use crate::graph_core;
 use crate::motion_core;
 use crate::package_motion;
 use crate::session_core;
+use crate::syntax_core;
 use crate::workspace_core;
 
 type Window = c_ulong;
@@ -1756,6 +1757,16 @@ impl App {
             1 => graph_core::GraphScope::Folder,
             _ => graph_core::GraphScope::Project,
         };
+        // Declarations of the open files, with their owners, so the relation
+        // graph can resolve a callee in another file.
+        let declarations = self
+            .files
+            .iter()
+            .flat_map(|file| {
+                let scan = syntax_core::scan(&file.lines, &file.name);
+                syntax_core::declaration_refs(&scan, &file.name)
+            })
+            .collect::<Vec<_>>();
         let inputs = graph_core::GraphInputs {
             project_name: &self.project_name,
             current_file,
@@ -1764,6 +1775,7 @@ impl App {
             file_lines: lines,
             file_symbols: symbols,
             project_symbols: &self.project_symbols,
+            project_declarations: &declarations,
             folded: &folded,
             relation: self.graph_relation,
         };
@@ -3926,6 +3938,35 @@ impl App {
                 self.background_zoom = 1.6;
                 self.background_offset_x = 0.35;
                 self.background_offset_y = -0.25;
+                true
+            }
+            "graph-callees" => {
+                // Focus the first method that calls a member, so the Callees
+                // relation of the graph can be inspected as a frame.
+                let focus = self.files.get(self.selected_file).and_then(|file| {
+                    let scan = syntax_core::scan(&file.lines, &file.name);
+                    let call = scan.calls.iter().find(|call| call.receiver.is_some())?;
+                    let declaration = scan
+                        .declarations
+                        .iter()
+                        .find(|declaration| {
+                            scan.scope_at(call.line) == Some(declaration.scope)
+                                || declaration.line == call.line
+                        })
+                        .or_else(|| scan.declarations.first())?;
+                    Some(editor_core::SymbolOccurrence {
+                        name: declaration.name.clone(),
+                        line: declaration.line,
+                        start: declaration.column,
+                        end: declaration.column + declaration.name.len(),
+                        role: editor_core::SymbolRole::Declaration,
+                    })
+                });
+                let Some(focus) = focus else {
+                    return false;
+                };
+                self.hovered_symbol = Some(focus);
+                self.graph_relation = graph_core::GraphRelation::Callees;
                 true
             }
             "edit" => {
@@ -7387,6 +7428,12 @@ mod tests {
         let project = editor_core::project_symbol_occurrences(&sources);
         let file = &files[0];
         let symbols = editor_core::symbol_occurrences(&file.lines, &file.name);
+        let declarations = sources
+            .iter()
+            .flat_map(|(name, lines)| {
+                syntax_core::declaration_refs(&syntax_core::scan(lines, name), name)
+            })
+            .collect::<Vec<_>>();
         let inputs = graph_core::GraphInputs {
             project_name: "TC-IDE",
             current_file: &file.name,
@@ -7395,6 +7442,7 @@ mod tests {
             file_lines: &file.lines,
             file_symbols: &symbols,
             project_symbols: &project,
+            project_declarations: &declarations,
             folded,
             relation: graph_core::GraphRelation::Follow,
         };

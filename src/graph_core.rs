@@ -148,11 +148,16 @@ fn occurrence_edge(
     }
 }
 
-/// Names the focused declaration calls inside its own body.
+/// Callees of the focused declaration, resolved across the project.
 ///
-/// The syntax scan knows which scope a call belongs to, so a name mentioned in a
-/// comment, a string or a nested closure is no longer reported as a callee.
-fn callee_names(inputs: &GraphInputs<'_>, hovered: &SymbolOccurrence) -> Vec<String> {
+/// The syntax scan knows which scope a call belongs to and what it is called on,
+/// so a name mentioned in a comment or a string is not a callee, `self.helper()`
+/// resolves to the member of the class that owns the call, and a helper declared
+/// in another file of the project is found instead of being dropped.
+fn callee_targets(
+    inputs: &GraphInputs<'_>,
+    hovered: &SymbolOccurrence,
+) -> Vec<syntax_core::ResolvedCall> {
     if inputs.file_lines.get(hovered.line).is_none() {
         return Vec::new();
     }
@@ -160,11 +165,35 @@ fn callee_names(inputs: &GraphInputs<'_>, hovered: &SymbolOccurrence) -> Vec<Str
     let Some(scope) = scan.scope_of_symbol(&hovered.name, hovered.line) else {
         return Vec::new();
     };
-    let declared = declared_names(inputs);
-    scan.called_names(scope)
-        .into_iter()
-        .filter(|name| name != &hovered.name && declared.contains(name))
-        .collect()
+    let mut targets: Vec<syntax_core::ResolvedCall> = Vec::new();
+    for call in scan.calls_in(scope) {
+        if call.name == hovered.name {
+            continue;
+        }
+        for resolved in syntax_core::resolve_call(
+            call,
+            &scan,
+            inputs.current_file,
+            inputs.project_declarations,
+            MAX_CALLEE_TARGETS,
+        ) {
+            let duplicate = targets.iter().any(|known| {
+                known.declaration.file == resolved.declaration.file
+                    && known.declaration.line == resolved.declaration.line
+                    && known.confidence == resolved.confidence
+            });
+            if !duplicate {
+                targets.push(resolved);
+            }
+        }
+    }
+    targets.sort_by(|left, right| {
+        left.confidence
+            .cmp(&right.confidence)
+            .then_with(|| left.declaration.file.cmp(&right.declaration.file))
+            .then_with(|| left.declaration.line.cmp(&right.declaration.line))
+    });
+    targets
 }
 
 fn is_folded(inputs: &GraphInputs<'_>, key: &str) -> bool {
@@ -187,6 +216,8 @@ pub fn visible_rows(panel_top: f32, panel_bottom: f32, scale: f32) -> usize {
 }
 /// Call sites listed under a single declaration.
 const MAX_CALL_CHILDREN: usize = 3;
+/// Declarations one call site may point at before the list is capped.
+const MAX_CALLEE_TARGETS: usize = 2;
 /// Members listed under a single class.
 const MAX_MEMBER_CHILDREN: usize = 8;
 /// Files listed under a folder or the project root.
@@ -455,6 +486,9 @@ pub struct GraphInputs<'a> {
     pub file_lines: &'a [String],
     pub file_symbols: &'a [SymbolOccurrence],
     pub project_symbols: &'a [ProjectSymbolOccurrence],
+    /// Declarations of the project, with the class or function each belongs to.
+    /// Empty when only the current file is known.
+    pub project_declarations: &'a [syntax_core::DeclarationRef],
     /// Node keys the user has collapsed.
     pub folded: &'a [String],
     /// Relations listed for the focused symbol.
@@ -695,26 +729,27 @@ fn add_symbol_nodes(nodes: &mut Vec<GraphNode>, inputs: &GraphInputs<'_>, trunca
     let mut children = Vec::new();
     match inputs.relation {
         GraphRelation::Callees => {
-            for name in callee_names(inputs, hovered) {
-                let declaration = inputs
-                    .project_symbols
-                    .iter()
-                    .find(|entry| {
-                        entry.symbol.name == name && entry.symbol.role == SymbolRole::Declaration
-                    })
-                    .map(|entry| (entry.file.clone(), entry.symbol.line, entry.symbol.start));
-                let (file, line, column) = declaration.unwrap_or_else(|| {
-                    (inputs.current_file.to_string(), hovered.line, hovered.start)
-                });
+            for target in callee_targets(inputs, hovered) {
+                let declaration = target.declaration;
+                let file = declaration.file.clone();
+                let line = declaration.line;
+                // A name that only exists in another file is a weaker claim than
+                // a member of the class the call sits in, and the graph says so.
+                let edge = match target.confidence {
+                    syntax_core::CallConfidence::Member | syntax_core::CallConfidence::SameFile => {
+                        GraphEdge::Callee
+                    }
+                    syntax_core::CallConfidence::Project => GraphEdge::Weak,
+                };
                 children.push(
                     GraphNode::new(
                         GraphLevel::Occurrence,
-                        format!("{name}()"),
+                        format!("{}()", declaration.name),
                         format!("{}:{}", file, line + 1),
                     )
-                    .keyed(occurrence_key(&file, line, &name))
-                    .with_edge(GraphEdge::Callee)
-                    .with_target(&file, line, column)
+                    .keyed(occurrence_key(&file, line, &declaration.name))
+                    .with_edge(edge)
+                    .with_target(&file, line, declaration.column)
                     .nested(GraphLevel::Symbol.depth()),
                 );
             }
@@ -1295,6 +1330,7 @@ mod tests {
             file_lines: lines,
             file_symbols: symbols,
             project_symbols: project,
+            project_declarations: &[],
             folded,
             relation: GraphRelation::Follow,
         }
@@ -1911,5 +1947,90 @@ mod tests {
         assert_eq!(folder_of("main.rs"), "");
         assert_eq!(folder_of("src/app/main.rs"), "src/app");
         assert_eq!(file_name_of("src/app/main.rs"), "main.rs");
+    }
+
+    #[test]
+    fn callees_resolve_the_owning_class_and_reach_other_files() {
+        use crate::editor_core::SymbolKind;
+        use crate::syntax_core::DeclarationRef;
+
+        let lines = vec![
+            "impl Engine {".to_string(),
+            "    fn run(&self) {".to_string(),
+            "        self.prepare();".to_string(),
+            "        helper();".to_string(),
+            "    }".to_string(),
+            "    fn prepare(&self) {}".to_string(),
+            "}".to_string(),
+            "impl Other {".to_string(),
+            "    fn prepare(&self) {}".to_string(),
+            "}".to_string(),
+        ];
+        let symbols = editor_core::symbol_occurrences(&lines, "src/engine.rs");
+        let hovered = occurrence("run", 1, SymbolRole::Declaration);
+        let project = vec![
+            project_entry("src/engine.rs", "run", 1, SymbolRole::Declaration),
+            project_entry("src/engine.rs", "prepare", 5, SymbolRole::Declaration),
+            project_entry("src/engine.rs", "prepare", 8, SymbolRole::Declaration),
+            project_entry("src/other.rs", "helper", 3, SymbolRole::Declaration),
+        ];
+        let declarations = vec![
+            DeclarationRef {
+                name: "prepare".into(),
+                file: "src/engine.rs".into(),
+                line: 5,
+                column: 0,
+                kind: SymbolKind::Function,
+                owner: Some("Engine".into()),
+            },
+            DeclarationRef {
+                name: "prepare".into(),
+                file: "src/engine.rs".into(),
+                line: 8,
+                column: 0,
+                kind: SymbolKind::Function,
+                owner: Some("Other".into()),
+            },
+            DeclarationRef {
+                name: "helper".into(),
+                file: "src/other.rs".into(),
+                line: 3,
+                column: 0,
+                kind: SymbolKind::Function,
+                owner: None,
+            },
+        ];
+        let inputs = GraphInputs {
+            relation: GraphRelation::Callees,
+            project_declarations: &declarations,
+            ..inputs_folded(&lines, &symbols, &project, Some(&hovered), &[])
+        };
+        let callees = build_graph(&inputs, GraphScope::Symbol, "");
+        let callee = |detail: &str| {
+            callees
+                .nodes
+                .iter()
+                .find(|node| node.detail == detail && node.edge.is_some())
+        };
+
+        // `self.prepare()` is the member of the class the call sits in, and it is
+        // listed before the same named method of another class.
+        let member = callee("src/engine.rs:6").expect("the member is a callee");
+        assert_eq!(member.edge, Some(GraphEdge::Callee));
+        assert_eq!(member.target.as_ref().map(|target| target.line), Some(5));
+        let first_callee = callees
+            .nodes
+            .iter()
+            .find(|node| matches!(node.edge, Some(GraphEdge::Callee) | Some(GraphEdge::Weak)))
+            .expect("a callee");
+        assert_eq!(first_callee.detail, "src/engine.rs:6");
+
+        // A helper that only exists in another file is found, and marked weak.
+        let elsewhere = callee("src/other.rs:4").expect("the cross file callee");
+        assert_eq!(elsewhere.edge, Some(GraphEdge::Weak));
+        assert_eq!(
+            elsewhere.target.as_ref().map(|target| target.file.as_str()),
+            Some("src/other.rs")
+        );
     }
 }

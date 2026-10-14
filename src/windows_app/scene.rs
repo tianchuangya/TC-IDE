@@ -347,6 +347,7 @@ pub(super) fn build_graph(
         file_lines: &app.lines,
         file_symbols: symbols,
         project_symbols: &app.project_symbols,
+        project_declarations: &app.project_declarations,
         folded: &app.graph_folded,
         relation: app.graph_relation,
     };

@@ -205,7 +205,14 @@ pub fn declaration_name(line: &str, file: &str) -> Option<String> {
         .map(|(index, _)| index)
         .unwrap_or(before.len())]
         .trim();
-    if prefix.is_empty() || prefix.ends_with('.') || prefix.ends_with("->") {
+    // `Engine::run();` is a call, while the out of line definition
+    // `void Engine::run() {` is not: only a statement can be a call.
+    let statement = code.trim_end().ends_with(';');
+    if prefix.is_empty()
+        || prefix.ends_with('.')
+        || prefix.ends_with("->")
+        || (statement && prefix.ends_with("::"))
+    {
         None
     } else {
         Some(candidate.2)
