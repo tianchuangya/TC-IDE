@@ -162,7 +162,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 ### P1：编辑器达到可日常使用
 
 - [x] 将文本缓冲升级为适合大文件的 piece table（`text_buffer`）：Unicode 字符边界、分组编辑、按编辑的撤销/重做历史，编辑不再复制整个文档；Windows 编辑器已接入。
-- [ ] 接入 Tree-sitter 或等价增量解析，替换正则/启发式语义关系。
+- [~] 语义关系不再依赖行正则与括号计数：`syntax_core` 提供语言感知的作用域扫描（注释/字符串屏蔽、括号与缩进块配对、声明归属、调用归属），关系图取用真实作用域；**仍不是 Tree-sitter 级别的完整语法树**（无表达式与类型分析，跨文件解析仍是逐文件扫描）。
 - [x] 接入真实 LSP：`lsp_core` 客户端（stdio 管道、分帧、自动应答服务端请求）已在 Windows 侧驱动补全、诊断（行标记与状态栏、光标所在行的诊断信息）、F12 跳转定义、Ctrl+I 悬停、Ctrl+R 引用列表（再次按 Ctrl+R 依次跳转）与 F2 重命名（编辑应用到当前缓冲与其他文件）。仍未实现独立的诊断面板与重命名预览。
 - [ ] 为 C/C++ 正确连接 clangd，为 Python 连接 basedpyright/pyright，为 Rust 连接 rust-analyzer；扩展安装状态必须与真实可执行文件状态一致。
 - [x] 加入文件脏状态、关闭未保存确认、多文件标签、最近项目和会话恢复。（Windows 已实现标签栏、脏标记、Ctrl+W、原生确认框与 session.conf 恢复；Linux 仍未实现）
@@ -183,7 +183,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 - [~] 扩展安装：extension_core 已实现下载/校验/解包/卸载命令与运行时缓存清单，Windows 面板执行真实命令并校验摘要；**目录需用户提供（<项目>/.tc-ide-catalog.conf），仓库不内置编造的 URL 与校验和**，升级/卸载的界面入口也还没有
 - [x] 用户级运行时缓存清单：记录 id/版本/校验和/字节数/目录，支持复用、修剪与序列化（Windows 已接入，Linux 待接入）。
 - [~] Debugger/Formatter：格式化当前文件已完成；调试改为真正的 DAP 会话（`dap_core`：启动 debugpy/lldb-dap/dlv、F9 断点并在行槽标记、F5 启动/继续、Shift+F5 停止、F10 单步跳过、F11/Shift+F11 步入步出、停止后自动取调用栈/作用域/变量并跳到停下的帧，状态栏显示停止原因与前几个变量）；**仍缺独立的调用栈/变量面板与选区格式化**
-- [~] AI：`ai_core::ChatSession` 作为子进程运行 curl（Key 走环境变量、SSE 增量、HTTP 状态、可取消），Windows 新增 Ctrl+Shift+A 的 AI 面板：内联输入、Enter 发送、Esc 取消、回答流式增长、错误显示在输入框下方；**会话历史尚未持久化，也没有多轮上下文**
+- [~] AI：`ai_core::ChatSession` 作为子进程运行 curl（Key 走环境变量、SSE 增量、HTTP 状态、可取消），Windows 面板支持内联输入、Enter 发送、Esc 取消、流式回答与错误显示，并按最近 12 轮携带多轮上下文；**会话历史仍未持久化到磁盘**
 - [x] API 请求使用用户选择的 Endpoint；Key 仅驻内存并通过子进程环境变量 TC_IDE_AI_KEY 传递，不出现在命令行、配置文件或日志。
 
 ### P1：打包与动画
@@ -229,6 +229,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 3. **编辑器剩余部分**：piece table、虚拟化、编辑器与项目树滚动条、水平滚动均已完成。
 4. **Tree-sitter 或等价增量解析**：替换正则/启发式语义关系。
 5. **调试面板**：调用栈与变量已经有数据（`dap_core::DebugState`），缺的是一个独立面板与断点管理界面。
+   诊断同理：数据已在 `lsp_diagnostics`，缺独立面板。
 6. **AI 会话**：面板与流式回答已完成；仍缺多轮上下文与历史持久化。
 7. **关系图**：增量索引已完成；下一步可以是把 `graph_core` 的层级细节与聚类做得更细（按视口密度切换层级）。
 8. **视觉细节**：悬停高亮与完整中文文案已完成；仍缺文件树行位置弹簧、多字符粘贴/撤销动画、
@@ -337,7 +338,7 @@ cargo run --release
 
 ```bash
 cargo fmt --check
-cargo test --all-targets                                   # 148 项共享内核与后端测试
+cargo test --all-targets                                   # 157 项共享内核与后端测试
 cargo clippy --all-targets -- -D warnings                   # 共享内核 + Linux 后端
 cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo check --all-targets --target x86_64-pc-windows-msvc    # Windows 类型检查

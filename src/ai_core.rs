@@ -124,11 +124,35 @@ pub fn json_escape(value: &str) -> String {
 
 /// Body of a chat completion request for one user message.
 pub fn chat_body(model: &str, prompt: &str, stream: bool) -> String {
+    chat_body_with_history(model, &[("user", prompt)], stream)
+}
+
+/// How many turns of history a request carries by default.
+pub const MAX_HISTORY_TURNS: usize = 12;
+
+/// Body of a chat completion request with earlier turns included.
+///
+/// `turns` is `(role, content)` in conversation order; only the newest
+/// [`MAX_HISTORY_TURNS`] turns are sent so a long conversation cannot grow the
+/// request without bound.
+pub fn chat_body_with_history(model: &str, turns: &[(&str, &str)], stream: bool) -> String {
+    let start = turns.len().saturating_sub(MAX_HISTORY_TURNS);
+    let messages = turns[start..]
+        .iter()
+        .map(|(role, content)| {
+            format!(
+                "{{\"role\":\"{}\",\"content\":\"{}\"}}",
+                json_escape(role),
+                json_escape(content)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        "{{\"model\":\"{}\",\"stream\":{},\"messages\":[{{\"role\":\"user\",\"content\":\"{}\"}}]}}",
+        "{{\"model\":\"{}\",\"stream\":{},\"messages\":[{}]}}",
         json_escape(model),
         if stream { "true" } else { "false" },
-        json_escape(prompt)
+        messages
     )
 }
 
@@ -518,6 +542,34 @@ mod tests {
         assert!(body.contains("line \\\"one\\\"\\nline two\\\\"));
         assert!(!body.contains('\n'));
         assert_eq!(json_escape("\u{1}"), "\\u0001");
+    }
+
+    #[test]
+    fn history_is_included_and_bounded() {
+        let body = chat_body_with_history(
+            "demo",
+            &[("user", "first"), ("assistant", "hi"), ("user", "second")],
+            false,
+        );
+        assert!(body.contains("{\"role\":\"user\",\"content\":\"first\"}"));
+        assert!(body.contains("{\"role\":\"assistant\",\"content\":\"hi\"}"));
+        assert!(body.contains("{\"role\":\"user\",\"content\":\"second\"}"));
+        // The turns arrive in order, oldest first.
+        let first = body.find("first").unwrap();
+        let second = body.find("second").unwrap();
+        assert!(first < second);
+
+        let mut turns = Vec::new();
+        for index in 0..(MAX_HISTORY_TURNS + 5) {
+            turns.push((
+                "user",
+                Box::leak(format!("turn{index}").into_boxed_str()) as &str,
+            ));
+        }
+        let bounded = chat_body_with_history("demo", &turns, true);
+        assert!(!bounded.contains("turn0"), "old turns must be dropped");
+        assert!(bounded.contains("turn16"));
+        assert_eq!(bounded.matches("\"role\"").count(), MAX_HISTORY_TURNS);
     }
 
     #[test]
