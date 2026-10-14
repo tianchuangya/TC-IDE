@@ -1824,6 +1824,38 @@ impl DirectEditorRenderer {
                         },
                     )
                 };
+                if scene.extension_category == 1 {
+                    for (index, label) in ["Dark", "Light"].iter().enumerate() {
+                        let active =
+                            (index == 0 && !scene.light_theme) || (index == 1 && scene.light_theme);
+                        let row_top = top + (190.0 + index as f32 * 50.0) * scale;
+                        unsafe {
+                            Self::rounded(
+                                &target_base,
+                                if active { &selection } else { &raised },
+                                D2D_RECT_F {
+                                    left: content_left,
+                                    top: row_top,
+                                    right: content_left + 315.0 * scale,
+                                    bottom: row_top + 40.0 * scale,
+                                },
+                                8.0 * scale,
+                            );
+                            Self::text(
+                                &target_base,
+                                &self.small_format,
+                                if active { &bright } else { &text },
+                                &format!("{}{}", label, if active { "    ACTIVE" } else { "" }),
+                                D2D_RECT_F {
+                                    left: content_left + 16.0 * scale,
+                                    top: row_top + 10.0 * scale,
+                                    right: content_left + 300.0 * scale,
+                                    bottom: row_top + 36.0 * scale,
+                                },
+                            );
+                        }
+                    }
+                }
                 if scene.extension_category == 4 {
                     for (index, (label, value)) in [
                         ("ENDPOINT", scene.ai_endpoint),

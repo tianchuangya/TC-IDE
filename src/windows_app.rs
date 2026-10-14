@@ -2454,6 +2454,15 @@ unsafe extern "system" fn window_proc(
                                 app.language_versions[language] =
                                     (app.language_versions[language] + 1) % 3;
                             }
+                        } else if app.extension_category == 1 {
+                            let local_y = (y as f32 - top) / scale;
+                            if (190.0..240.0).contains(&local_y) {
+                                app.light_theme = false;
+                                app.status = "Dark theme applied".into();
+                            } else if (240.0..290.0).contains(&local_y) {
+                                app.light_theme = true;
+                                app.status = "Light theme applied".into();
+                            }
                         } else if app.extension_category == 4 {
                             let content_left = left + 205.0 * scale;
                             for field in 0..3 {
