@@ -498,10 +498,37 @@ impl MacApp {
         }
     }
 
+    /// Remove the selected range, if there is one.
+    fn delete_selection(&mut self) -> bool {
+        let Some(anchor) = self.document().selection_anchor else {
+            return false;
+        };
+        let document = self.document();
+        let caret = (document.caret_line, document.caret_column);
+        let (start, end) = if anchor <= caret {
+            (anchor, caret)
+        } else {
+            (caret, anchor)
+        };
+        if start == end {
+            self.document_mut().selection_anchor = None;
+            return false;
+        }
+        self.document_mut().buffer.delete(start, end);
+        let document = self.document_mut();
+        document.caret_line = start.0;
+        document.caret_column = start.1;
+        document.selection_anchor = None;
+        document.sync();
+        true
+    }
+
     fn insert_text(&mut self, value: &str) {
         if value.is_empty() {
             return;
         }
+        // Typing over a selection replaces it.
+        self.delete_selection();
         let (mut line, mut column) = {
             let document = self.document();
             (document.caret_line, document.caret_column)
@@ -665,6 +692,21 @@ impl MacApp {
         self.last_frame = now;
         let target = if self.document().dirty { 1.0 } else { 0.0 };
         self.caret_spring.step(target, dt);
+    }
+
+    /// Replace the whole document, the way opening a scratch buffer would.
+    fn replace_all(&mut self, text: &str) {
+        let lines = text.split('\n').map(str::to_string).collect::<Vec<_>>();
+        let document = self.document_mut();
+        document.buffer = text_buffer::TextBuffer::from_lines(&lines);
+        document.lines = lines;
+        let last = document.lines.len().saturating_sub(1);
+        document.caret_line = last;
+        document.caret_column = document.lines[last].chars().count();
+        document.selection_anchor = None;
+        document.dirty = false;
+        self.scroll_lines = 0;
+        self.scroll_columns = 0;
     }
 
     /// Symbols the shared occurrence scan finds in the document.
@@ -1171,12 +1213,12 @@ fn self_check() -> i32 {
     };
 
     let mut app = MacApp::new();
-    app.insert_text("one");
-    app.insert_text("\n");
-    app.insert_text("two");
+    app.replace_all("one\ntwo");
     report(
-        "the piece table takes typed text",
-        app.document().lines == ["one", "two"],
+        "a scratch document holds its lines",
+        app.document().lines == ["one", "two"]
+            && app.document().caret_line == 1
+            && app.document().caret_column == 3,
         &mut failures,
     );
     app.backspace();
@@ -1298,47 +1340,46 @@ mod tests {
         assert!(!is_printable_key(53, false), "escape is not text");
     }
 
+    /// An application whose single document is a known two line buffer.
+    fn scratch() -> MacApp {
+        let mut app = MacApp::new();
+        app.replace_all("hello\nworld");
+        app
+    }
+
     #[test]
     fn the_editor_keeps_its_document_consistent() {
-        let mut app = MacApp::new();
-        app.insert_text("hello");
+        let mut app = scratch();
+        assert_eq!(app.document().lines, ["hello", "world"]);
         assert_eq!(
-            app.document().lines,
-            [
-                "hello",
-                "fn main() {",
-                "    println!(\"hello from Cocoa\");",
-                "}"
-            ]
+            (app.document().caret_line, app.document().caret_column),
+            (1, 5)
         );
-        app.insert_text("\nworld");
-        assert_eq!(app.document().lines[..2], ["hello", "world"]);
+
         app.move_caret(-1, 0);
         app.move_to_line_end(true);
         app.insert_text("!");
         assert_eq!(app.document().lines[0], "hello!");
+
+        // Forward delete at the end of a line joins the next one.
         app.delete_forward();
-        assert_eq!(app.document().lines[1], "orld");
+        assert_eq!(app.document().lines, ["hello!world"]);
+
+        // Backspace at the very start does nothing.
         app.move_to_line_end(false);
         app.backspace();
-        assert_eq!(app.document().lines[0], "ello!");
-        app.select_all();
-        app.insert_text("reset");
-        assert_eq!(app.document().lines, ["reset"]);
-        app.move_caret(0, 0);
+        assert_eq!(app.document().lines, ["hello!world"]);
+
         app.move_to_line_end(true);
-        for _ in 0..4 {
-            app.backspace();
-        }
-        assert_eq!(app.document().lines[0], "r");
         app.backspace();
-        assert_eq!(app.document().lines[0], "");
-        app.backspace();
-        assert_eq!(
-            app.document().lines[0],
-            "",
-            "backspace at the start of the document does nothing"
-        );
+        assert_eq!(app.document().lines, ["hello!worl"]);
+
+        // Typing over a selection replaces it.
+        app.select_all();
+        app.insert_text("done");
+        assert_eq!(app.document().lines, ["done"]);
+        assert_eq!(app.document().caret_column, 4);
+        assert!(app.document().dirty);
     }
 
     #[test]
@@ -1349,8 +1390,39 @@ mod tests {
         app.click_at(54.0 + 7.4 * 3.0, header + app.line_step() * 2.0 + 1.0);
         assert_eq!(app.document().caret_line, 2);
         assert_eq!(app.document().caret_column, 3);
-        // A click in the header or the status bar is not a caret move.
+
+        // A click in the header is not a caret move.
         app.click_at(54.0, 4.0);
         assert_eq!(app.document().caret_line, 2);
+        // And the caret never leaves the document.
+        app.click_at(54.0, header + app.line_step() * 400.0);
+        assert!(app.document().caret_line < app.document().lines.len());
+    }
+
+    #[test]
+    fn the_viewport_follows_the_caret() {
+        let mut app = MacApp::new();
+        app.viewport = text_buffer::Viewport::new(4, 20);
+        app.replace_all("a\nb\nc\nd\ne\nf\ng\nh");
+        // The reset leaves the caret at the end, so walk back to the first line.
+        for _ in 0..8 {
+            app.move_caret(-1, 0);
+        }
+        assert_eq!(app.document().caret_line, 0);
+        assert_eq!(app.scroll_lines, 0);
+
+        // Walking past the fourth visible row scrolls one row at a time.
+        for line in 1..=7 {
+            app.move_caret(1, 0);
+            assert_eq!(app.document().caret_line, line);
+            assert_eq!(app.scroll_lines, line.saturating_sub(3));
+        }
+
+        // And walking back up brings the top of the document back.
+        for _ in 0..7 {
+            app.move_caret(-1, 0);
+        }
+        assert_eq!(app.document().caret_line, 0);
+        assert_eq!(app.scroll_lines, 0);
     }
 }
