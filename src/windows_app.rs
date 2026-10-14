@@ -132,6 +132,9 @@ struct WindowsAppState {
     light_theme: bool,
     ui_chinese: bool,
     code_zoom: i32,
+    code_font_family: usize,
+    font_search: String,
+    font_search_focused: bool,
     settings_open: bool,
     extensions_open: bool,
     extension_category: usize,
@@ -174,6 +177,29 @@ struct WindowsAppState {
 impl WindowsAppState {
     const PROJECT_LANGUAGES: [&'static str; 7] =
         ["Rust", "Python", "C", "C++", "Java", "Go", "Web"];
+    const CODE_FONTS: [&'static str; 9] = [
+        "Cascadia Mono",
+        "JetBrains Mono",
+        "Fira Code",
+        "Cascadia Code",
+        "Source Code Pro",
+        "Hack",
+        "Consolas",
+        "Noto Sans Mono CJK SC",
+        "DejaVu Sans Mono",
+    ];
+
+    fn filtered_font_indices(&self) -> Vec<usize> {
+        let needle = self.font_search.trim().to_ascii_lowercase();
+        Self::CODE_FONTS
+            .iter()
+            .enumerate()
+            .filter(|(_, family)| {
+                needle.is_empty() || family.to_ascii_lowercase().contains(&needle)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
 
     fn project_language_name(&self) -> &'static str {
         Self::PROJECT_LANGUAGES[self.project_language.min(Self::PROJECT_LANGUAGES.len() - 1)]
@@ -241,6 +267,9 @@ impl WindowsAppState {
             light_theme: preferences.light_theme,
             ui_chinese: preferences.ui_chinese,
             code_zoom: preferences.code_zoom,
+            code_font_family: preferences.code_font_family.min(Self::CODE_FONTS.len() - 1),
+            font_search: String::new(),
+            font_search_focused: false,
             settings_open: false,
             extensions_open: false,
             extension_category: 0,
@@ -838,6 +867,7 @@ impl WindowsAppState {
             light_theme: self.light_theme,
             ui_chinese: self.ui_chinese,
             code_zoom: self.code_zoom,
+            code_font_family: self.code_font_family,
             project_language: self.project_language,
             project_environment: self.project_environment,
             language_installed: self.language_installed.clone(),
@@ -1689,6 +1719,11 @@ fn render_window(window: Hwnd) {
                 light_theme: app.light_theme,
                 ui_chinese: app.ui_chinese,
                 code_zoom: app.code_zoom,
+                code_font_family: app.code_font_family,
+                code_font_name: WindowsAppState::CODE_FONTS[app.code_font_family],
+                font_search: &app.font_search,
+                font_search_focused: app.font_search_focused,
+                font_options: &WindowsAppState::CODE_FONTS,
                 settings_open: app.settings_open,
                 extensions_open: app.extensions_open,
                 extension_category: app.extension_category,
@@ -1727,7 +1762,14 @@ fn render_window(window: Hwnd) {
             };
             let mut renderer = renderer_cell.borrow_mut();
             if renderer.is_none() {
-                *renderer = unsafe { DirectEditorRenderer::new(dpi, app.code_zoom) }.ok();
+                *renderer = unsafe {
+                    DirectEditorRenderer::new(
+                        dpi,
+                        app.code_zoom,
+                        WindowsAppState::CODE_FONTS[app.code_font_family],
+                    )
+                }
+                .ok();
             }
             if let Some(renderer) = renderer.as_mut() {
                 let _ = unsafe { renderer.render(window, width, height, &scene) };
@@ -1748,6 +1790,10 @@ fn handle_character(window: Hwnd, value: char) {
             if !value.is_control() {
                 app.workspace_search.push(value);
                 app.project_scroll = 0;
+            }
+        } else if app.font_search_focused {
+            if !value.is_control() {
+                app.font_search.push(value);
             }
         } else if let Some(field) = app.ai_field_focused {
             if !value.is_control() {
@@ -1916,6 +1962,16 @@ unsafe extern "system" fn window_proc(
                     return;
                 }
                 if app.settings_open {
+                    if app.font_search_focused {
+                        match w_param as u32 {
+                            0x1b | 0x0d => app.font_search_focused = false,
+                            VK_BACK => {
+                                app.font_search.pop();
+                            }
+                            _ => return,
+                        }
+                        return;
+                    }
                     match w_param as u32 {
                         0x1b => app.settings_open = false,
                         0x4c => app.ui_chinese = !app.ui_chinese,
@@ -2158,41 +2214,48 @@ unsafe extern "system" fn window_proc(
                     && x as f32 <= area.right as f32 - 20.0 * scale
                     && y as f32 >= top
                 {
-                    let row = ((y as f32 - top - 24.0 * scale) / (54.0 * scale)).floor() as i32;
                     APP.with(|cell| {
                         let mut app = cell.borrow_mut();
-                        match row {
-                            1 => app.ui_chinese = !app.ui_chinese,
-                            2 => app.light_theme = !app.light_theme,
-                            3 => {
-                                if x as f32 <= left + 195.0 * scale {
-                                    app.code_zoom = (app.code_zoom - 1).max(-2);
-                                } else {
-                                    app.code_zoom = (app.code_zoom + 1).min(8);
-                                }
+                        let local_y = (y as f32 - top) / scale;
+                        if (62.0..116.0).contains(&local_y) {
+                            app.ui_chinese = !app.ui_chinese;
+                        } else if (116.0..170.0).contains(&local_y) {
+                            app.light_theme = !app.light_theme;
+                        } else if (170.0..224.0).contains(&local_y) {
+                            if x as f32 <= left + 195.0 * scale {
+                                app.code_zoom = (app.code_zoom - 1).max(-2);
+                            } else {
+                                app.code_zoom = (app.code_zoom + 1).min(8);
                             }
-                            5 => {
-                                if let Some(path) = platform::choose_background(window) {
-                                    app.background_path = Some(path);
-                                }
+                        } else if (224.0..278.0).contains(&local_y) {
+                            app.font_search_focused = true;
+                        } else if (278.0..448.0).contains(&local_y) {
+                            let visible = ((local_y - 278.0) / 34.0).floor() as usize;
+                            if let Some(index) = app.filtered_font_indices().get(visible).copied() {
+                                app.code_font_family = index;
+                                app.status =
+                                    format!("Editor font: {}", WindowsAppState::CODE_FONTS[index]);
                             }
-                            6 => {
-                                let local_x = (x as f32 - left) / (390.0 * scale);
-                                if local_x < 0.25 {
-                                    app.background_opacity =
-                                        (app.background_opacity - 0.05).max(0.05);
-                                } else if local_x < 0.5 {
-                                    app.background_opacity =
-                                        (app.background_opacity + 0.05).min(1.0);
-                                } else if local_x < 0.75 {
-                                    app.background_zoom = (app.background_zoom - 0.1).max(1.0);
-                                } else {
-                                    app.background_zoom = (app.background_zoom + 0.1).min(3.0);
-                                }
+                        } else if (448.0..502.0).contains(&local_y) {
+                            if let Some(path) = platform::choose_background(window) {
+                                app.background_path = Some(path);
                             }
-                            7 => app.background_path = None,
-                            8 => app.settings_open = false,
-                            _ => {}
+                        } else if (502.0..556.0).contains(&local_y) {
+                            let local_x = (x as f32 - left) / (390.0 * scale);
+                            if local_x < 0.25 {
+                                app.background_opacity = (app.background_opacity - 0.05).max(0.05);
+                            } else if local_x < 0.5 {
+                                app.background_opacity = (app.background_opacity + 0.05).min(1.0);
+                            } else if local_x < 0.75 {
+                                app.background_zoom = (app.background_zoom - 0.1).max(1.0);
+                            } else {
+                                app.background_zoom = (app.background_zoom + 0.1).min(3.0);
+                            }
+                        } else if (556.0..610.0).contains(&local_y) {
+                            app.background_path = None;
+                        } else if local_y >= 610.0 {
+                            app.settings_open = false;
+                            app.font_search_focused = false;
                         }
                         app.save_preferences();
                     });

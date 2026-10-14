@@ -49,6 +49,11 @@ pub struct WindowsScene<'a> {
     pub light_theme: bool,
     pub ui_chinese: bool,
     pub code_zoom: i32,
+    pub code_font_family: usize,
+    pub code_font_name: &'a str,
+    pub font_search: &'a str,
+    pub font_search_focused: bool,
+    pub font_options: &'a [&'a str],
     pub settings_open: bool,
     pub extensions_open: bool,
     pub extension_category: usize,
@@ -121,7 +126,7 @@ impl DirectEditorRenderer {
         value.chars().take(columns).map(Self::character_cells).sum()
     }
 
-    pub unsafe fn new(dpi: u32, code_zoom: i32) -> Result<Self> {
+    pub unsafe fn new(dpi: u32, code_zoom: i32, code_font_name: &str) -> Result<Self> {
         let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
         let d2d_factory: ID2D1Factory =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }?;
@@ -130,9 +135,13 @@ impl DirectEditorRenderer {
         let wic_factory: IWICImagingFactory =
             unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }?;
         let scale = dpi.max(96) as f32 / 96.0;
+        let code_font_wide = code_font_name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
         let code_format = unsafe {
             dwrite_factory.CreateTextFormat(
-                w!("Cascadia Mono"),
+                PCWSTR(code_font_wide.as_ptr()),
                 None,
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
@@ -1435,47 +1444,73 @@ impl DirectEditorRenderer {
                         left,
                         top,
                         right: width - 20.0 * scale,
-                        bottom: (top + 560.0 * scale).min(height - 36.0 * scale),
+                        bottom: (top + 680.0 * scale).min(height - 20.0 * scale),
                     },
                     16.0 * scale,
                 )
             };
             let settings = [
-                if scene.ui_chinese {
-                    "设置"
-                } else {
-                    "SETTINGS"
-                }
-                .to_string(),
-                format!(
-                    "L   Interface language: {}",
+                (
+                    24.0,
                     if scene.ui_chinese {
-                        "简体中文"
+                        "设置".into()
                     } else {
-                        "English"
-                    }
+                        "SETTINGS".into()
+                    },
                 ),
-                format!(
-                    "T   Theme: {}",
-                    if scene.light_theme { "Light" } else { "Dark" }
+                (
+                    78.0,
+                    format!(
+                        "L   Interface language: {}",
+                        if scene.ui_chinese {
+                            "简体中文"
+                        } else {
+                            "English"
+                        }
+                    ),
                 ),
-                format!("←→  Code font size: {}", 15 + scene.code_zoom),
-                "Font: Cascadia Mono / JetBrains Mono".into(),
-                format!(
-                    "B   Background: {}",
-                    scene.background_path.unwrap_or("not selected")
+                (
+                    132.0,
+                    format!(
+                        "T   Theme: {}",
+                        if scene.light_theme { "Light" } else { "Dark" }
+                    ),
                 ),
-                format!(
-                    "O/P opacity {:.0}%   WASD crop {:.0},{:.0}   Z/X zoom {:.1}x",
-                    scene.background_opacity * 100.0,
-                    scene.background_offset_x * 100.0,
-                    scene.background_offset_y * 100.0,
-                    scene.background_zoom
+                (
+                    186.0,
+                    format!("←→  Code font size: {}", 15 + scene.code_zoom),
                 ),
-                "C   Clear background".into(),
-                "Esc  Close settings".into(),
+                (
+                    240.0,
+                    format!(
+                        "Font search: {}{}",
+                        if scene.font_search.is_empty() {
+                            "type to filter"
+                        } else {
+                            scene.font_search
+                        },
+                        if scene.font_search_focused { "  |" } else { "" }
+                    ),
+                ),
+                (
+                    464.0,
+                    format!(
+                        "B   Background: {}",
+                        scene.background_path.unwrap_or("not selected")
+                    ),
+                ),
+                (
+                    518.0,
+                    format!(
+                        "O/P opacity {:.0}%   Z/X zoom {:.1}x",
+                        scene.background_opacity * 100.0,
+                        scene.background_zoom
+                    ),
+                ),
+                (572.0, "C   Clear background".into()),
+                (626.0, "Esc  Close settings".into()),
             ];
-            for (index, value) in settings.iter().enumerate() {
+            for (index, (row_y, value)) in settings.iter().enumerate() {
                 unsafe {
                     Self::text(
                         &target_base,
@@ -1494,9 +1529,63 @@ impl DirectEditorRenderer {
                         value,
                         D2D_RECT_F {
                             left: left + 22.0 * scale,
-                            top: top + (24.0 + index as f32 * 54.0) * scale,
+                            top: top + row_y * scale,
                             right: width - 38.0 * scale,
-                            bottom: top + (52.0 + index as f32 * 54.0) * scale,
+                            bottom: top + (row_y + 28.0) * scale,
+                        },
+                    )
+                };
+            }
+            let needle = scene.font_search.trim().to_ascii_lowercase();
+            for (visible, (index, family)) in scene
+                .font_options
+                .iter()
+                .enumerate()
+                .filter(|(_, family)| {
+                    needle.is_empty() || family.to_ascii_lowercase().contains(&needle)
+                })
+                .take(5)
+                .enumerate()
+            {
+                let row_top = top + (282.0 + visible as f32 * 34.0) * scale;
+                if index == scene.code_font_family {
+                    unsafe {
+                        Self::rounded(
+                            &target_base,
+                            &selection,
+                            D2D_RECT_F {
+                                left: left + 18.0 * scale,
+                                top: row_top - 4.0 * scale,
+                                right: width - 34.0 * scale,
+                                bottom: row_top + 28.0 * scale,
+                            },
+                            6.0 * scale,
+                        )
+                    };
+                }
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        if index == scene.code_font_family {
+                            &bright
+                        } else {
+                            &text
+                        },
+                        &format!(
+                            "{}{}",
+                            if index == scene.code_font_family {
+                                "✓  "
+                            } else {
+                                "   "
+                            },
+                            family
+                        ),
+                        D2D_RECT_F {
+                            left: left + 28.0 * scale,
+                            top: row_top,
+                            right: width - 42.0 * scale,
+                            bottom: row_top + 28.0 * scale,
                         },
                     )
                 };

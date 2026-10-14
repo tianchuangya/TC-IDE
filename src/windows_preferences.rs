@@ -6,6 +6,7 @@ pub struct WindowsPreferences {
     pub light_theme: bool,
     pub ui_chinese: bool,
     pub code_zoom: i32,
+    pub code_font_family: usize,
     pub project_language: usize,
     pub project_environment: usize,
     pub language_installed: Vec<bool>,
@@ -59,6 +60,7 @@ pub fn load() -> WindowsPreferences {
             "theme" => preferences.light_theme = value == "light",
             "language" => preferences.ui_chinese = value == "zh-CN",
             "code_zoom" => preferences.code_zoom = value.parse().unwrap_or(0).clamp(-2, 8),
+            "code_font_family" => preferences.code_font_family = value.parse().unwrap_or(0),
             "project_language" => preferences.project_language = value.parse().unwrap_or(0),
             "project_environment" => preferences.project_environment = value.parse().unwrap_or(0),
             "language_installed" => {
@@ -94,7 +96,7 @@ pub fn save(preferences: &WindowsPreferences) -> std::io::Result<()> {
     fs::write(
         path,
         format!(
-            "theme={}\nlanguage={}\ncode_zoom={}\nproject_language={}\nproject_environment={}\nlanguage_installed={}\nlanguage_versions={}\nbackground_path={}\nbackground_opacity={}\nbackground_offset_x={}\nbackground_offset_y={}\nbackground_zoom={}\nai_endpoint={}\nai_model={}\n",
+            "theme={}\nlanguage={}\ncode_zoom={}\ncode_font_family={}\nproject_language={}\nproject_environment={}\nlanguage_installed={}\nlanguage_versions={}\nbackground_path={}\nbackground_opacity={}\nbackground_offset_x={}\nbackground_offset_y={}\nbackground_zoom={}\nai_endpoint={}\nai_model={}\n",
             if preferences.light_theme {
                 "light"
             } else {
@@ -106,6 +108,7 @@ pub fn save(preferences: &WindowsPreferences) -> std::io::Result<()> {
                 "en"
             },
             preferences.code_zoom,
+            preferences.code_font_family,
             preferences.project_language,
             preferences.project_environment,
             preferences
