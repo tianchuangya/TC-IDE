@@ -2033,4 +2033,66 @@ mod tests {
             Some("src/other.rs")
         );
     }
+
+    #[test]
+    fn a_callee_on_a_constructed_local_resolves_to_its_class() {
+        use crate::editor_core::SymbolKind;
+        use crate::syntax_core::DeclarationRef;
+
+        let lines = vec![
+            "struct Engine {".to_string(),
+            "}".to_string(),
+            "impl Engine {".to_string(),
+            "    fn prepare(&self) {}".to_string(),
+            "}".to_string(),
+            "impl Other {".to_string(),
+            "    fn prepare(&self) {}".to_string(),
+            "}".to_string(),
+            "fn start() {".to_string(),
+            "    let engine = Engine::new();".to_string(),
+            "    engine.prepare();".to_string(),
+            "}".to_string(),
+        ];
+        let symbols = editor_core::symbol_occurrences(&lines, "src/engine.rs");
+        let hovered = occurrence("start", 8, SymbolRole::Declaration);
+        let project = vec![
+            project_entry("src/engine.rs", "start", 8, SymbolRole::Declaration),
+            project_entry("src/engine.rs", "prepare", 3, SymbolRole::Declaration),
+            project_entry("src/engine.rs", "prepare", 6, SymbolRole::Declaration),
+        ];
+        let declarations = vec![
+            DeclarationRef {
+                name: "prepare".into(),
+                file: "src/engine.rs".into(),
+                line: 3,
+                column: 0,
+                kind: SymbolKind::Function,
+                owner: Some("Engine".into()),
+            },
+            DeclarationRef {
+                name: "prepare".into(),
+                file: "src/engine.rs".into(),
+                line: 6,
+                column: 0,
+                kind: SymbolKind::Function,
+                owner: Some("Other".into()),
+            },
+        ];
+        let callees = build_graph(
+            &GraphInputs {
+                relation: GraphRelation::Callees,
+                project_declarations: &declarations,
+                ..inputs_folded(&lines, &symbols, &project, Some(&hovered), &[])
+            },
+            GraphScope::Symbol,
+            "",
+        );
+        let first = callees
+            .nodes
+            .iter()
+            .find(|node| matches!(node.edge, Some(GraphEdge::Callee) | Some(GraphEdge::Weak)))
+            .expect("a callee");
+        assert_eq!(first.detail, "src/engine.rs:4", "the member of Engine");
+        assert_eq!(first.edge, Some(GraphEdge::Callee));
+    }
 }

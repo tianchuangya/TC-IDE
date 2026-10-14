@@ -114,6 +114,51 @@ pub struct FileScan {
     pub scopes: Vec<Scope>,
     pub declarations: Vec<Declaration>,
     pub calls: Vec<Call>,
+    /// Local variables whose value is a constructor call of a known class.
+    pub bindings: Vec<LocalBinding>,
+}
+
+/// A local variable that holds an instance of a class.
+///
+/// `let engine = Engine::new()` is the one piece of type information a line
+/// scanner can be sure about, and it is enough to resolve `engine.run()` to the
+/// method of `Engine` instead of guessing between every `run` in the project.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalBinding {
+    pub name: String,
+    pub class: String,
+    pub line: usize,
+    /// Index of the scope the binding is visible in.
+    pub scope: usize,
+}
+
+impl FileScan {
+    /// Class a local variable holds at `line`, when the scan can tell.
+    ///
+    /// Only bindings in the scope the call sits in, or in a scope that contains
+    /// it, count: a local of a sibling function is not in scope.
+    pub fn binding_of(&self, name: &str, line: usize, scope: usize) -> Option<&LocalBinding> {
+        self.bindings
+            .iter()
+            .filter(|binding| {
+                binding.name == name
+                    && binding.line <= line
+                    && (binding.scope == scope || self.scope_contains(binding.scope, scope))
+            })
+            .max_by_key(|binding| binding.line)
+    }
+
+    /// Whether `ancestor` contains `scope`, itself included.
+    pub fn scope_contains(&self, ancestor: usize, scope: usize) -> bool {
+        let mut current = Some(scope);
+        while let Some(index) = current {
+            if index == ancestor {
+                return true;
+            }
+            current = self.scopes.get(index).and_then(|value| value.parent);
+        }
+        false
+    }
 }
 
 impl FileScan {
@@ -302,6 +347,7 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
     }];
     let mut declarations = Vec::new();
     let mut calls = Vec::new();
+    let mut bindings = Vec::new();
     let mut stack: Vec<usize> = vec![0];
     let mut pending_braces: Vec<usize> = Vec::new();
     let mut indent_stack: Vec<(usize, usize)> = Vec::new();
@@ -428,6 +474,17 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
             }
         }
 
+        // `let engine = Engine::new()` and `const engine = new Engine()`: the
+        // only local type information a line scanner can be sure about.
+        if let Some((name, class)) = local_binding(&masked) {
+            bindings.push(LocalBinding {
+                name,
+                class,
+                line: line_index,
+                scope: *stack.last().unwrap_or(&0),
+            });
+        }
+
         // Calls: an identifier followed by an opening parenthesis that is not
         // the declaration on this line and not a control keyword.
         let inner_scope = *stack.last().unwrap_or(&0);
@@ -481,7 +538,73 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
         scopes,
         declarations,
         calls,
+        bindings,
     }
+}
+
+/// Local variable of a line and the class its initializer constructs.
+///
+/// Recognised forms are `let engine = Engine::new()`, `let engine = new Engine()`
+/// and `const engine = Engine()`, in the languages that spell them that way. A
+/// variable assigned something the scan cannot name (`let engine = build()`) is
+/// left out instead of guessed.
+fn local_binding(masked: &str) -> Option<(String, String)> {
+    let trimmed = masked.trim_start();
+    // A declaration keyword, or a typed declaration such as
+    // `Engine engine = Engine::new()` where only the name before `=` matters.
+    let rest = match ["let ", "const ", "var ", "auto ", "final ", "val "]
+        .iter()
+        .find_map(|keyword| trimmed.strip_prefix(keyword))
+    {
+        Some(rest) => rest,
+        None => trimmed,
+    };
+    let (name, value) = rest.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty()
+        || name
+            .chars()
+            .any(|character| !character.is_alphanumeric() && character != '_')
+        || name.chars().next().map(|value| value.is_ascii_digit()) == Some(true)
+        || matches!(
+            name,
+            "if" | "while" | "return" | "else" | "and" | "or" | "not" | "print" | "new"
+        )
+    {
+        return None;
+    }
+    let value = value.trim_start();
+    // `new Engine(...)`.
+    if let Some(after_new) = value.strip_prefix("new ") {
+        let class = identifier_at(after_new)?;
+        if after_new[class.len()..].trim_start().starts_with('(') {
+            return Some((name.to_string(), class));
+        }
+        return None;
+    }
+    // `Engine::new(...)` or `Engine(...)`.
+    let class = identifier_at(value)?;
+    let after = value[class.len()..].trim_start();
+    if (after.starts_with("::") || after.starts_with('('))
+        && class.chars().next().map(|value| value.is_uppercase()) == Some(true)
+    {
+        return Some((name.to_string(), class));
+    }
+    None
+}
+
+/// Identifier at the start of a piece of code.
+fn identifier_at(value: &str) -> Option<String> {
+    let value = value.trim_start();
+    let end = value
+        .char_indices()
+        .find(|(_, character)| !character.is_alphanumeric() && *character != '_')
+        .map(|(offset, _)| offset)
+        .unwrap_or(value.len());
+    if end == 0 {
+        return None;
+    }
+    Some(value[..end].to_string())
 }
 
 /// Byte ranges of `name(` patterns in masked text, with what they are called on.
@@ -670,11 +793,24 @@ pub fn resolve_call(
         .as_ref()
         .filter(|receiver| **receiver == CallReceiver::SelfRef)
         .and_then(|_| owning_class(scan, call.scope));
+    // `engine.run()` is a member of whatever class `engine` holds, which the
+    // scan knows when the variable was assigned a constructor call.
+    let local_owner = call
+        .receiver
+        .as_ref()
+        .and_then(|receiver| match receiver {
+            CallReceiver::Value(name) | CallReceiver::Type(name) => Some(name.as_str()),
+            CallReceiver::SelfRef => None,
+        })
+        .and_then(|name| scan.binding_of(name, call.line, call.scope))
+        .map(|binding| binding.class.clone());
     let named_owner = call
         .receiver
         .as_ref()
         .filter(|receiver| receiver.looks_like_type())
-        .and_then(|receiver| receiver.owner());
+        .and_then(|receiver| receiver.owner())
+        .map(str::to_string)
+        .or(local_owner);
 
     let mut ranked = candidates
         .into_iter()
@@ -687,7 +823,7 @@ pub fn resolve_call(
                 } else {
                     CallConfidence::Project
                 }
-            } else if let Some(owner) = named_owner {
+            } else if let Some(owner) = named_owner.as_deref() {
                 if declaration.owner.as_deref() == Some(owner) {
                     CallConfidence::Member
                 } else if declaration.file == file {
@@ -1174,5 +1310,135 @@ mod tests {
             receiver: None,
         };
         assert!(resolve_call(&unknown, &scan, "main.rs", &project, 4).is_empty());
+    }
+
+    #[test]
+    fn a_constructor_binding_names_the_class_of_a_local() {
+        let source = lines(&[
+            "fn start() {",
+            "    let engine = Engine::new();",
+            "    engine.run();",
+            "    let writer = new Writer();",
+            "    writer.flush();",
+            "    const helper = Helper();",
+            "    helper.help();",
+            "    let unknown = build();",
+            "    unknown.run();",
+            "}",
+        ]);
+        let scan = scan(&source, "start.rs");
+        let binding = |name: &str| {
+            scan.bindings
+                .iter()
+                .find(|binding| binding.name == name)
+                .map(|binding| binding.class.clone())
+        };
+        assert_eq!(binding("engine").as_deref(), Some("Engine"));
+        assert_eq!(binding("writer").as_deref(), Some("Writer"));
+        assert_eq!(binding("helper").as_deref(), Some("Helper"));
+        assert_eq!(
+            binding("unknown"),
+            None,
+            "something the scan cannot name is not guessed"
+        );
+
+        let resolver_input = vec![
+            DeclarationRef {
+                name: "run".into(),
+                file: "start.rs".into(),
+                line: 2,
+                column: 0,
+                kind: SymbolKind::Function,
+                owner: Some("Engine".into()),
+            },
+            DeclarationRef {
+                name: "run".into(),
+                file: "start.rs".into(),
+                line: 20,
+                column: 0,
+                kind: SymbolKind::Function,
+                owner: Some("Other".into()),
+            },
+        ];
+        let call = scan
+            .calls
+            .iter()
+            .find(|call| call.name == "run")
+            .expect("the member call");
+        let resolved = resolve_call(call, &scan, "start.rs", &resolver_input, 4);
+        assert_eq!(resolved[0].confidence, CallConfidence::Member);
+        assert_eq!(resolved[0].declaration.owner.as_deref(), Some("Engine"));
+
+        // The call on the unbound local keeps the weaker ranking.
+        let unbound = scan
+            .calls
+            .iter()
+            .filter(|call| call.name == "run")
+            .nth(1)
+            .expect("the second call");
+        let resolved = resolve_call(unbound, &scan, "start.rs", &resolver_input, 4);
+        assert_eq!(resolved[0].confidence, CallConfidence::SameFile);
+    }
+
+    #[test]
+    fn a_binding_only_counts_inside_its_own_scope() {
+        let source = lines(&[
+            "fn first() {",
+            "    let engine = Engine::new();",
+            "}",
+            "fn second() {",
+            "    engine.run();",
+            "}",
+            "fn third() {",
+            "    engine.run();",
+            "    let engine = Engine::new();",
+            "    engine.run();",
+            "}",
+        ]);
+        let scan = scan(&source, "start.rs");
+        let declaration = vec![DeclarationRef {
+            name: "run".into(),
+            file: "start.rs".into(),
+            line: 1,
+            column: 0,
+            kind: SymbolKind::Function,
+            owner: Some("Engine".into()),
+        }];
+        let resolve = |index: usize| {
+            let call = scan
+                .calls
+                .iter()
+                .filter(|call| call.name == "run")
+                .nth(index)
+                .expect("a call");
+            resolve_call(call, &scan, "start.rs", &declaration, 4)
+        };
+        // `second` cannot see the binding of `first`.
+        assert_eq!(resolve(0)[0].confidence, CallConfidence::SameFile);
+        // Inside `third`, the call above the binding is not a member either, and
+        // the call after it is.
+        assert_eq!(resolve(1)[0].confidence, CallConfidence::SameFile);
+        assert_eq!(resolve(2)[0].confidence, CallConfidence::Member);
+        // The newest binding wins when a name is assigned twice.
+        assert!(scan.bindings.iter().filter(|b| b.name == "engine").count() >= 2);
+    }
+
+    #[test]
+    fn a_binding_does_not_confuse_a_comparison_or_a_loose_identifier() {
+        let source = lines(&[
+            "fn check(engine) {",
+            "    if engine == Engine::new() {",
+            "        return;",
+            "    }",
+            "    let value = 3;",
+            "    let text = \"Engine::new()\";",
+            "}",
+        ]);
+        let scan = scan(&source, "start.rs");
+        assert!(
+            scan.bindings.is_empty(),
+            "no local holds a constructed instance here: {:?}",
+            scan.bindings
+        );
     }
 }
