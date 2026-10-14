@@ -244,6 +244,9 @@ struct WindowsAppState {
     graph_search: String,
     graph_search_focused: bool,
     graph_scope: Option<graph_core::GraphScope>,
+    graph_folded: Vec<String>,
+    graph_selected: Option<usize>,
+    graph_keyboard_active: bool,
     background_path: Option<PathBuf>,
     background_opacity: f32,
     background_offset_x: f32,
@@ -455,6 +458,9 @@ impl WindowsAppState {
             graph_search: String::new(),
             graph_search_focused: false,
             graph_scope: None,
+            graph_folded: Vec::new(),
+            graph_selected: None,
+            graph_keyboard_active: false,
             background_path: preferences.background_path,
             background_opacity: preferences.background_opacity,
             background_offset_x: preferences.background_offset_x,
@@ -994,6 +1000,9 @@ impl WindowsAppState {
     }
 
     fn open_project(&mut self, root: PathBuf) {
+        self.graph_folded.clear();
+        self.graph_selected = None;
+        self.graph_keyboard_active = false;
         self.project_root = root;
         self.package_targets = Self::load_package_targets(&self.project_root);
         self.project_scroll = 0;
@@ -1993,6 +2002,7 @@ fn render_window(window: Hwnd) {
             let symbols = editor_core::symbol_occurrences(&app.lines, &app.file_name);
             let graph_rows = graph_visible_rows(&area, dpi as f32 / 96.0, app.terminal_motion);
             let graph = build_graph(&app, &symbols);
+            let graph_first_index = graph.clamped_scroll(app.graph_scroll, graph_rows);
             let graph_nodes = graph.visible(app.graph_scroll, graph_rows).to_vec();
             let graph_summary = graph.footer(app.graph_scroll, graph_rows);
             let graph_scope_label = if app.graph_scope.is_none() {
@@ -2075,6 +2085,8 @@ fn render_window(window: Hwnd) {
                 symbols: &symbols,
                 hovered_symbol: app.hovered_symbol.as_ref(),
                 graph_nodes: &graph_nodes,
+                graph_first_index,
+                graph_selected: app.graph_selected,
                 graph_search: &app.graph_search,
                 graph_search_focused: app.graph_search_focused,
                 graph_scope_label: &graph_scope_label,
@@ -2214,6 +2226,7 @@ fn build_graph(
         file_lines: &app.lines,
         file_symbols: symbols,
         project_symbols: &app.project_symbols,
+        folded: &app.graph_folded,
     };
     let scope = graph_core::auto_scope(
         app.hovered_symbol.as_ref(),
@@ -2257,6 +2270,13 @@ fn graph_search_rect(area: &Rect, scale: f32) -> Rect {
         right: (area.right as f32 - 18.0 * scale) as i32,
         bottom: (126.0 * scale) as i32,
     }
+}
+
+/// Client area of a window.
+fn area_for(window: Hwnd) -> Rect {
+    let mut area: Rect = unsafe { std::mem::zeroed() };
+    unsafe { GetClientRect(window, &mut area) };
+    area
 }
 
 fn inside(rect: &Rect, x: i32, y: i32) -> bool {
@@ -3469,6 +3489,79 @@ unsafe extern "system" fn window_proc(
                     }
                     return;
                 }
+                if app.graph_keyboard_active {
+                    let columns = graph_visible_rows(
+                        &area_for(window),
+                        platform::dpi_for_window(window) as f32 / 96.0,
+                        app.terminal_motion,
+                    );
+                    match w_param as u32 {
+                        VK_UP | VK_DOWN | 0x0d | 0x20 => {}
+                        _ => {
+                            app.graph_keyboard_active = false;
+                            return;
+                        }
+                    }
+                    let symbols = editor_core::symbol_occurrences(&app.lines, &app.file_name);
+                    let graph = build_graph(&app, &symbols);
+                    let current = app
+                        .graph_selected
+                        .unwrap_or(0)
+                        .min(graph.len().saturating_sub(1));
+                    let index = match w_param as u32 {
+                        VK_UP => current.saturating_sub(1),
+                        VK_DOWN => (current + 1).min(graph.len().saturating_sub(1)),
+                        _ => current,
+                    };
+                    app.graph_selected = Some(index);
+                    let first = graph.clamped_scroll(app.graph_scroll, columns);
+                    if index < first {
+                        app.graph_scroll += first - index;
+                    } else if index >= first + columns {
+                        app.graph_scroll = app
+                            .graph_scroll
+                            .saturating_sub(index - (first + columns - 1));
+                    }
+                    match w_param as u32 {
+                        0x0d => {
+                            if let Some(target) =
+                                graph.nodes.get(index).and_then(|node| node.target.as_ref())
+                            {
+                                let path = app.project_root.join(&target.file);
+                                let line = target.line;
+                                let column = target.column;
+                                app.open_file(path);
+                                app.caret_line = line.min(app.lines.len().saturating_sub(1));
+                                app.caret_column = column;
+                                app.clamp_caret();
+                                app.status = format!("Jumped to relation at {}", app.file_name);
+                            }
+                        }
+                        0x20 => {
+                            if let Some(node) = graph.nodes.get(index) {
+                                if node.has_children() {
+                                    let key = node.key.clone();
+                                    let label = node.label.clone();
+                                    if let Some(position) =
+                                        app.graph_folded.iter().position(|it| *it == key)
+                                    {
+                                        app.graph_folded.remove(position);
+                                        app.status = format!("Expanded {label}");
+                                    } else {
+                                        app.graph_folded.push(key);
+                                        app.status = format!("Collapsed {label}");
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            if let Some(node) = graph.nodes.get(index) {
+                                app.status = format!("Graph selection: {}", node.caption());
+                            }
+                        }
+                    }
+                    return;
+                }
                 if !app.terminal_open {
                     let old = app.position();
                     match w_param as u32 {
@@ -3821,22 +3914,57 @@ unsafe extern "system" fn window_proc(
                 let row = ((y as f32 - (48.0 * scale + graph_core::FIRST_ROW_TOP * scale))
                     / (graph_core::ROW_HEIGHT * scale))
                     .floor();
-                let target = APP.with(|cell| {
-                    let app = cell.borrow();
+                let (toggled, target) = APP.with(|cell| {
+                    let mut app = cell.borrow_mut();
                     if row < 0.0 {
-                        return None;
+                        return (false, None);
                     }
                     let symbols = editor_core::symbol_occurrences(&app.lines, &app.file_name);
                     let graph = build_graph(&app, &symbols);
                     let index = graph.clamped_scroll(app.graph_scroll, rows) + row as usize;
-                    let node = graph.nodes.get(index)?;
-                    let target = node.target.as_ref()?;
-                    Some((
-                        app.project_root.join(&target.file),
-                        target.line,
-                        target.column,
-                    ))
+                    let Some(node) = graph.nodes.get(index) else {
+                        return (false, None);
+                    };
+                    let panel_left = graph_left(&area, scale);
+                    let (marker_left, marker_right) =
+                        graph_core::marker_span(panel_left, node.depth, scale);
+                    if node.has_children()
+                        && (x as f32) >= marker_left
+                        && (x as f32) <= marker_right
+                    {
+                        let key = node.key.clone();
+                        let folded = node.folded;
+                        let label = node.label.clone();
+                        if let Some(position) = app.graph_folded.iter().position(|it| *it == key) {
+                            app.graph_folded.remove(position);
+                        } else {
+                            app.graph_folded.push(key);
+                        }
+                        app.status = if folded {
+                            format!("Expanded {label}")
+                        } else {
+                            format!("Collapsed {label}")
+                        };
+                        return (true, None);
+                    }
+                    app.graph_selected = Some(index);
+                    app.graph_keyboard_active = true;
+                    let Some(target) = node.target.as_ref() else {
+                        return (false, None);
+                    };
+                    (
+                        false,
+                        Some((
+                            app.project_root.join(&target.file),
+                            target.line,
+                            target.column,
+                        )),
+                    )
                 });
+                if toggled {
+                    invalidate(window);
+                    return 0;
+                }
                 if let Some((path, line, column)) = target {
                     APP.with(|cell| {
                         let mut app = cell.borrow_mut();
@@ -3934,6 +4062,7 @@ unsafe extern "system" fn window_proc(
             {
                 let started = APP.with(|cell| {
                     let mut app = cell.borrow_mut();
+                    app.graph_keyboard_active = false;
                     if !app.terminal_open {
                         return false;
                     }
@@ -4003,6 +4132,7 @@ unsafe extern "system" fn window_proc(
             } else if let Some(position) = editor_position_at(window, x, y) {
                 APP.with(|cell| {
                     let mut app = cell.borrow_mut();
+                    app.graph_keyboard_active = false;
                     app.editing_comment = None;
                     app.set_caret(position, platform::shift_pressed());
                     app.dragging_selection = true;

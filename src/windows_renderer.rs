@@ -76,6 +76,10 @@ pub struct WindowsScene<'a> {
     pub symbols: &'a [SymbolOccurrence],
     pub hovered_symbol: Option<&'a SymbolOccurrence>,
     pub graph_nodes: &'a [graph_core::GraphNode],
+    /// Absolute index of the first drawn node.
+    pub graph_first_index: usize,
+    /// Absolute index of the keyboard selected node.
+    pub graph_selected: Option<usize>,
     pub graph_search: &'a str,
     pub graph_search_focused: bool,
     pub graph_scope_label: &'a str,
@@ -1143,7 +1147,7 @@ impl DirectEditorRenderer {
             )
         };
         let path_progress = (scene.animation_seconds / 0.65).clamp(0.0, 1.0);
-        let path_x = editor_right + 30.0 * scale;
+        let path_x = graph_core::path_x(editor_right, scale);
         let first_y = header_h + graph_core::FIRST_ROW_TOP * scale;
         let row_height = graph_core::ROW_HEIGHT * scale;
         let last_y = first_y + scene.graph_nodes.len().saturating_sub(1) as f32 * row_height;
@@ -1161,10 +1165,13 @@ impl DirectEditorRenderer {
         }
         for (index, node) in scene.graph_nodes.iter().enumerate() {
             let y = first_y + index as f32 * row_height;
-            let indent =
-                path_x + 12.0 * scale + node.depth as f32 * graph_core::DEPTH_INDENT * scale;
+            let indent = graph_core::card_left(editor_right, node.depth, scale);
             let active = scene.graph_nodes.len() <= 1
                 || path_progress >= index as f32 / scene.graph_nodes.len().saturating_sub(1) as f32;
+            let selected = scene
+                .graph_selected
+                .map(|selected| selected == scene.graph_first_index + index)
+                .unwrap_or(false);
             unsafe {
                 Self::rounded(
                     &target_base,
@@ -1178,17 +1185,39 @@ impl DirectEditorRenderer {
                     8.0 * scale,
                 )
             };
-            let color = match node.level {
-                graph_core::GraphLevel::Class => &keyword,
-                graph_core::GraphLevel::Occurrence | graph_core::GraphLevel::Folder => &muted,
-                _ => {
-                    if active {
-                        &bright
-                    } else {
-                        &muted
+            let color = if selected {
+                &accent
+            } else {
+                match node.level {
+                    graph_core::GraphLevel::Class => &keyword,
+                    graph_core::GraphLevel::Occurrence | graph_core::GraphLevel::Folder => &muted,
+                    _ => {
+                        if active {
+                            &bright
+                        } else {
+                            &muted
+                        }
                     }
                 }
             };
+            let marker = graph_core::marker_glyph(node);
+            if !marker.is_empty() {
+                let (marker_left, _) = graph_core::marker_span(editor_right, node.depth, scale);
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        &accent,
+                        marker,
+                        D2D_RECT_F {
+                            left: marker_left,
+                            top: y,
+                            right: marker_left + graph_core::MARKER_WIDTH * scale,
+                            bottom: y + 25.0 * scale,
+                        },
+                    )
+                };
+            }
             unsafe {
                 Self::text(
                     &target_base,
@@ -1196,9 +1225,12 @@ impl DirectEditorRenderer {
                     color,
                     &node.caption(),
                     D2D_RECT_F {
-                        left: indent + 12.0 * scale,
+                        left: graph_core::caption_left(editor_right, node.depth, scale),
                         top: y,
-                        right: (width - 190.0 * scale).max(indent + 40.0 * scale),
+                        right: (width - 190.0 * scale).max(
+                            graph_core::caption_left(editor_right, node.depth, scale)
+                                + 40.0 * scale,
+                        ),
                         bottom: y + 25.0 * scale,
                     },
                 )
