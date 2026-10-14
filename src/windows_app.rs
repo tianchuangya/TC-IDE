@@ -283,6 +283,7 @@ struct WindowsAppState {
     ai_last_report: String,
     problems_open: bool,
     problems_selection: usize,
+    problem_filter: lsp_core::SeverityFilter,
     chat_open: bool,
     chat_input: String,
     chat_input_focused: bool,
@@ -581,6 +582,7 @@ impl WindowsAppState {
             ai_last_report: String::new(),
             problems_open: false,
             problems_selection: 0,
+            problem_filter: lsp_core::SeverityFilter::All,
             chat_open: false,
             chat_input: String::new(),
             chat_input_focused: false,
@@ -1812,7 +1814,7 @@ impl WindowsAppState {
     /// Each row carries where it should take the caret when it is opened.
     fn problem_rows(&self) -> Vec<ProblemRow> {
         let mut rows = Vec::new();
-        for diagnostic in &self.lsp_diagnostics {
+        for diagnostic in lsp_core::filter_diagnostics(&self.lsp_diagnostics, self.problem_filter) {
             let target = self
                 .file_path
                 .clone()
@@ -2621,7 +2623,7 @@ impl WindowsAppState {
     /// Diagnostics grouped by line, for the gutter markers.
     fn diagnostic_lines(&self) -> Vec<(usize, bool)> {
         let mut lines: Vec<(usize, bool)> = Vec::new();
-        for diagnostic in &self.lsp_diagnostics {
+        for diagnostic in lsp_core::filter_diagnostics(&self.lsp_diagnostics, self.problem_filter) {
             let is_error = diagnostic.severity == lsp_core::DiagnosticSeverity::Error;
             let line = diagnostic.line as usize;
             match lines.iter_mut().find(|entry| entry.0 == line) {
@@ -3904,11 +3906,15 @@ fn render_window(window: Hwnd) {
                 problems_open: app.problems_open,
                 problems: &problem_rows,
                 problems_selected: app.problems_selection,
-                problems_hint: if app.debug_session.is_some() {
-                    "debugging · Enter jumps · Esc closes"
-                } else {
-                    "Ctrl+Shift+D closes · Enter jumps"
-                },
+                problems_hint: &format!(
+                    "filter {} · Tab cycles · Enter jumps · Esc closes{}",
+                    app.problem_filter.label(),
+                    if app.debug_session.is_some() {
+                        " · debugging"
+                    } else {
+                        ""
+                    }
+                ),
                 language_tooling: &language_tooling,
                 chat_open: app.chat_open,
                 chat_messages: &chat_messages,
@@ -5511,6 +5517,15 @@ unsafe extern "system" fn window_proc(
                 if app.problems_open {
                     match w_param as u32 {
                         0x1b => app.problems_open = false,
+                        VK_TAB => {
+                            app.problem_filter = app.problem_filter.next();
+                            app.problems_selection = 0;
+                            let count = app.problem_rows().len();
+                            app.status = format!(
+                                "Problems filter: {} ({count} row(s)); Tab cycles",
+                                app.problem_filter.label()
+                            );
+                        }
                         VK_UP => app.move_problem_selection(-1),
                         VK_DOWN => app.move_problem_selection(1),
                         0x0d => app.activate_problem_row(),

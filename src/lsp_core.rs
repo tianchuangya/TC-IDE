@@ -694,6 +694,65 @@ impl Diagnostic {
     }
 }
 
+/// Smallest severity a filter keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeverityFilter {
+    /// Everything a server reported.
+    All,
+    /// Warnings and errors.
+    Warning,
+    /// Errors only.
+    Error,
+}
+
+impl SeverityFilter {
+    pub const ALL: [SeverityFilter; 3] = [
+        SeverityFilter::All,
+        SeverityFilter::Warning,
+        SeverityFilter::Error,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SeverityFilter::All => "all",
+            SeverityFilter::Warning => "warnings+",
+            SeverityFilter::Error => "errors",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|filter| *filter == self)
+            .unwrap_or(0)
+    }
+
+    /// Whether a diagnostic passes this filter.
+    pub fn keeps(self, severity: DiagnosticSeverity) -> bool {
+        match self {
+            SeverityFilter::All => true,
+            SeverityFilter::Warning => matches!(
+                severity,
+                DiagnosticSeverity::Error | DiagnosticSeverity::Warning
+            ),
+            SeverityFilter::Error => severity == DiagnosticSeverity::Error,
+        }
+    }
+}
+
+/// Diagnostics that pass a filter, in their original order.
+pub fn filter_diagnostics(diagnostics: &[Diagnostic], filter: SeverityFilter) -> Vec<Diagnostic> {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| filter.keeps(diagnostic.severity))
+        .cloned()
+        .collect()
+}
+
 /// Extract every balanced `{...}` object that follows `key` in an array.
 pub fn json_objects(text: &str, key: &str) -> Vec<String> {
     let needle = format!("\"{key}\"");
@@ -1152,6 +1211,49 @@ mod tests {
         assert_eq!(locations, [("/p/src/lib.rs".to_string(), 4, 2)]);
         let references = "{\"result\":{\"locations\":[{\"uri\":\"file:///p/a.rs\",\"range\":{\"start\":{\"line\":1,\"character\":0},\"end\":{}}}]}}";
         assert_eq!(parse_locations(references).len(), 1);
+    }
+
+    #[test]
+    fn severity_filters_keep_the_right_diagnostics() {
+        let diagnostics = vec![
+            Diagnostic {
+                path: "a.rs".into(),
+                line: 1,
+                column: 0,
+                severity: DiagnosticSeverity::Error,
+                message: "boom".into(),
+            },
+            Diagnostic {
+                path: "a.rs".into(),
+                line: 2,
+                column: 0,
+                severity: DiagnosticSeverity::Warning,
+                message: "careful".into(),
+            },
+            Diagnostic {
+                path: "a.rs".into(),
+                line: 3,
+                column: 0,
+                severity: DiagnosticSeverity::Hint,
+                message: "idea".into(),
+            },
+        ];
+        assert_eq!(
+            filter_diagnostics(&diagnostics, SeverityFilter::All).len(),
+            3
+        );
+        assert_eq!(
+            filter_diagnostics(&diagnostics, SeverityFilter::Warning).len(),
+            2
+        );
+        let errors = filter_diagnostics(&diagnostics, SeverityFilter::Error);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].severity, DiagnosticSeverity::Error);
+        assert_eq!(SeverityFilter::All.next(), SeverityFilter::Warning);
+        assert_eq!(SeverityFilter::Error.next(), SeverityFilter::All);
+        assert_eq!(SeverityFilter::Warning.label(), "warnings+");
+        assert!(SeverityFilter::Warning.keeps(DiagnosticSeverity::Warning));
+        assert!(!SeverityFilter::Error.keeps(DiagnosticSeverity::Information));
     }
 
     #[test]
