@@ -166,7 +166,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 - [x] 接入真实 LSP：`lsp_core` 客户端（stdio 管道、分帧、自动应答服务端请求）已在 Windows 侧驱动补全、诊断（行标记与状态栏、光标所在行的诊断信息）、F12 跳转定义、Ctrl+I 悬停、Ctrl+R 引用列表（再次按 Ctrl+R 依次跳转）与 F2 重命名（编辑应用到当前缓冲与其他文件）。仍未实现独立的诊断面板与重命名预览。
 - [ ] 为 C/C++ 正确连接 clangd，为 Python 连接 basedpyright/pyright，为 Rust 连接 rust-analyzer；扩展安装状态必须与真实可执行文件状态一致。
 - [x] 加入文件脏状态、关闭未保存确认、多文件标签、最近项目和会话恢复。（Windows 已实现标签栏、脏标记、Ctrl+W、原生确认框与 session.conf 恢复；Linux 仍未实现）
-- [~] 编辑器滚动条、大文件虚拟化与水平滚动已完成（`Viewport` + `line_window`，渲染器只绘制可见行并裁剪代码列）；项目树滚动条仍未实现。
+- [x] 编辑器滚动条、大文件虚拟化、水平滚动与项目树滚动条均已完成（`Viewport` + `line_window`，渲染器只绘制可见行、裁剪代码列，并按总行数与偏移绘制两侧滚动条）。
 
 ### P1：关系图可扩展性
 
@@ -200,8 +200,8 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 - [ ] 输入和删除动画扩展到多字符粘贴、撤销/重做，同时保证高频输入不积压动画。
 - [ ] 背景图增加可视化裁剪框、拖拽和缩放预览，而不仅是数值调节。
 - [x] 底部终端面板的鼠标选择与复制。（已实现：面板正文拖选、按单元格高亮、状态栏显示选中字符数、`Ctrl+Shift+C` 复制，`Ctrl+C` 仍中断；仍待在 Windows 实机确认高 DPI 下的对齐）
-- [ ] 所有可点击控件增加悬停/按下/禁用/键盘焦点状态，并检查浅色主题对比度。
-- [ ] 设置和扩展面板需要完整中文文案，不只是标题切换。
+- [~] 设置、打包与项目树等可点击行已有悬停高亮；**按钮的按下/禁用/键盘焦点状态与浅色主题对比度检查仍未完成**。
+- [x] 设置与扩展面板的完整中文文案已完成（设置各行、扩展类别、安装/检测提示、打包目标与证书行、关闭提示）。
 
 ### P2：macOS 与共享架构
 
@@ -226,13 +226,13 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 1. **Windows 实机验收**：按 `docs/REAL-MACHINE-CHECKLIST.md` 逐项确认，把结果写回本文件与
    `docs/KNOWN-ISSUES.md`。这是当前唯一无法由 CI 或 Linux 本地替代的部分。
 2. **LSP 剩余部分**：传输层与界面接入已完成（补全、诊断、F12 跳转、Ctrl+I 悬停、didOpen/didChange），仍缺重命名、引用列表与独立诊断面板。
-3. **编辑器剩余部分**：piece table、虚拟化、编辑器滚动条与水平滚动已完成；仍缺项目树滚动条。
+3. **编辑器剩余部分**：piece table、虚拟化、编辑器与项目树滚动条、水平滚动均已完成。
 4. **Tree-sitter 或等价增量解析**：替换正则/启发式语义关系。
 5. **调试面板**：调用栈与变量已经有数据（`dap_core::DebugState`），缺的是一个独立面板与断点管理界面。
 6. **AI 会话**：面板与流式回答已完成；仍缺多轮上下文与历史持久化。
-7. **关系图真正的增量索引**：现在是整项目重扫（在后台线程），可以按文件变更增量更新。
-8. **视觉细节**：文件树行位置弹簧、多字符粘贴/撤销动画、背景图可视化裁剪框、
-   控件悬停/按下/禁用状态、设置与扩展面板完整中文文案。
+7. **关系图**：增量索引已完成；下一步可以是把 `graph_core` 的层级细节与聚类做得更细（按视口密度切换层级）。
+8. **视觉细节**：悬停高亮与完整中文文案已完成；仍缺文件树行位置弹簧、多字符粘贴/撤销动画、
+   背景图可视化裁剪框、按钮按下/禁用/键盘焦点状态与浅色主题对比度检查。
 9. **macOS 原生后端**：Cocoa/CoreText/Metal、NSPasteboard、NSOpenPanel、PTY、NSWorkspace。
 10. **架构收尾**：拆分 `windows_app.rs`（事件/编辑器/工作区/扩展/打包/终端窗口）与绘制区域；
     Linux 接入会话恢复与运行时缓存清单；下沉偏好设置/项目模板/打包命令剩余的重复实现。
@@ -337,7 +337,7 @@ cargo run --release
 
 ```bash
 cargo fmt --check
-cargo test --all-targets                                   # 142 项共享内核与后端测试
+cargo test --all-targets                                   # 148 项共享内核与后端测试
 cargo clippy --all-targets -- -D warnings                   # 共享内核 + Linux 后端
 cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo check --all-targets --target x86_64-pc-windows-msvc    # Windows 类型检查
