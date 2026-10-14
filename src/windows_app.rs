@@ -28,6 +28,7 @@ type Dword = u32;
 type Hbrush = *mut c_void;
 type Hcursor = *mut c_void;
 type Hdc = *mut c_void;
+type Hfont = *mut c_void;
 type Hicon = *mut c_void;
 type Hinstance = *mut c_void;
 type Hmenu = *mut c_void;
@@ -73,6 +74,31 @@ const VK_RIGHT: u32 = 0x27;
 const VK_UP: u32 = 0x26;
 const GCS_COMPSTR: Lparam = 0x0008;
 const GCS_RESULTSTR: Lparam = 0x0800;
+const DT_CALCRECT: Uint = 0x0400;
+const DT_SINGLELINE: Uint = 0x0020;
+const DT_NOPREFIX: Uint = 0x0800;
+const DT_RIGHT: Uint = 0x0002;
+const TRANSPARENT_MODE: i32 = 1;
+const DEFAULT_CHARSET: u8 = 1;
+const OUT_TT_PRECIS: u8 = 4;
+const CLIP_DEFAULT_PRECIS: u8 = 0;
+const CLEARTYPE_QUALITY: u8 = 5;
+const FF_MODERN: u8 = 0x30;
+const FIXED_PITCH: u8 = 0x01;
+const FW_NORMAL: i32 = 400;
+/// Detached terminal cell height in logical pixels.
+const DETACHED_FONT_HEIGHT: f32 = 14.0;
+/// Monospace face used by the detached terminal window.
+const DETACHED_FONT_FACE: &str = "Cascadia Mono";
+/// Height of the detached window header above the scrollback area.
+const DETACHED_HEADER_HEIGHT: f32 = 76.0;
+const DETACHED_TEXT_LEFT: f32 = 24.0;
+const DETACHED_TEXT_RIGHT: f32 = 20.0;
+const DETACHED_INPUT_GAP: f32 = 8.0;
+/// Lines a single wheel notch scrolls.
+const WHEEL_SCROLL_LINES: i32 = 3;
+/// Seconds a detached terminal notice stays visible.
+const NOTICE_SECONDS: f32 = 1.8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct TextPosition {
@@ -100,9 +126,61 @@ struct TerminalTab {
     input: String,
 }
 
+/// View state that belongs to the detached terminal window only.
+struct DetachedTerminalState {
+    scroll: usize,
+    selection: Option<terminal_core::TerminalSelection>,
+    dragging: bool,
+    metrics: Option<(f32, f32)>,
+    metrics_dpi: u32,
+    font: Hfont,
+    font_dpi: u32,
+    grid_signature: (u32, u32, u32, u32, usize),
+    notice: Option<String>,
+    notice_started: Option<Instant>,
+}
+
+impl Default for DetachedTerminalState {
+    fn default() -> Self {
+        Self {
+            scroll: 0,
+            selection: None,
+            dragging: false,
+            metrics: None,
+            metrics_dpi: 0,
+            font: ptr::null_mut(),
+            font_dpi: 0,
+            grid_signature: (0, 0, 0, 0, 0),
+            notice: None,
+            notice_started: None,
+        }
+    }
+}
+
+/// Laid out geometry of the detached terminal window, in device pixels.
+struct DetachedLayout {
+    left: f32,
+    right: f32,
+    top: f32,
+    input_top: f32,
+    row_height: f32,
+    cell_width: f32,
+    visible_rows: usize,
+    columns: i16,
+    rows: i16,
+}
+
+/// Buffered output lines of the terminal the detached window shows.
+struct DetachedContext {
+    lines: Vec<String>,
+    viewport: terminal_core::TerminalViewport,
+    layout: DetachedLayout,
+}
+
 thread_local! {
     static APP: RefCell<WindowsAppState> = RefCell::new(WindowsAppState::new());
     static RENDERER: RefCell<Option<DirectEditorRenderer>> = const { RefCell::new(None) };
+    static DETACHED: RefCell<DetachedTerminalState> = RefCell::new(DetachedTerminalState::default());
 }
 
 struct WindowsAppState {
@@ -180,7 +258,7 @@ struct WindowsAppState {
     terminals: Vec<TerminalTab>,
     active_terminal: usize,
     terminal_grid: terminal_core::GridSize,
-    terminal_grid_signature: (u32, u32, u32, i32, usize),
+    terminal_grid_signature: (u32, u32, u32, i32, usize, usize, bool),
     detached_terminal: Hwnd,
     status: String,
     started: Instant,
@@ -387,7 +465,7 @@ impl WindowsAppState {
                 columns: 120,
                 rows: 30,
             },
-            terminal_grid_signature: (0, 0, 0, 0, 0),
+            terminal_grid_signature: (0, 0, 0, 0, 0, 0, false),
             detached_terminal: ptr::null_mut(),
             status: "DirectWrite / Direct2D editor ready".into(),
             started: Instant::now(),
@@ -1512,6 +1590,24 @@ struct PaintStruct {
     reserved: [u8; 32],
 }
 
+#[repr(C)]
+struct LogFontW {
+    height: i32,
+    width: i32,
+    escapement: i32,
+    orientation: i32,
+    weight: i32,
+    italic: u8,
+    underline: u8,
+    strike_out: u8,
+    char_set: u8,
+    out_precision: u8,
+    clip_precision: u8,
+    quality: u8,
+    pitch_and_family: u8,
+    face_name: [u16; 32],
+}
+
 type WindowProc = unsafe extern "system" fn(Hwnd, Uint, Wparam, Lparam) -> Lresult;
 
 #[repr(C)]
@@ -1569,12 +1665,14 @@ extern "system" {
     fn EndPaint(window: Hwnd, paint: *const PaintStruct) -> Bool;
     fn FillRect(dc: Hdc, rect: *const Rect, brush: Hbrush) -> i32;
     fn GetClientRect(window: Hwnd, area: *mut Rect) -> Bool;
+    fn GetDC(window: Hwnd) -> Hdc;
     fn GetMessageW(message: *mut Msg, window: Hwnd, minimum: Uint, maximum: Uint) -> Bool;
     fn InvalidateRect(window: Hwnd, area: *const Rect, erase: Bool) -> Bool;
     fn LoadCursorW(instance: Hinstance, cursor_name: *const u16) -> Hcursor;
     fn PostQuitMessage(exit_code: i32);
     fn RegisterClassW(class: *const WindowClass) -> u16;
     fn ReleaseCapture() -> Bool;
+    fn ReleaseDC(window: Hwnd, dc: Hdc) -> i32;
     fn SetCapture(window: Hwnd) -> Hwnd;
     fn SetForegroundWindow(window: Hwnd) -> Bool;
     fn SetTimer(window: Hwnd, event: usize, milliseconds: Uint, callback: *const c_void) -> usize;
@@ -1585,9 +1683,9 @@ extern "system" {
 
 #[link(name = "gdi32")]
 extern "system" {
+    fn CreateFontIndirectW(log_font: *const LogFontW) -> Hfont;
     fn CreateSolidBrush(color: Dword) -> Hbrush;
     fn DeleteObject(object: *mut c_void) -> Bool;
-    fn GetStockObject(index: i32) -> *mut c_void;
     fn SelectObject(dc: Hdc, object: *mut c_void) -> *mut c_void;
     fn SetBkMode(dc: Hdc, mode: i32) -> i32;
     fn SetTextColor(dc: Hdc, color: Dword) -> Dword;
@@ -2131,13 +2229,21 @@ fn grid_for_panel(
 }
 
 /// Resize every ConPTY session when the client area, DPI, zoom or session set changed.
+///
+/// While a detached terminal window is open it owns the grid of the session it
+/// shows, so the IDE keeps resizing the other sessions only.
 fn sync_terminal_grid(window: Hwnd) {
-    let mut area = unsafe { std::mem::zeroed::<Rect>() };
+    let mut area: Rect = unsafe { std::mem::zeroed::<Rect>() };
     unsafe { GetClientRect(window, &mut area) };
     let dpi = platform::dpi_for_window(window);
-    let (code_zoom, count) = APP.with(|cell| {
+    let (code_zoom, count, active, detached) = APP.with(|cell| {
         let app = cell.borrow();
-        (app.code_zoom, app.terminals.len())
+        (
+            app.code_zoom,
+            app.terminals.len(),
+            app.active_terminal,
+            !app.detached_terminal.is_null(),
+        )
     });
     let signature = (
         (area.right - area.left).max(0) as u32,
@@ -2145,6 +2251,8 @@ fn sync_terminal_grid(window: Hwnd) {
         dpi,
         code_zoom,
         count,
+        active,
+        detached,
     );
     let changed = APP.with(|cell| {
         let mut app = cell.borrow_mut();
@@ -2161,31 +2269,337 @@ fn sync_terminal_grid(window: Hwnd) {
     APP.with(|cell| {
         let mut app = cell.borrow_mut();
         app.terminal_grid = grid;
-        for terminal in &app.terminals {
+        let detached = !app.detached_terminal.is_null();
+        let active = app.active_terminal;
+        for (index, terminal) in app.terminals.iter().enumerate() {
+            if detached && index == active {
+                continue;
+            }
             terminal.session.resize(grid.columns, grid.rows);
         }
     });
 }
 
 unsafe fn draw_terminal_text(dc: Hdc, value: &str, x: i32, y: i32, right: i32, color: Dword) {
+    draw_terminal_line(
+        dc,
+        value,
+        Rect {
+            left: x,
+            top: y,
+            right,
+            bottom: y + 24,
+        },
+        DT_SINGLELINE | DT_NOPREFIX,
+        color,
+    );
+}
+
+unsafe fn draw_terminal_line(dc: Hdc, value: &str, area: Rect, format: Uint, color: Dword) {
     let wide = value.encode_utf16().collect::<Vec<_>>();
-    let mut area = Rect {
-        left: x,
-        top: y,
-        right,
-        bottom: y + 24,
-    };
+    let mut area = area;
     unsafe {
         SetTextColor(dc, color);
-        DrawTextW(dc, wide.as_ptr(), wide.len() as i32, &mut area, 0x00000100);
+        DrawTextW(dc, wide.as_ptr(), wide.len() as i32, &mut area, format);
     }
+}
+
+/// Monospace font of the detached terminal, rebuilt when the window DPI changes.
+unsafe fn detached_font(window: Hwnd) -> Hfont {
+    let dpi = platform::dpi_for_window(window);
+    let (current, current_dpi) = DETACHED.with(|cell| {
+        let state = cell.borrow();
+        (state.font, state.font_dpi)
+    });
+    if !current.is_null() && current_dpi == dpi {
+        return current;
+    }
+    let scale = dpi.max(96) as f32 / 96.0;
+    let mut log_font: LogFontW = unsafe { std::mem::zeroed() };
+    log_font.height = -((DETACHED_FONT_HEIGHT * scale).round() as i32).max(9);
+    log_font.weight = FW_NORMAL;
+    log_font.char_set = DEFAULT_CHARSET;
+    log_font.out_precision = OUT_TT_PRECIS;
+    log_font.clip_precision = CLIP_DEFAULT_PRECIS;
+    log_font.quality = CLEARTYPE_QUALITY;
+    log_font.pitch_and_family = FF_MODERN | FIXED_PITCH;
+    for (index, unit) in DETACHED_FONT_FACE.encode_utf16().take(31).enumerate() {
+        log_font.face_name[index] = unit;
+    }
+    let font = unsafe { CreateFontIndirectW(&log_font) };
+    DETACHED.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let previous = state.font;
+        state.font = font;
+        state.font_dpi = dpi;
+        if !previous.is_null() {
+            unsafe { DeleteObject(previous) };
+        }
+    });
+    font
+}
+
+/// Glyph advance and line height measured from the detached terminal font.
+fn detached_cell_metrics(window: Hwnd) -> (f32, f32) {
+    let dpi = platform::dpi_for_window(window);
+    let cached = DETACHED.with(|cell| {
+        let state = cell.borrow();
+        if state.metrics_dpi == dpi {
+            state.metrics
+        } else {
+            None
+        }
+    });
+    if let Some(metrics) = cached {
+        return metrics;
+    }
+    let metrics = measure_detached_cells(window);
+    DETACHED.with(|cell| {
+        let mut state = cell.borrow_mut();
+        state.metrics = Some(metrics);
+        state.metrics_dpi = dpi;
+    });
+    metrics
+}
+
+/// Measure the detached terminal font once per window DPI.
+fn measure_detached_cells(window: Hwnd) -> (f32, f32) {
+    unsafe {
+        let font = detached_font(window);
+        let dc = GetDC(window);
+        if dc.is_null() {
+            return (
+                terminal_core::code_cell_width(0),
+                DETACHED_FONT_HEIGHT * 1.35,
+            );
+        }
+        let previous = if font.is_null() {
+            ptr::null_mut()
+        } else {
+            SelectObject(dc, font)
+        };
+        let sample = "M".repeat(64);
+        let sample_wide = sample.encode_utf16().collect::<Vec<_>>();
+        let mut sample_area = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        DrawTextW(
+            dc,
+            sample_wide.as_ptr(),
+            sample_wide.len() as i32,
+            &mut sample_area,
+            DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        let width = ((sample_area.right - sample_area.left).max(1) as f32) / 64.0;
+        let glyph = wide("M");
+        let mut glyph_area = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        DrawTextW(
+            dc,
+            glyph.as_ptr(),
+            1,
+            &mut glyph_area,
+            DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        let height = (glyph_area.bottom - glyph_area.top).max(1) as f32;
+        if !previous.is_null() {
+            SelectObject(dc, previous);
+        }
+        ReleaseDC(window, dc);
+        (width, height)
+    }
+}
+
+/// Lay out header, scrollback area and input line of the detached window.
+fn detached_layout(area: &Rect, cell_width: f32, cell_height: f32) -> DetachedLayout {
+    let width = (area.right - area.left).max(1) as f32;
+    let height = (area.bottom - area.top).max(1) as f32;
+    let cell_width = if cell_width.is_finite() && cell_width > 0.0 {
+        cell_width
+    } else {
+        8.0
+    };
+    let cell_height = if cell_height.is_finite() && cell_height > 0.0 {
+        cell_height
+    } else {
+        16.0
+    };
+    let left = DETACHED_TEXT_LEFT;
+    let right = (width - DETACHED_TEXT_RIGHT).max(left + cell_width);
+    let top = DETACHED_HEADER_HEIGHT;
+    let input_top = (height - cell_height - DETACHED_INPUT_GAP).max(top + cell_height);
+    let bottom = (input_top - DETACHED_INPUT_GAP).max(top + 1.0);
+    let visible_rows = (((bottom - top) / cell_height).floor().max(1.0)) as usize;
+    let grid =
+        terminal_core::GridSize::from_metrics(right - left, bottom - top, cell_width, cell_height);
+    DetachedLayout {
+        left,
+        right,
+        top,
+        input_top,
+        row_height: cell_height,
+        cell_width,
+        visible_rows,
+        columns: grid.columns,
+        rows: grid.rows,
+    }
+}
+
+/// Buffered output of the terminal the detached window shares with the IDE.
+fn detached_lines() -> Vec<String> {
+    APP.with(|cell| {
+        let app = cell.borrow();
+        app.terminals
+            .get(app.active_terminal)
+            .and_then(|tab| {
+                tab.session.view.lock().ok().map(|view| {
+                    let mut lines = view.lines.clone();
+                    if !view.current.is_empty() {
+                        lines.push(view.current.clone());
+                    }
+                    lines
+                })
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// Lines, scrollback window and layout used by painting and hit testing.
+fn detached_context(window: Hwnd) -> DetachedContext {
+    let mut area: Rect = unsafe { std::mem::zeroed() };
+    unsafe { GetClientRect(window, &mut area) };
+    let (cell_width, cell_height) = detached_cell_metrics(window);
+    let layout = detached_layout(&area, cell_width, cell_height);
+    let lines = detached_lines();
+    let scroll = DETACHED.with(|cell| cell.borrow().scroll);
+    let viewport = terminal_core::TerminalViewport {
+        total_lines: lines.len(),
+        visible_rows: layout.visible_rows,
+        scroll,
+    };
+    DetachedContext {
+        lines,
+        viewport,
+        layout,
+    }
+}
+
+/// Buffer position under a window point, optionally clamped into the viewport.
+fn detached_point_at(
+    context: &DetachedContext,
+    x: i32,
+    y: i32,
+    clamp: bool,
+) -> Option<terminal_core::TerminalPoint> {
+    let row = (y as f32 - context.layout.top) / context.layout.row_height;
+    let row = if row < 0.0 {
+        if clamp {
+            0.0
+        } else {
+            return None;
+        }
+    } else if row >= context.viewport.visible_rows as f32 {
+        if clamp {
+            (context.viewport.visible_rows - 1) as f32
+        } else {
+            return None;
+        }
+    } else {
+        row
+    };
+    let line = context.viewport.line_at_row(row.floor() as usize)?;
+    let cells = ((x as f32 - context.layout.left) / context.layout.cell_width).max(0.0) as usize;
+    let value = context.lines.get(line)?;
+    Some(terminal_core::TerminalPoint {
+        line,
+        column: terminal_core::column_for_cells(value, cells),
+    })
+}
+
+/// Push the detached window size into the ConPTY grid it shows.
+fn sync_detached_terminal_grid(window: Hwnd) {
+    let mut area: Rect = unsafe { std::mem::zeroed() };
+    unsafe { GetClientRect(window, &mut area) };
+    let (cell_width, cell_height) = detached_cell_metrics(window);
+    let layout = detached_layout(&area, cell_width, cell_height);
+    let (active, count) = APP.with(|cell| {
+        let app = cell.borrow();
+        (app.active_terminal, app.terminals.len())
+    });
+    let signature = (
+        (area.right - area.left).max(0) as u32,
+        (area.bottom - area.top).max(0) as u32,
+        cell_width.to_bits(),
+        cell_height.to_bits(),
+        active,
+    );
+    let changed = DETACHED.with(|cell| {
+        let mut state = cell.borrow_mut();
+        if state.grid_signature == signature {
+            return false;
+        }
+        state.grid_signature = signature;
+        true
+    });
+    if !changed || count == 0 {
+        return;
+    }
+    APP.with(|cell| {
+        let app = cell.borrow();
+        if let Some(tab) = app.terminals.get(active) {
+            tab.session.resize(layout.columns, layout.rows);
+        }
+    });
+}
+
+/// Copy the detached window selection into the clipboard.
+fn copy_detached_selection(window: Hwnd) -> bool {
+    let Some(selection) = DETACHED.with(|cell| cell.borrow().selection) else {
+        return false;
+    };
+    let lines = detached_lines();
+    let Some(text) = terminal_core::selected_text(&lines, &selection) else {
+        return false;
+    };
+    let copied = platform::write_clipboard(window, &text).is_ok();
+    let notice = if copied {
+        format!("Copied {} characters", text.chars().count())
+    } else {
+        "Clipboard unavailable".to_string()
+    };
+    DETACHED.with(|cell| {
+        let mut state = cell.borrow_mut();
+        state.notice = Some(notice);
+        state.notice_started = Some(Instant::now());
+    });
+    copied
+}
+
+/// Scroll the detached viewport while keeping it inside the buffered history.
+fn scroll_detached(window: Hwnd, rows: i32) {
+    let context = detached_context(window);
+    let scroll = context.viewport.scroll_by(rows);
+    DETACHED.with(|cell| cell.borrow_mut().scroll = scroll);
+    invalidate(window);
+}
+
+/// Return the detached viewport to the newest output.
+fn scroll_detached_to_bottom() {
+    DETACHED.with(|cell| cell.borrow_mut().scroll = 0);
 }
 
 unsafe extern "system" fn detached_terminal_proc(
     window: Hwnd,
     message: Uint,
     w_param: Wparam,
-    _l_param: Lparam,
+    l_param: Lparam,
 ) -> Lresult {
     match message {
         WM_PAINT => {
@@ -2193,76 +2607,167 @@ unsafe extern "system" fn detached_terminal_proc(
             let dc = unsafe { BeginPaint(window, &mut paint) };
             let mut area: Rect = unsafe { std::mem::zeroed() };
             unsafe { GetClientRect(window, &mut area) };
-            let brush = unsafe { CreateSolidBrush(0x001b1917) };
-            unsafe {
-                FillRect(dc, &area, brush);
-                DeleteObject(brush.cast());
-                SetBkMode(dc, 1);
-            }
-            let font = unsafe { GetStockObject(16) };
-            let previous = unsafe { SelectObject(dc, font) };
-            let (name, mut lines, input) = APP.with(|cell| {
+            let context = detached_context(window);
+            let layout = &context.layout;
+            let (name, input) = APP.with(|cell| {
                 let app = cell.borrow();
-                let Some(tab) = app.terminals.get(app.active_terminal) else {
-                    return ("Terminal".to_string(), Vec::new(), String::new());
-                };
-                let lines = tab
-                    .session
-                    .view
-                    .lock()
-                    .ok()
-                    .map(|view| {
-                        let mut values = view.lines.clone();
-                        if !view.current.is_empty() {
-                            values.push(view.current.clone());
-                        }
-                        values
-                    })
-                    .unwrap_or_default();
-                (tab.name.clone(), lines, tab.input.clone())
+                let tab = app.terminals.get(app.active_terminal);
+                (
+                    tab.map(|tab| tab.name.clone())
+                        .unwrap_or_else(|| "Terminal".to_string()),
+                    tab.map(|tab| tab.input.clone()).unwrap_or_default(),
+                )
             });
-            let visible = ((area.bottom - 94) / 22).max(1) as usize;
-            if lines.len() > visible {
-                lines.drain(..lines.len() - visible);
-            }
+            let (selection, notice) =
+                DETACHED.with(|cell| {
+                    let state = cell.borrow();
+                    let notice = state.notice.as_ref().zip(state.notice_started).and_then(
+                        |(text, started)| {
+                            (started.elapsed().as_secs_f32() < NOTICE_SECONDS).then(|| text.clone())
+                        },
+                    );
+                    (state.selection, notice)
+                });
+            let background = unsafe { CreateSolidBrush(0x001b1917) };
+            let highlight = unsafe { CreateSolidBrush(0x00513419) };
             unsafe {
-                draw_terminal_text(dc, "TianChuangYa", 24, 16, area.right - 20, 0x00e6bc71);
+                FillRect(dc, &area, background);
+                SetBkMode(dc, TRANSPARENT_MODE);
+            }
+            let font = detached_font(window);
+            let previous_font = if font.is_null() {
+                ptr::null_mut()
+            } else {
+                unsafe { SelectObject(dc, font) }
+            };
+            let hint = if context.viewport.clamped_scroll() > 0 {
+                format!(
+                    "history ↑{} of {} · wheel scrolls",
+                    context.viewport.clamped_scroll(),
+                    context.viewport.max_scroll()
+                )
+            } else {
+                "wheel scrolls · drag selects · Ctrl+Shift+C copies · Ctrl+C interrupts".to_string()
+            };
+            unsafe {
+                draw_terminal_text(
+                    dc,
+                    "TianChuangYa",
+                    DETACHED_TEXT_LEFT as i32,
+                    14,
+                    area.right - 20,
+                    0x00e6bc71,
+                );
+                draw_terminal_line(
+                    dc,
+                    &hint,
+                    Rect {
+                        left: (layout.right - 420.0).max(layout.left) as i32,
+                        top: 14,
+                        right: layout.right as i32,
+                        bottom: 40,
+                    },
+                    DT_SINGLELINE | DT_NOPREFIX | DT_RIGHT,
+                    0x008e8073,
+                );
                 draw_terminal_text(
                     dc,
                     &format!("TC-IDE · {name} · shared ConPTY session"),
-                    24,
+                    DETACHED_TEXT_LEFT as i32,
                     42,
                     area.right - 20,
                     0x009d9690,
                 );
-            }
-            for (index, line) in lines.iter().enumerate() {
-                unsafe {
-                    draw_terminal_text(
+                if let Some(notice) = notice.as_deref() {
+                    draw_terminal_line(
                         dc,
-                        line,
-                        24,
-                        76 + index as i32 * 22,
-                        area.right - 20,
+                        notice,
+                        Rect {
+                            left: (layout.right - 300.0).max(layout.left) as i32,
+                            top: 42,
+                            right: layout.right as i32,
+                            bottom: 68,
+                        },
+                        DT_SINGLELINE | DT_NOPREFIX | DT_RIGHT,
+                        0x00dfb56b,
+                    );
+                }
+            }
+            let (selection_start, selection_end) = match selection.map(|it| it.ordered()) {
+                Some((start, end)) => (Some(start), Some(end)),
+                None => (None, None),
+            };
+            for (index, value) in terminal_core::visible_lines(&context.lines, &context.viewport)
+                .iter()
+                .enumerate()
+            {
+                let row_top = layout.top + index as f32 * layout.row_height;
+                if let (Some(start), Some(end)) = (selection_start, selection_end) {
+                    if let Some(line) = context.viewport.line_at_row(index) {
+                        if line >= start.line && line <= end.line {
+                            let length = value.chars().count();
+                            let from = if line == start.line {
+                                terminal_core::visual_cells(value, start.column)
+                            } else {
+                                0
+                            };
+                            let to = if line == end.line {
+                                terminal_core::visual_cells(value, end.column)
+                            } else {
+                                terminal_core::visual_cells(value, length)
+                            };
+                            if to > from {
+                                let band = Rect {
+                                    left: (layout.left + from as f32 * layout.cell_width) as i32,
+                                    top: row_top as i32,
+                                    right: (layout.left + to as f32 * layout.cell_width).ceil()
+                                        as i32,
+                                    bottom: (row_top + layout.row_height).ceil() as i32,
+                                };
+                                unsafe { FillRect(dc, &band, highlight) };
+                            }
+                        }
+                    }
+                }
+                unsafe {
+                    draw_terminal_line(
+                        dc,
+                        value,
+                        Rect {
+                            left: layout.left as i32,
+                            top: row_top as i32,
+                            right: layout.right as i32,
+                            bottom: (row_top + layout.row_height + 2.0) as i32,
+                        },
+                        DT_SINGLELINE | DT_NOPREFIX,
                         0x00e8e8e8,
-                    )
-                };
+                    );
+                }
             }
             unsafe {
-                draw_terminal_text(
+                draw_terminal_line(
                     dc,
                     &format!("> {input}▌"),
-                    24,
-                    area.bottom - 32,
-                    area.right - 20,
+                    Rect {
+                        left: layout.left as i32,
+                        top: layout.input_top as i32,
+                        right: layout.right as i32,
+                        bottom: (layout.input_top + layout.row_height + 3.0) as i32,
+                    },
+                    DT_SINGLELINE | DT_NOPREFIX,
                     0x00dfb56b,
                 );
-                SelectObject(dc, previous);
+                if !previous_font.is_null() {
+                    SelectObject(dc, previous_font);
+                }
+                DeleteObject(background);
+                DeleteObject(highlight);
                 EndPaint(window, &paint);
             }
             0
         }
         WM_CHAR => {
+            scroll_detached_to_bottom();
             if let Some(value) = char::from_u32(w_param as u32) {
                 APP.with(|cell| {
                     let mut app = cell.borrow_mut();
@@ -2290,9 +2795,18 @@ unsafe extern "system" fn detached_terminal_proc(
             0
         }
         WM_KEYDOWN => {
-            if platform::control_pressed() && handle_terminal_control(window, w_param as u32) {
-                invalidate(window);
-                return 0;
+            scroll_detached_to_bottom();
+            if platform::control_pressed() {
+                let key = w_param as u32;
+                if key == 0x43 && platform::shift_pressed() {
+                    copy_detached_selection(window);
+                    invalidate(window);
+                    return 0;
+                }
+                if handle_terminal_control(window, key) {
+                    invalidate(window);
+                    return 0;
+                }
             }
             let sequence = match w_param as u32 {
                 VK_UP => Some("\u{1b}[A"),
@@ -2315,7 +2829,81 @@ unsafe extern "system" fn detached_terminal_proc(
             }
             0
         }
+        WM_MOUSEWHEEL => {
+            let delta = ((w_param >> 16) as u16 as i16) as i32;
+            if delta > 0 {
+                scroll_detached(window, WHEEL_SCROLL_LINES);
+            } else if delta < 0 {
+                scroll_detached(window, -WHEEL_SCROLL_LINES);
+            }
+            0
+        }
+        WM_LBUTTONDOWN => {
+            let x = (l_param as u16 as i16) as i32;
+            let y = ((l_param >> 16) as u16 as i16) as i32;
+            let context = detached_context(window);
+            if let Some(point) = detached_point_at(&context, x, y, false) {
+                DETACHED.with(|cell| {
+                    let mut state = cell.borrow_mut();
+                    state.selection = Some(terminal_core::TerminalSelection::new(point, point));
+                    state.dragging = true;
+                });
+                unsafe { SetCapture(window) };
+                invalidate(window);
+            }
+            0
+        }
+        WM_MOUSEMOVE => {
+            let dragging = DETACHED.with(|cell| cell.borrow().dragging);
+            if dragging && w_param & 1 != 0 {
+                let x = (l_param as u16 as i16) as i32;
+                let y = ((l_param >> 16) as u16 as i16) as i32;
+                let context = detached_context(window);
+                if let Some(point) = detached_point_at(&context, x, y, true) {
+                    let changed = DETACHED.with(|cell| {
+                        let mut state = cell.borrow_mut();
+                        let Some(selection) = state.selection else {
+                            return false;
+                        };
+                        if selection.focus == point {
+                            return false;
+                        }
+                        state.selection = Some(selection.extended_to(point));
+                        true
+                    });
+                    if changed {
+                        invalidate(window);
+                    }
+                }
+            }
+            0
+        }
+        WM_LBUTTONUP => {
+            let dragging = DETACHED.with(|cell| {
+                let mut state = cell.borrow_mut();
+                let dragging = state.dragging;
+                state.dragging = false;
+                dragging
+            });
+            if dragging {
+                unsafe { ReleaseCapture() };
+            }
+            let cleared = DETACHED.with(|cell| {
+                let mut state = cell.borrow_mut();
+                if state.selection.map(|it| it.is_empty()).unwrap_or(false) {
+                    state.selection = None;
+                    true
+                } else {
+                    false
+                }
+            });
+            if cleared || dragging {
+                invalidate(window);
+            }
+            0
+        }
         WM_TIMER | WM_SIZE => {
+            sync_detached_terminal_grid(window);
             invalidate(window);
             0
         }
@@ -2324,10 +2912,20 @@ unsafe extern "system" fn detached_terminal_proc(
             0
         }
         WM_DESTROY => {
+            unsafe { ReleaseCapture() };
+            let font = DETACHED.with(|cell| {
+                let mut state = cell.borrow_mut();
+                let font = state.font;
+                *state = DetachedTerminalState::default();
+                font
+            });
+            if !font.is_null() {
+                unsafe { DeleteObject(font) };
+            }
             APP.with(|cell| cell.borrow_mut().detached_terminal = ptr::null_mut());
             0
         }
-        _ => unsafe { DefWindowProcW(window, message, w_param, _l_param) },
+        _ => unsafe { DefWindowProcW(window, message, w_param, l_param) },
     }
 }
 
@@ -2375,6 +2973,7 @@ fn open_detached_terminal() -> bool {
         APP.with(|cell| cell.borrow_mut().detached_terminal = window);
         SetTimer(window, 2, 33, ptr::null());
         ShowWindow(window, SW_SHOW);
+        sync_detached_terminal_grid(window);
         UpdateWindow(window);
         true
     }
