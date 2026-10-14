@@ -96,6 +96,8 @@ pub struct WindowsScene<'a> {
     pub terminal_input: &'a str,
     pub terminal_open: bool,
     pub terminal_progress: f32,
+    /// Rows the panel is scrolled back from the newest output.
+    pub terminal_scrolled: usize,
     pub animation_seconds: f32,
     pub edit_age: Option<f32>,
     pub create_motion: f32,
@@ -1201,28 +1203,32 @@ impl DirectEditorRenderer {
                 height,
             )
         };
+        let terminal_label = if scene.terminal_open {
+            let base = if scene.ui_chinese {
+                "v  终端"
+            } else {
+                "v  TERMINAL"
+            };
+            if scene.terminal_scrolled > 0 {
+                format!("{base}  ↑{}", scene.terminal_scrolled)
+            } else {
+                base.to_string()
+            }
+        } else if scene.ui_chinese {
+            ">  终端".to_string()
+        } else {
+            ">  TERMINAL".to_string()
+        };
         unsafe {
             Self::text(
                 &target_base,
                 &self.ui_format,
                 &bright,
-                if scene.terminal_open {
-                    if scene.ui_chinese {
-                        "v  终端"
-                    } else {
-                        "v  TERMINAL"
-                    }
-                } else {
-                    if scene.ui_chinese {
-                        ">  终端"
-                    } else {
-                        ">  TERMINAL"
-                    }
-                },
+                &terminal_label,
                 D2D_RECT_F {
                     left: 16.0 * scale,
                     top: height - terminal_h + 7.0 * scale,
-                    right: 150.0 * scale,
+                    right: 200.0 * scale,
                     bottom: height,
                 },
             )

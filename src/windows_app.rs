@@ -138,6 +138,7 @@ struct DetachedTerminalState {
     grid_signature: (u32, u32, u32, u32, usize),
     notice: Option<String>,
     notice_started: Option<Instant>,
+    composition: String,
 }
 
 impl Default for DetachedTerminalState {
@@ -153,6 +154,7 @@ impl Default for DetachedTerminalState {
             grid_signature: (0, 0, 0, 0, 0),
             notice: None,
             notice_started: None,
+            composition: String::new(),
         }
     }
 }
@@ -236,6 +238,7 @@ struct WindowsAppState {
     expanded_comments: HashSet<usize>,
     editing_comment: Option<usize>,
     pointer_x: i32,
+    pointer_y: i32,
     graph_scroll: usize,
     background_path: Option<PathBuf>,
     background_opacity: f32,
@@ -255,6 +258,7 @@ struct WindowsAppState {
     terminal_open: bool,
     terminal_motion: f32,
     terminal_velocity: f32,
+    terminal_scroll: usize,
     terminals: Vec<TerminalTab>,
     active_terminal: usize,
     terminal_grid: terminal_core::GridSize,
@@ -440,6 +444,7 @@ impl WindowsAppState {
             expanded_comments: HashSet::new(),
             editing_comment: None,
             pointer_x: -1,
+            pointer_y: -1,
             graph_scroll: 0,
             background_path: preferences.background_path,
             background_opacity: preferences.background_opacity,
@@ -459,6 +464,7 @@ impl WindowsAppState {
             terminal_open: false,
             terminal_motion: 0.0,
             terminal_velocity: 0.0,
+            terminal_scroll: 0,
             terminals: Vec::new(),
             active_terminal: 0,
             terminal_grid: terminal_core::GridSize {
@@ -1950,7 +1956,7 @@ fn render_window(window: Hwnd) {
         RENDERER.with(|renderer_cell| {
             let app = app_cell.borrow();
             let active_terminal = app.terminals.get(app.active_terminal);
-            let terminal_lines = app
+            let terminal_buffer = app
                 .terminals
                 .get(app.active_terminal)
                 .and_then(|tab| {
@@ -1963,6 +1969,18 @@ fn render_window(window: Hwnd) {
                     })
                 })
                 .unwrap_or_default();
+            let panel = terminal_core::panel_metrics(
+                width as f32,
+                height as f32,
+                dpi as f32 / 96.0,
+                app.terminal_motion,
+            );
+            let viewport = terminal_core::TerminalViewport {
+                total_lines: terminal_buffer.len(),
+                visible_rows: panel.visible_rows,
+                scroll: app.terminal_scroll,
+            };
+            let terminal_lines = terminal_core::visible_lines(&terminal_buffer, &viewport).to_vec();
             let terminal_names = app
                 .terminals
                 .iter()
@@ -2066,6 +2084,7 @@ fn render_window(window: Hwnd) {
                 terminal_input: active_terminal.map(|tab| tab.input.as_str()).unwrap_or(""),
                 terminal_open: app.terminal_open,
                 terminal_progress: app.terminal_motion,
+                terminal_scrolled: viewport.clamped_scroll(),
                 animation_seconds: app.started.elapsed().as_secs_f32(),
                 edit_age: app.last_edit.map(|started| started.elapsed().as_secs_f32()),
                 create_motion: app.create_motion,
@@ -2121,6 +2140,7 @@ fn handle_character(window: Hwnd, value: char) {
         } else if app.settings_open || app.extensions_open || app.package_open {
             // Overlay shortcuts must never leak their printable WM_CHAR into the editor.
         } else if app.terminal_open {
+            app.terminal_scroll = 0;
             let active = app.active_terminal;
             let Some(tab) = app.terminals.get_mut(active) else {
                 return;
@@ -2618,7 +2638,7 @@ unsafe extern "system" fn detached_terminal_proc(
                     tab.map(|tab| tab.input.clone()).unwrap_or_default(),
                 )
             });
-            let (selection, notice) =
+            let (selection, notice, composition) =
                 DETACHED.with(|cell| {
                     let state = cell.borrow();
                     let notice = state.notice.as_ref().zip(state.notice_started).and_then(
@@ -2626,7 +2646,7 @@ unsafe extern "system" fn detached_terminal_proc(
                             (started.elapsed().as_secs_f32() < NOTICE_SECONDS).then(|| text.clone())
                         },
                     );
-                    (state.selection, notice)
+                    (state.selection, notice, state.composition.clone())
                 });
             let background = unsafe { CreateSolidBrush(0x001b1917) };
             let highlight = unsafe { CreateSolidBrush(0x00513419) };
@@ -2747,7 +2767,7 @@ unsafe extern "system" fn detached_terminal_proc(
             unsafe {
                 draw_terminal_line(
                     dc,
-                    &format!("> {input}▌"),
+                    &format!("> {input}{composition}▌"),
                     Rect {
                         left: layout.left as i32,
                         top: layout.input_top as i32,
@@ -2827,6 +2847,37 @@ unsafe extern "system" fn detached_terminal_proc(
                     }
                 });
             }
+            0
+        }
+        WM_IME_STARTCOMPOSITION => {
+            DETACHED.with(|cell| cell.borrow_mut().composition.clear());
+            invalidate(window);
+            0
+        }
+        WM_IME_COMPOSITION => {
+            if l_param & GCS_RESULTSTR != 0 {
+                let result = ime_string(window, GCS_RESULTSTR as Dword);
+                DETACHED.with(|cell| cell.borrow_mut().composition.clear());
+                if !result.is_empty() {
+                    APP.with(|cell| {
+                        let mut app = cell.borrow_mut();
+                        let active = app.active_terminal;
+                        if let Some(tab) = app.terminals.get_mut(active) {
+                            tab.input.push_str(&result);
+                            let _ = tab.session.write(&result);
+                        }
+                    });
+                }
+            } else if l_param & GCS_COMPSTR != 0 {
+                let composition = ime_string(window, GCS_COMPSTR as Dword);
+                DETACHED.with(|cell| cell.borrow_mut().composition = composition);
+            }
+            invalidate(window);
+            0
+        }
+        WM_IME_ENDCOMPOSITION => {
+            DETACHED.with(|cell| cell.borrow_mut().composition.clear());
+            invalidate(window);
             0
         }
         WM_MOUSEWHEEL => {
@@ -3249,6 +3300,7 @@ unsafe extern "system" fn window_proc(
                         }
                     }
                 } else {
+                    app.terminal_scroll = 0;
                     let active = app.active_terminal;
                     let sequence = match w_param as u32 {
                         VK_UP => "\u{1b}[A",
@@ -3709,7 +3761,39 @@ unsafe extern "system" fn window_proc(
             let graph_left = area.right as f32 - (area.right as f32 * 0.27).max(300.0 * scale);
             APP.with(|cell| {
                 let mut app = cell.borrow_mut();
-                if app.extensions_open && app.extension_category == 0 {
+                let panel = terminal_core::panel_metrics(
+                    area.right as f32,
+                    area.bottom as f32,
+                    scale,
+                    app.terminal_motion,
+                );
+                let over_panel = app.terminal_open
+                    && app.pointer_x as f32 >= panel.body_left
+                    && app.pointer_x as f32 <= panel.body_right
+                    && app.pointer_y as f32 >= panel.body_top;
+                if over_panel && !app.settings_open && !app.extensions_open {
+                    let total = app
+                        .terminals
+                        .get(app.active_terminal)
+                        .and_then(|tab| {
+                            tab.session.view.lock().ok().map(|view| {
+                                view.lines.len() + usize::from(!view.current.is_empty())
+                            })
+                        })
+                        .unwrap_or(0);
+                    let viewport = terminal_core::TerminalViewport {
+                        total_lines: total,
+                        visible_rows: panel.visible_rows,
+                        scroll: app.terminal_scroll,
+                    };
+                    app.terminal_scroll = if delta > 0 {
+                        viewport.scroll_by(WHEEL_SCROLL_LINES)
+                    } else if delta < 0 {
+                        viewport.scroll_by(-WHEEL_SCROLL_LINES)
+                    } else {
+                        viewport.scroll
+                    };
+                } else if app.extensions_open && app.extension_category == 0 {
                     let count = app.filtered_language_indices().len();
                     if delta > 0 {
                         app.extension_scroll = app.extension_scroll.saturating_sub(1);
@@ -3770,6 +3854,7 @@ unsafe extern "system" fn window_proc(
             APP.with(|cell| {
                 let mut app = cell.borrow_mut();
                 app.pointer_x = x;
+                app.pointer_y = y;
             });
             if dragging && w_param & 1 != 0 {
                 if let Some(position) = editor_position_at(window, x, y) {
