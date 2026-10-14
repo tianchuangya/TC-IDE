@@ -2046,6 +2046,34 @@ fn handle_character(window: Hwnd, value: char) {
     invalidate(window);
 }
 
+fn handle_terminal_control(window: Hwnd, key: u32) -> bool {
+    let paste = if key == 0x56 {
+        platform::read_clipboard(window).ok()
+    } else {
+        None
+    };
+    let sequence = match key {
+        0x41 => Some("\u{1}"),
+        0x43 => Some("\u{3}"),
+        0x4c => Some("\u{c}"),
+        0x56 => paste.as_deref(),
+        _ => return false,
+    };
+    if let Some(sequence) = sequence {
+        APP.with(|cell| {
+            let mut app = cell.borrow_mut();
+            let active = app.active_terminal;
+            if let Some(tab) = app.terminals.get_mut(active) {
+                let _ = tab.session.write(sequence);
+                if key == 0x56 {
+                    tab.input.push_str(sequence);
+                }
+            }
+        });
+    }
+    true
+}
+
 unsafe fn draw_terminal_text(dc: Hdc, value: &str, x: i32, y: i32, right: i32, color: Dword) {
     let wide = value.encode_utf16().collect::<Vec<_>>();
     let mut area = Rect {
@@ -2169,6 +2197,10 @@ unsafe extern "system" fn detached_terminal_proc(
             0
         }
         WM_KEYDOWN => {
+            if platform::control_pressed() && handle_terminal_control(window, w_param as u32) {
+                invalidate(window);
+                return 0;
+            }
             let sequence = match w_param as u32 {
                 VK_UP => Some("\u{1b}[A"),
                 VK_DOWN => Some("\u{1b}[B"),
@@ -2309,6 +2341,11 @@ unsafe extern "system" fn window_proc(
         }
         WM_KEYDOWN => {
             if platform::control_pressed() {
+                let terminal_open = APP.with(|cell| cell.borrow().terminal_open);
+                if terminal_open && handle_terminal_control(window, w_param as u32) {
+                    invalidate(window);
+                    return 0;
+                }
                 let command = match w_param as u32 {
                     0x41 => platform::COMMAND_SELECT_ALL,
                     0x43 => platform::COMMAND_COPY_DIAGNOSTIC,
