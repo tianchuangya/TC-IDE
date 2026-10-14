@@ -11,6 +11,30 @@ use crate::editor_core::{self, ProjectSymbolOccurrence, SymbolKind, SymbolOccurr
 
 /// Safety valve so a huge project can never queue an unbounded node list.
 pub const MAX_NODES: usize = 240;
+
+/// Height of one graph card, in logical pixels.
+pub const ROW_HEIGHT: f32 = 58.0;
+/// Distance from the graphite panel top to the first card, in logical pixels.
+pub const FIRST_ROW_TOP: f32 = 96.0;
+/// Space reserved under the cards for the range summary, in logical pixels.
+pub const FOOTER_HEIGHT: f32 = 34.0;
+/// Indentation added per hierarchy level, in logical pixels.
+pub const DEPTH_INDENT: f32 = 16.0;
+
+/// Cards that fit between the panel header and its footer.
+pub fn visible_rows(panel_top: f32, panel_bottom: f32, scale: f32) -> usize {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let first = panel_top + FIRST_ROW_TOP * scale;
+    let last = panel_bottom - FOOTER_HEIGHT * scale;
+    if !last.is_finite() || !first.is_finite() || last <= first {
+        return 1;
+    }
+    (((last - first) / (ROW_HEIGHT * scale)).floor() as usize).max(1)
+}
 /// Call sites listed under a single declaration.
 const MAX_CALL_CHILDREN: usize = 3;
 /// Members listed under a single class.
@@ -181,6 +205,22 @@ pub struct Graph {
     pub search: String,
     pub nodes: Vec<GraphNode>,
     pub truncated: bool,
+}
+
+/// Next pinned scope in the range cycle, `None` meaning automatic.
+pub fn cycle_scope(pinned: Option<GraphScope>, forward: bool) -> Option<GraphScope> {
+    let total = GraphScope::ALL.len() + 1;
+    let position = pinned.map(|scope| scope.index() + 1).unwrap_or(0);
+    let next = if forward {
+        (position + 1) % total
+    } else {
+        (position + total - 1) % total
+    };
+    if next == 0 {
+        None
+    } else {
+        Some(GraphScope::from_index(next - 1))
+    }
 }
 
 /// Scope used when the user has not pinned one.
@@ -712,6 +752,28 @@ impl Graph {
         }
     }
 
+    /// Label of the range chip in the graph header.
+    pub fn scope_label(&self) -> &'static str {
+        if self.search.trim().is_empty() {
+            self.scope.label()
+        } else {
+            "search"
+        }
+    }
+
+    /// Footer text: node count, scroll offset and the interaction hint.
+    pub fn footer(&self, scroll: usize, visible_rows: usize) -> String {
+        let mut text = format!(
+            "{} nodes · offset {} · wheel pages · click jumps · tab cycles range",
+            self.nodes.len(),
+            self.clamped_scroll(scroll, visible_rows)
+        );
+        if self.truncated {
+            text.push_str(" · truncated");
+        }
+        text
+    }
+
     /// Backends label the panel with this summary.
     pub fn summary(&self) -> String {
         let scope = if self.search.trim().is_empty() {
@@ -993,6 +1055,43 @@ mod tests {
                 .count()
                 <= MAX_FILE_CHILDREN
         );
+    }
+
+    #[test]
+    fn scope_cycle_returns_to_automatic() {
+        assert_eq!(cycle_scope(None, true), Some(GraphScope::Project));
+        assert_eq!(
+            cycle_scope(Some(GraphScope::Project), true),
+            Some(GraphScope::Folder)
+        );
+        assert_eq!(cycle_scope(Some(GraphScope::Symbol), true), None);
+        assert_eq!(cycle_scope(None, false), Some(GraphScope::Symbol));
+        assert_eq!(cycle_scope(Some(GraphScope::Project), false), None);
+    }
+
+    #[test]
+    fn graph_footer_and_scope_chip_describe_the_range() {
+        let lines = sample_lines();
+        let symbols = editor_core::symbol_occurrences(&lines, "src/engine.rs");
+        let inputs = inputs_current_file(&lines, &symbols, &[], None);
+        let graph = build_graph(&inputs, GraphScope::File, "");
+        assert_eq!(graph.scope_label(), "file");
+        let footer = graph.footer(2, 3);
+        assert!(footer.contains(&format!("{} nodes", graph.len())));
+        assert!(footer.contains("offset 2"));
+        let searched = build_graph(&inputs, GraphScope::File, "run");
+        assert_eq!(searched.scope_label(), "search");
+    }
+
+    #[test]
+    fn graph_viewport_counts_cards_between_header_and_footer() {
+        assert!(visible_rows(48.0, 900.0, 1.0) > 8);
+        assert_eq!(visible_rows(48.0, 200.0, 1.0), 1);
+        assert_eq!(
+            visible_rows(96.0, 1800.0, 2.0),
+            visible_rows(48.0, 900.0, 1.0)
+        );
+        assert_eq!(visible_rows(f32::NAN, f32::NAN, 0.0), 1);
     }
 
     #[test]

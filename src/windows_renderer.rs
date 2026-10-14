@@ -26,7 +26,8 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 
-use crate::editor_core::{self, ProjectSymbolOccurrence, SymbolOccurrence, SymbolRole, TokenKind};
+use crate::editor_core::{self, SymbolOccurrence, TokenKind};
+use crate::graph_core;
 use crate::terminal_core;
 
 pub struct WindowsScene<'a> {
@@ -73,9 +74,12 @@ pub struct WindowsScene<'a> {
     pub ai_key_present: bool,
     pub ai_field_focused: Option<usize>,
     pub symbols: &'a [SymbolOccurrence],
-    pub project_symbols: &'a [ProjectSymbolOccurrence],
     pub hovered_symbol: Option<&'a SymbolOccurrence>,
-    pub graph_scroll: usize,
+    pub graph_nodes: &'a [graph_core::GraphNode],
+    pub graph_search: &'a str,
+    pub graph_search_focused: bool,
+    pub graph_scope_label: &'a str,
+    pub graph_summary: &'a str,
     pub expanded_comments: &'a [usize],
     pub editing_comment: Option<usize>,
     pub pointer_x: i32,
@@ -1067,95 +1071,102 @@ impl DirectEditorRenderer {
                 },
             )
         };
-        let mut nodes = vec![
-            format!("project  {}", scene.project_name),
-            format!("file  {}", scene.file_name),
-        ];
-        if let Some(focused) = scene.hovered_symbol {
-            let project_matches = scene
-                .project_symbols
-                .iter()
-                .filter(|entry| entry.symbol.name == focused.name)
-                .skip(scene.graph_scroll)
-                .take(7)
-                .map(|entry| {
-                    format!(
-                        "{}  {}:{}",
-                        if entry.symbol.role == SymbolRole::Declaration {
-                            "declare"
-                        } else {
-                            "call"
-                        },
-                        entry.file,
-                        entry.symbol.line + 1
-                    )
-                })
-                .collect::<Vec<_>>();
-            if project_matches.is_empty() {
-                nodes.extend(
-                    scene
-                        .symbols
-                        .iter()
-                        .filter(|symbol| symbol.name == focused.name)
-                        .take(7)
-                        .map(|symbol| {
-                            format!(
-                                "{}  {}()  :{}",
-                                if symbol.role == SymbolRole::Declaration {
-                                    "declare"
-                                } else {
-                                    "call"
-                                },
-                                symbol.name,
-                                symbol.line + 1
-                            )
-                        }),
-                );
-            } else {
-                nodes.extend(project_matches);
-            }
-        } else {
-            let mut names = Vec::new();
-            for symbol in scene
-                .symbols
-                .iter()
-                .filter(|symbol| symbol.role == SymbolRole::Declaration)
-                .skip(scene.graph_scroll)
-            {
-                if names.contains(&symbol.name) {
-                    continue;
-                }
-                names.push(symbol.name.clone());
-                nodes.push(format!("symbol  {}()  :{}", symbol.name, symbol.line + 1));
-                if nodes.len() >= 9 {
-                    break;
-                }
-            }
-        }
-        let path_progress = (scene.animation_seconds / 0.65).clamp(0.0, 1.0);
-        let path_x = editor_right + 30.0 * scale;
-        let first_y = header_h + 86.0 * scale;
-        let last_y = first_y + nodes.len().saturating_sub(1) as f32 * 58.0 * scale;
+        let scope_rect = D2D_RECT_F {
+            left: width - 150.0 * scale,
+            top: header_h + 12.0 * scale,
+            right: width - 18.0 * scale,
+            bottom: header_h + 42.0 * scale,
+        };
+        unsafe { Self::rounded(&target_base, &selection, scope_rect, 8.0 * scale) };
         unsafe {
-            Self::fill(
+            Self::text(
                 &target_base,
+                &self.small_format,
                 &accent,
-                path_x,
-                first_y,
-                path_x + 2.0 * scale,
-                first_y + (last_y - first_y) * path_progress,
+                scene.graph_scope_label,
+                D2D_RECT_F {
+                    left: scope_rect.left + 12.0 * scale,
+                    top: scope_rect.top + 5.0 * scale,
+                    right: scope_rect.right - 8.0 * scale,
+                    bottom: scope_rect.bottom,
+                },
             )
         };
-        for (index, node) in nodes.iter().enumerate() {
-            let y = first_y + index as f32 * 58.0 * scale;
-            let active = nodes.len() <= 1
-                || path_progress >= index as f32 / nodes.len().saturating_sub(1) as f32;
+        let search_rect = D2D_RECT_F {
+            left: editor_right + 18.0 * scale,
+            top: header_h + 46.0 * scale,
+            right: width - 18.0 * scale,
+            bottom: header_h + 78.0 * scale,
+        };
+        unsafe {
+            Self::rounded(
+                &target_base,
+                if scene.graph_search_focused {
+                    &selection
+                } else {
+                    &raised
+                },
+                search_rect,
+                8.0 * scale,
+            )
+        };
+        let search_placeholder = if scene.ui_chinese {
+            "搜索符号…"
+        } else {
+            "search symbols…"
+        };
+        let search_text = if scene.graph_search.is_empty() {
+            search_placeholder
+        } else {
+            scene.graph_search
+        };
+        unsafe {
+            Self::text(
+                &target_base,
+                &self.small_format,
+                if scene.graph_search.is_empty() {
+                    &muted
+                } else {
+                    &bright
+                },
+                search_text,
+                D2D_RECT_F {
+                    left: search_rect.left + 12.0 * scale,
+                    top: search_rect.top + 6.0 * scale,
+                    right: search_rect.right - 10.0 * scale,
+                    bottom: search_rect.bottom,
+                },
+            )
+        };
+        let path_progress = (scene.animation_seconds / 0.65).clamp(0.0, 1.0);
+        let path_x = editor_right + 30.0 * scale;
+        let first_y = header_h + graph_core::FIRST_ROW_TOP * scale;
+        let row_height = graph_core::ROW_HEIGHT * scale;
+        let last_y = first_y + scene.graph_nodes.len().saturating_sub(1) as f32 * row_height;
+        if !scene.graph_nodes.is_empty() {
+            unsafe {
+                Self::fill(
+                    &target_base,
+                    &accent,
+                    path_x,
+                    first_y,
+                    path_x + 2.0 * scale,
+                    first_y + (last_y - first_y) * path_progress,
+                )
+            };
+        }
+        for (index, node) in scene.graph_nodes.iter().enumerate() {
+            let y = first_y + index as f32 * row_height;
+            let indent =
+                path_x + 12.0 * scale + node.depth as f32 * graph_core::DEPTH_INDENT * scale;
+            let active = scene.graph_nodes.len() <= 1
+                || path_progress >= index as f32 / scene.graph_nodes.len().saturating_sub(1) as f32;
             unsafe {
                 Self::rounded(
                     &target_base,
                     if active { &selection } else { &raised },
                     D2D_RECT_F {
-                        left: path_x + 12.0 * scale,
+                        left: indent,
                         top: y - 12.0 * scale,
                         right: width - 18.0 * scale,
                         bottom: y + 28.0 * scale,
@@ -1163,27 +1174,54 @@ impl DirectEditorRenderer {
                     8.0 * scale,
                 )
             };
+            let color = match node.level {
+                graph_core::GraphLevel::Class => &keyword,
+                graph_core::GraphLevel::Occurrence | graph_core::GraphLevel::Folder => &muted,
+                _ => {
+                    if active {
+                        &bright
+                    } else {
+                        &muted
+                    }
+                }
+            };
             unsafe {
                 Self::text(
                     &target_base,
                     &self.small_format,
-                    if active { &bright } else { &muted },
-                    node,
+                    color,
+                    &node.caption(),
                     D2D_RECT_F {
-                        left: path_x + 26.0 * scale,
+                        left: indent + 12.0 * scale,
                         top: y,
-                        right: width,
+                        right: (width - 190.0 * scale).max(indent + 40.0 * scale),
                         bottom: y + 25.0 * scale,
                     },
                 )
             };
+            if !node.detail.is_empty() {
+                unsafe {
+                    Self::text(
+                        &target_base,
+                        &self.small_format,
+                        &muted,
+                        &node.detail,
+                        D2D_RECT_F {
+                            left: width - 190.0 * scale,
+                            top: y + 2.0 * scale,
+                            right: width - 22.0 * scale,
+                            bottom: y + 25.0 * scale,
+                        },
+                    )
+                };
+            }
         }
         unsafe {
             Self::text(
                 &target_base,
                 &self.small_format,
                 &muted,
-                &format!("wheel browse  ·  offset {}", scene.graph_scroll),
+                scene.graph_summary,
                 D2D_RECT_F {
                     left: editor_right + 18.0 * scale,
                     top: body_bottom - 34.0 * scale,

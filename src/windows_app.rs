@@ -9,6 +9,7 @@ use std::ptr;
 use std::time::Instant;
 
 use crate::editor_core;
+use crate::graph_core;
 use crate::terminal_core;
 
 #[path = "windows_platform.rs"]
@@ -240,6 +241,9 @@ struct WindowsAppState {
     pointer_x: i32,
     pointer_y: i32,
     graph_scroll: usize,
+    graph_search: String,
+    graph_search_focused: bool,
+    graph_scope: Option<graph_core::GraphScope>,
     background_path: Option<PathBuf>,
     background_opacity: f32,
     background_offset_x: f32,
@@ -446,6 +450,9 @@ impl WindowsAppState {
             pointer_x: -1,
             pointer_y: -1,
             graph_scroll: 0,
+            graph_search: String::new(),
+            graph_search_focused: false,
+            graph_scope: None,
             background_path: preferences.background_path,
             background_opacity: preferences.background_opacity,
             background_offset_x: preferences.background_offset_x,
@@ -1988,6 +1995,15 @@ fn render_window(window: Hwnd) {
                 .collect::<Vec<_>>();
             let completions = app.completions();
             let symbols = editor_core::symbol_occurrences(&app.lines, &app.file_name);
+            let graph_rows = graph_visible_rows(&area, dpi as f32 / 96.0, app.terminal_motion);
+            let graph = build_graph(&app, &symbols);
+            let graph_nodes = graph.visible(app.graph_scroll, graph_rows).to_vec();
+            let graph_summary = graph.footer(app.graph_scroll, graph_rows);
+            let graph_scope_label = if app.graph_scope.is_none() {
+                format!("auto · {}", graph.scope_label())
+            } else {
+                graph.scope_label().to_string()
+            };
             let expanded_comments = app.expanded_comments.iter().copied().collect::<Vec<_>>();
             let create_location = app.create_location.to_string_lossy().into_owned();
             let background_path = app
@@ -2061,9 +2077,12 @@ fn render_window(window: Hwnd) {
                 ai_key_present: !app.ai_key.is_empty(),
                 ai_field_focused: app.ai_field_focused,
                 symbols: &symbols,
-                project_symbols: &app.project_symbols,
                 hovered_symbol: app.hovered_symbol.as_ref(),
-                graph_scroll: app.graph_scroll,
+                graph_nodes: &graph_nodes,
+                graph_search: &app.graph_search,
+                graph_search_focused: app.graph_search_focused,
+                graph_scope_label: &graph_scope_label,
+                graph_summary: &graph_summary,
                 expanded_comments: &expanded_comments,
                 editing_comment: app.editing_comment,
                 pointer_x: app.pointer_x,
@@ -2139,6 +2158,11 @@ fn handle_character(window: Hwnd, value: char) {
             }
         } else if app.settings_open || app.extensions_open || app.package_open {
             // Overlay shortcuts must never leak their printable WM_CHAR into the editor.
+        } else if app.graph_search_focused {
+            if !value.is_control() {
+                app.graph_search.push(value);
+                app.graph_scroll = 0;
+            }
         } else if app.terminal_open {
             app.terminal_scroll = 0;
             let active = app.active_terminal;
@@ -2171,6 +2195,73 @@ fn handle_character(window: Hwnd, value: char) {
         }
     });
     invalidate(window);
+}
+
+/// Relation graph for the current editor, hover and search state.
+fn build_graph(
+    app: &WindowsAppState,
+    symbols: &[editor_core::SymbolOccurrence],
+) -> graph_core::Graph {
+    let project_name = app
+        .project_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("PROJECT");
+    let inputs = graph_core::GraphInputs {
+        project_name,
+        current_file: &app.file_name,
+        current_folder: graph_core::folder_of(&app.file_name),
+        hovered: app.hovered_symbol.as_ref(),
+        file_lines: &app.lines,
+        file_symbols: symbols,
+        project_symbols: &app.project_symbols,
+    };
+    let scope = graph_core::auto_scope(
+        app.hovered_symbol.as_ref(),
+        &app.graph_search,
+        app.graph_scope,
+    );
+    graph_core::build_graph(&inputs, scope, &app.graph_search)
+}
+
+/// Left edge of the relation graph panel.
+fn graph_left(area: &Rect, scale: f32) -> f32 {
+    area.right as f32 - (area.right as f32 * 0.27).max(300.0 * scale)
+}
+
+/// Cards the graph panel can show at the current window size.
+fn graph_visible_rows(area: &Rect, scale: f32, terminal_motion: f32) -> usize {
+    let panel = terminal_core::panel_metrics(
+        area.right as f32,
+        area.bottom as f32,
+        scale,
+        terminal_motion,
+    );
+    graph_core::visible_rows(48.0 * scale, area.bottom as f32 - panel.height, scale)
+}
+
+/// Screen rectangle of the graph range chip.
+fn graph_scope_rect(area: &Rect, scale: f32) -> Rect {
+    Rect {
+        left: (area.right as f32 - 150.0 * scale) as i32,
+        top: (60.0 * scale) as i32,
+        right: (area.right as f32 - 18.0 * scale) as i32,
+        bottom: (90.0 * scale) as i32,
+    }
+}
+
+/// Screen rectangle of the graph search field.
+fn graph_search_rect(area: &Rect, scale: f32) -> Rect {
+    Rect {
+        left: (graph_left(area, scale) + 18.0 * scale) as i32,
+        top: (94.0 * scale) as i32,
+        right: (area.right as f32 - 18.0 * scale) as i32,
+        bottom: (126.0 * scale) as i32,
+    }
+}
+
+fn inside(rect: &Rect, x: i32, y: i32) -> bool {
+    x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
 }
 
 fn handle_terminal_control(window: Hwnd, key: u32) -> bool {
@@ -3259,6 +3350,33 @@ unsafe extern "system" fn window_proc(
                     app.save_preferences();
                     return;
                 }
+                if app.graph_search_focused {
+                    match w_param as u32 {
+                        0x1b => {
+                            if app.graph_search.is_empty() {
+                                app.graph_search_focused = false;
+                            } else {
+                                app.graph_search.clear();
+                                app.graph_scroll = 0;
+                            }
+                        }
+                        0x0d => app.graph_search_focused = false,
+                        VK_BACK => {
+                            app.graph_search.pop();
+                            app.graph_scroll = 0;
+                        }
+                        VK_LEFT => {
+                            app.graph_scope = graph_core::cycle_scope(app.graph_scope, false);
+                            app.graph_scroll = 0;
+                        }
+                        VK_RIGHT | VK_TAB => {
+                            app.graph_scope = graph_core::cycle_scope(app.graph_scope, true);
+                            app.graph_scroll = 0;
+                        }
+                        _ => return,
+                    }
+                    return;
+                }
                 if app.workspace_search_focused {
                     match w_param as u32 {
                         0x1b | 0x0d => app.workspace_search_focused = false,
@@ -3590,44 +3708,71 @@ unsafe extern "system" fn window_proc(
                     return 0;
                 }
             }
-            let graph_left = area.right as f32 - (area.right as f32 * 0.27).max(300.0 * scale);
-            if x as f32 >= graph_left {
-                let first_y = (48.0 + 86.0) * scale;
-                let row = ((y as f32 - first_y + 12.0 * scale) / (58.0 * scale)).floor();
-                if row >= 2.0 {
-                    let target = APP.with(|cell| {
-                        let app = cell.borrow();
-                        let focused = app.hovered_symbol.as_ref()?;
-                        app.project_symbols
-                            .iter()
-                            .filter(|entry| entry.symbol.name == focused.name)
-                            .skip(app.graph_scroll)
-                            .nth(row as usize - 2)
-                            .map(|entry| {
-                                (
-                                    app.project_root.join(&entry.file),
-                                    entry.symbol.line,
-                                    entry.symbol.start,
-                                )
-                            })
+            let search_rect = graph_search_rect(&area, scale);
+            let scope_rect = graph_scope_rect(&area, scale);
+            if x as f32 >= graph_left(&area, scale) {
+                if inside(&search_rect, x, y) {
+                    APP.with(|cell| {
+                        let mut app = cell.borrow_mut();
+                        app.graph_search_focused = true;
+                        app.status = "Graph search: type to filter symbols, esc clears".into();
                     });
-                    if let Some((path, line, column)) = target {
-                        APP.with(|cell| {
-                            let mut app = cell.borrow_mut();
-                            app.open_file(path);
-                            app.caret_line = line.min(app.lines.len().saturating_sub(1));
-                            app.caret_column = column;
-                            app.clamp_caret();
-                            app.status = format!(
-                                "Jumped to relation at {}:{}",
-                                app.file_name,
-                                app.caret_line + 1
-                            );
-                        });
-                        invalidate(window);
-                        return 0;
-                    }
+                    invalidate(window);
+                    return 0;
                 }
+                if inside(&scope_rect, x, y) {
+                    APP.with(|cell| {
+                        let mut app = cell.borrow_mut();
+                        app.graph_scope = graph_core::cycle_scope(app.graph_scope, true);
+                        app.graph_scroll = 0;
+                        let label = match app.graph_scope {
+                            Some(scope) => scope.label().to_string(),
+                            None => "auto".to_string(),
+                        };
+                        app.status = format!("Graph range: {label}");
+                    });
+                    invalidate(window);
+                    return 0;
+                }
+                let rows =
+                    graph_visible_rows(&area, scale, platform::dpi_for_window(window) as f32);
+                let row = ((y as f32 - (48.0 * scale + graph_core::FIRST_ROW_TOP * scale))
+                    / (graph_core::ROW_HEIGHT * scale))
+                    .floor();
+                let target = APP.with(|cell| {
+                    let app = cell.borrow();
+                    if row < 0.0 {
+                        return None;
+                    }
+                    let symbols = editor_core::symbol_occurrences(&app.lines, &app.file_name);
+                    let graph = build_graph(&app, &symbols);
+                    let index = graph.clamped_scroll(app.graph_scroll, rows) + row as usize;
+                    let node = graph.nodes.get(index)?;
+                    let target = node.target.as_ref()?;
+                    Some((
+                        app.project_root.join(&target.file),
+                        target.line,
+                        target.column,
+                    ))
+                });
+                if let Some((path, line, column)) = target {
+                    APP.with(|cell| {
+                        let mut app = cell.borrow_mut();
+                        app.open_file(path);
+                        app.caret_line = line.min(app.lines.len().saturating_sub(1));
+                        app.caret_column = column;
+                        app.clamp_caret();
+                        app.graph_search_focused = false;
+                        app.status = format!(
+                            "Jumped to relation at {}:{}",
+                            app.file_name,
+                            app.caret_line + 1
+                        );
+                    });
+                    invalidate(window);
+                    return 0;
+                }
+                APP.with(|cell| cell.borrow_mut().graph_search_focused = false);
             }
             if let Some((line, toggle)) = comment_bubble_at(window, x, y) {
                 APP.with(|cell| {
@@ -3705,6 +3850,7 @@ unsafe extern "system" fn window_proc(
                     APP.with(|cell| {
                         let mut app = cell.borrow_mut();
                         app.workspace_search_focused = true;
+                        app.graph_search_focused = false;
                         app.create_kind = None;
                     });
                     invalidate(window);
@@ -3758,7 +3904,7 @@ unsafe extern "system" fn window_proc(
             let mut area = unsafe { std::mem::zeroed::<Rect>() };
             unsafe { GetClientRect(window, &mut area) };
             let scale = platform::dpi_for_window(window) as f32 / 96.0;
-            let graph_left = area.right as f32 - (area.right as f32 * 0.27).max(300.0 * scale);
+            let graph_left = graph_left(&area, scale);
             APP.with(|cell| {
                 let mut app = cell.borrow_mut();
                 let panel = terminal_core::panel_metrics(
@@ -3802,20 +3948,17 @@ unsafe extern "system" fn window_proc(
                             (app.extension_scroll + 1).min(count.saturating_sub(8));
                     }
                 } else if app.pointer_x as f32 >= graph_left {
+                    let rows = graph_core::visible_rows(
+                        48.0 * scale,
+                        area.bottom as f32 - panel.height,
+                        scale,
+                    );
                     if delta > 0 {
                         app.graph_scroll = app.graph_scroll.saturating_sub(1);
                     } else if delta < 0 {
-                        let count = app
-                            .hovered_symbol
-                            .as_ref()
-                            .map(|focused| {
-                                app.project_symbols
-                                    .iter()
-                                    .filter(|entry| entry.symbol.name == focused.name)
-                                    .count()
-                            })
-                            .unwrap_or(0);
-                        app.graph_scroll = (app.graph_scroll + 1).min(count.saturating_sub(1));
+                        let symbols = editor_core::symbol_occurrences(&app.lines, &app.file_name);
+                        let graph = build_graph(&app, &symbols);
+                        app.graph_scroll = (app.graph_scroll + 1).min(graph.max_scroll(rows));
                     }
                 } else if delta > 0 {
                     app.project_scroll = app.project_scroll.saturating_sub(3);
