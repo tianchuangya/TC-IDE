@@ -104,6 +104,40 @@ pub fn code_cell_width(code_zoom: i32) -> f32 {
     8.9 + code_zoom.clamp(-2, 8) as f32 * 0.6
 }
 
+/// Grid cells a single character occupies in a monospace grid.
+pub fn character_cells(value: char) -> usize {
+    match value as u32 {
+        0x1100..=0x115f
+        | 0x2329..=0x232a
+        | 0x2e80..=0xa4cf
+        | 0xac00..=0xd7a3
+        | 0xf900..=0xfaff
+        | 0xfe10..=0xfe6f
+        | 0xff00..=0xff60
+        | 0xffe0..=0xffe6
+        | 0x1f300..=0x1faff
+        | 0x20000..=0x3fffd => 2,
+        _ => 1,
+    }
+}
+
+/// Grid cells the first `columns` characters of a line occupy.
+pub fn visual_cells(value: &str, columns: usize) -> usize {
+    value.chars().take(columns).map(character_cells).sum()
+}
+
+/// Character index whose grid cell range contains a cell offset.
+pub fn column_for_cells(value: &str, cells: usize) -> usize {
+    let mut used = 0;
+    for (index, ch) in value.chars().enumerate() {
+        if used >= cells {
+            return index;
+        }
+        used += character_cells(ch);
+    }
+    value.chars().count()
+}
+
 /// Column/row grid handed to a pseudo console.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GridSize {
@@ -521,5 +555,17 @@ mod tests {
         assert_eq!(code_cell_width(0), 8.9);
         assert_eq!(code_cell_width(-5), code_cell_width(-2));
         assert_eq!(code_cell_width(20), code_cell_width(8));
+    }
+
+    #[test]
+    fn wide_characters_occupy_two_grid_cells() {
+        assert_eq!(character_cells('a'), 1);
+        assert_eq!(character_cells('你'), 2);
+        assert_eq!(visual_cells("你好ab", 4), 6);
+        assert_eq!(column_for_cells("你好ab", 0), 0);
+        assert_eq!(column_for_cells("你好ab", 2), 1);
+        assert_eq!(column_for_cells("你好ab", 4), 2);
+        assert_eq!(column_for_cells("你好ab", 99), 4);
+        assert_eq!(column_for_cells("", 3), 0);
     }
 }

@@ -9,6 +9,7 @@ use std::ptr;
 use std::time::Instant;
 
 use crate::editor_core;
+use crate::terminal_core;
 
 #[path = "windows_platform.rs"]
 mod platform;
@@ -178,6 +179,8 @@ struct WindowsAppState {
     terminal_velocity: f32,
     terminals: Vec<TerminalTab>,
     active_terminal: usize,
+    terminal_grid: terminal_core::GridSize,
+    terminal_grid_signature: (u32, u32, u32, i32, usize),
     detached_terminal: Hwnd,
     status: String,
     started: Instant,
@@ -380,6 +383,11 @@ impl WindowsAppState {
             terminal_velocity: 0.0,
             terminals: Vec::new(),
             active_terminal: 0,
+            terminal_grid: terminal_core::GridSize {
+                columns: 120,
+                rows: 30,
+            },
+            terminal_grid_signature: (0, 0, 0, 0, 0),
             detached_terminal: ptr::null_mut(),
             status: "DirectWrite / Direct2D editor ready".into(),
             started: Instant::now(),
@@ -1264,7 +1272,8 @@ impl WindowsAppState {
 
     fn add_named_terminal(&mut self, name: String) {
         let cwd = self.project_root.clone();
-        match unsafe { ConPtySession::spawn(&cwd, 120, 30) } {
+        let grid = self.terminal_grid;
+        match unsafe { ConPtySession::spawn(&cwd, grid.columns, grid.rows) } {
             Ok(session) => {
                 self.terminals.push(TerminalTab {
                     name,
@@ -2091,6 +2100,71 @@ fn handle_terminal_control(window: Hwnd, key: u32) -> bool {
         });
     }
     true
+}
+
+/// Grid the bottom terminal panel shows at the current client size.
+fn panel_grid(window: Hwnd, code_zoom: i32) -> terminal_core::GridSize {
+    let mut area = unsafe { std::mem::zeroed::<Rect>() };
+    unsafe { GetClientRect(window, &mut area) };
+    let scale = platform::dpi_for_window(window) as f32 / 96.0;
+    let panel = terminal_core::panel_metrics(
+        (area.right - area.left).max(1) as f32,
+        (area.bottom - area.top).max(1) as f32,
+        scale,
+        1.0,
+    );
+    grid_for_panel(&panel, scale, code_zoom)
+}
+
+/// Fit a column/row grid into a laid out terminal panel body.
+fn grid_for_panel(
+    panel: &terminal_core::TerminalPanel,
+    scale: f32,
+    code_zoom: i32,
+) -> terminal_core::GridSize {
+    terminal_core::GridSize::from_metrics(
+        (panel.body_right - panel.body_left).max(1.0),
+        (panel.body_bottom - panel.body_top).max(1.0),
+        terminal_core::code_cell_width(code_zoom) * scale,
+        panel.row_height,
+    )
+}
+
+/// Resize every ConPTY session when the client area, DPI, zoom or session set changed.
+fn sync_terminal_grid(window: Hwnd) {
+    let mut area = unsafe { std::mem::zeroed::<Rect>() };
+    unsafe { GetClientRect(window, &mut area) };
+    let dpi = platform::dpi_for_window(window);
+    let (code_zoom, count) = APP.with(|cell| {
+        let app = cell.borrow();
+        (app.code_zoom, app.terminals.len())
+    });
+    let signature = (
+        (area.right - area.left).max(0) as u32,
+        (area.bottom - area.top).max(0) as u32,
+        dpi,
+        code_zoom,
+        count,
+    );
+    let changed = APP.with(|cell| {
+        let mut app = cell.borrow_mut();
+        if app.terminal_grid_signature == signature {
+            return false;
+        }
+        app.terminal_grid_signature = signature;
+        true
+    });
+    if !changed {
+        return;
+    }
+    let grid = panel_grid(window, code_zoom);
+    APP.with(|cell| {
+        let mut app = cell.borrow_mut();
+        app.terminal_grid = grid;
+        for terminal in &app.terminals {
+            terminal.session.resize(grid.columns, grid.rows);
+        }
+    });
 }
 
 unsafe fn draw_terminal_text(dc: Hdc, value: &str, x: i32, y: i32, right: i32, color: Dword) {
@@ -2926,10 +3000,13 @@ unsafe extern "system" fn window_proc(
                 invalidate(window);
                 return 0;
             }
-            let terminal_top = APP.with(|cell| {
-                let motion = cell.borrow().terminal_motion.clamp(0.0, 1.0);
-                area.bottom - ((28.0 + 214.0 * motion) * scale) as i32
-            });
+            let panel = terminal_core::panel_metrics(
+                area.right as f32,
+                area.bottom as f32,
+                scale,
+                APP.with(|cell| cell.borrow().terminal_motion),
+            );
+            let terminal_top = (area.bottom as f32 - panel.height) as i32;
             if y >= terminal_top && y <= terminal_top + (34.0 * scale) as i32 {
                 APP.with(|cell| {
                     let mut app = cell.borrow_mut();
@@ -2942,15 +3019,13 @@ unsafe extern "system" fn window_proc(
                     }
                 });
                 invalidate(window);
-            } else if x as f32 >= area.right as f32 - 168.0 * scale
-                && y as f32 >= terminal_top as f32 + 38.0 * scale
-            {
+            } else if x as f32 >= panel.list_left && y as f32 >= panel.body_top {
                 APP.with(|cell| {
                     let mut app = cell.borrow_mut();
                     if !app.terminal_open {
                         return;
                     }
-                    let local_y = y as f32 - terminal_top as f32 - 38.0 * scale;
+                    let local_y = y as f32 - panel.body_top;
                     if local_y <= 30.0 * scale {
                         if x as f32 <= area.right as f32 - 82.0 * scale {
                             app.add_terminal();
@@ -3141,14 +3216,7 @@ unsafe extern "system" fn window_proc(
                     unsafe { renderer.resize(width, height, platform::dpi_for_window(window)) };
                 }
             });
-            APP.with(|cell| {
-                let app = cell.borrow();
-                for terminal in &app.terminals {
-                    terminal
-                        .session
-                        .resize((width / 9).min(i16::MAX as u32) as i16, 30);
-                }
-            });
+            sync_terminal_grid(window);
             invalidate(window);
             0
         }
@@ -3166,12 +3234,14 @@ unsafe extern "system" fn window_proc(
             if let Some(path) = reveal {
                 let _ = platform::open_in_explorer(window, &path);
             }
+            sync_terminal_grid(window);
             invalidate(window);
             0
         }
         WM_DPICHANGED => {
             platform::apply_dpi_change(window, l_param);
             RENDERER.with(|cell| *cell.borrow_mut() = None);
+            sync_terminal_grid(window);
             APP.with(|cell| {
                 cell.borrow_mut().status =
                     format!("DPI changed to {}", platform::dpi_for_window(window))

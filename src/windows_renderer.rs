@@ -27,6 +27,7 @@ use windows::Win32::System::Com::{
 };
 
 use crate::editor_core::{self, ProjectSymbolOccurrence, SymbolOccurrence, SymbolRole, TokenKind};
+use crate::terminal_core;
 
 pub struct WindowsScene<'a> {
     pub file_name: &'a str,
@@ -210,7 +211,7 @@ impl DirectEditorRenderer {
             code_format,
             ui_format,
             small_format,
-            code_cell: 8.9 + code_zoom.clamp(-2, 8) as f32 * 0.6,
+            code_cell: terminal_core::code_cell_width(code_zoom),
             wic_factory,
             background_bitmap: None,
             background_path: None,
@@ -432,7 +433,8 @@ impl DirectEditorRenderer {
         let header_h = 48.0 * scale;
         let status_h = 28.0 * scale;
         let terminal_progress = scene.terminal_progress.clamp(0.0, 1.0);
-        let terminal_h = (28.0 + 214.0 * terminal_progress) * scale;
+        let terminal_panel = terminal_core::panel_metrics(width, height, scale, terminal_progress);
+        let terminal_h = terminal_panel.height;
         let body_bottom = height - terminal_h;
         let tree_w = (width * 0.19).max(220.0 * scale);
         let graph_w = (width * 0.27).max(300.0 * scale);
@@ -1240,9 +1242,8 @@ impl DirectEditorRenderer {
             )
         };
         if terminal_progress > 0.08 {
-            let output_top = height - terminal_h + 38.0 * scale;
-            let terminal_list_w = 168.0 * scale;
-            let terminal_right = width - terminal_list_w;
+            let output_top = terminal_panel.body_top;
+            let terminal_right = terminal_panel.list_left;
             unsafe {
                 Self::fill(
                     &target_base,
@@ -1265,7 +1266,12 @@ impl DirectEditorRenderer {
                     },
                 );
             }
-            for (index, name) in scene.terminal_names.iter().take(6).enumerate() {
+            for (index, name) in scene
+                .terminal_names
+                .iter()
+                .take(terminal_core::PANEL_VISIBLE_ROWS)
+                .enumerate()
+            {
                 let top = output_top + (34.0 + index as f32 * 30.0) * scale;
                 if index == scene.active_terminal {
                     unsafe {
@@ -1301,7 +1307,14 @@ impl DirectEditorRenderer {
                     )
                 };
             }
-            for (index, value) in scene.terminal_lines.iter().rev().take(6).rev().enumerate() {
+            for (index, value) in scene
+                .terminal_lines
+                .iter()
+                .rev()
+                .take(terminal_panel.visible_rows)
+                .rev()
+                .enumerate()
+            {
                 unsafe {
                     Self::text(
                         &target_base,
@@ -1309,10 +1322,10 @@ impl DirectEditorRenderer {
                         &text,
                         value,
                         D2D_RECT_F {
-                            left: 22.0 * scale,
-                            top: output_top + index as f32 * 24.0 * scale,
-                            right: terminal_right - 12.0 * scale,
-                            bottom: output_top + (index as f32 + 1.0) * 24.0 * scale,
+                            left: terminal_panel.body_left,
+                            top: output_top + index as f32 * terminal_panel.row_height,
+                            right: terminal_panel.body_right,
+                            bottom: output_top + (index as f32 + 1.0) * terminal_panel.row_height,
                         },
                     )
                 };
@@ -1324,9 +1337,9 @@ impl DirectEditorRenderer {
                     &accent,
                     &format!("$ {}", scene.terminal_input),
                     D2D_RECT_F {
-                        left: 22.0 * scale,
+                        left: terminal_panel.body_left,
                         top: height - 30.0 * scale,
-                        right: terminal_right - 12.0 * scale,
+                        right: terminal_panel.body_right,
                         bottom: height,
                     },
                 )
