@@ -5160,6 +5160,16 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DESTROY => {
+            // Order matters on shutdown: stop the detached window first so its
+            // timer cannot touch the sessions, then release every ConPTY session
+            // (each one closes its pseudo console and ends its shell), then drop
+            // the Direct2D/DirectWrite state.
+            APP.with(|cell| {
+                let detached = cell.borrow().detached_terminal;
+                if !detached.is_null() {
+                    unsafe { DestroyWindow(detached) };
+                }
+            });
             APP.with(|cell| {
                 let mut app = cell.borrow_mut();
                 app.terminals.clear();

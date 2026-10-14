@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use windows::core::{Result, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows::Win32::System::Console::{
     ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
@@ -12,8 +12,9 @@ use windows::Win32::System::Console::{
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
-    UpdateProcThreadAttribute, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
+    TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, EXTENDED_STARTUPINFO_PRESENT,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+    STARTUPINFOEXW,
 };
 
 use crate::terminal_core::{environment_block, TerminalParser, TerminalView};
@@ -182,9 +183,19 @@ impl ConPtySession {
 }
 
 impl Drop for ConPtySession {
+    /// Tear a session down in a fixed order so no shell is left behind:
+    /// closing the pseudo console ends its session, a short wait gives the
+    /// shell time to exit, a still running process is terminated explicitly,
+    /// and only then are the pipe and process handles released.
     fn drop(&mut self) {
-        unsafe { ClosePseudoConsole(self.pseudo_console) };
-        let _ = unsafe { CloseHandle(self.input) };
-        let _ = unsafe { CloseHandle(self.process) };
+        unsafe {
+            ClosePseudoConsole(self.pseudo_console);
+            if WaitForSingleObject(self.process, 400) != WAIT_OBJECT_0 {
+                let _ = TerminateProcess(self.process, 0);
+                let _ = WaitForSingleObject(self.process, 400);
+            }
+            let _ = CloseHandle(self.input);
+            let _ = CloseHandle(self.process);
+        }
     }
 }

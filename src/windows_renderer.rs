@@ -15,7 +15,7 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_TEXT_METRICS,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
 use windows::Win32::Graphics::Imaging::{
@@ -134,6 +134,37 @@ pub struct DirectEditorRenderer {
     dpi: f32,
 }
 
+/// Advance of one character cell in the configured code font, in logical pixels.
+///
+/// DirectWrite measures the real glyphs, so the caret, the selection and the
+/// relation rails line up with what is drawn instead of relying on a constant.
+unsafe fn measure_code_cell(
+    factory: &IDWriteFactory,
+    format: &IDWriteTextFormat,
+    code_zoom: i32,
+    scale: f32,
+) -> f32 {
+    const SAMPLE: &str = "0123456789";
+    let fallback = terminal_core::code_cell_width(code_zoom);
+    let sample = SAMPLE.encode_utf16().collect::<Vec<_>>();
+    let Ok(layout) = (unsafe { factory.CreateTextLayout(&sample, format, 4096.0, 128.0) }) else {
+        return fallback;
+    };
+    let mut metrics = DWRITE_TEXT_METRICS::default();
+    if unsafe { layout.GetMetrics(&mut metrics) }.is_err() {
+        return fallback;
+    }
+    let width = metrics.widthIncludingTrailingWhitespace.max(metrics.width);
+    if !width.is_finite() || width <= 0.0 {
+        return fallback;
+    }
+    let cell = width / SAMPLE.chars().count() as f32 / scale.max(0.5);
+    if !cell.is_finite() || !(2.0..40.0).contains(&cell) {
+        return fallback;
+    }
+    cell
+}
+
 impl DirectEditorRenderer {
     fn language_version(language: usize, version: usize) -> &'static str {
         let values = match language {
@@ -223,6 +254,8 @@ impl DirectEditorRenderer {
                 w!("zh-CN"),
             )
         }?;
+        let code_cell =
+            unsafe { measure_code_cell(&dwrite_factory, &code_format, code_zoom, scale) };
         Ok(Self {
             d2d_factory,
             _dwrite_factory: dwrite_factory,
@@ -230,7 +263,7 @@ impl DirectEditorRenderer {
             code_format,
             ui_format,
             small_format,
-            code_cell: terminal_core::code_cell_width(code_zoom),
+            code_cell,
             wic_factory,
             background_bitmap: None,
             background_path: None,
