@@ -522,3 +522,74 @@ mod tests {
         assert!(close(zoomed(MAX_ZOOM, 5), MAX_ZOOM));
     }
 }
+
+/// Which background adjustments mean anything right now.
+///
+/// Every panel that offers the background controls has to answer the same
+/// question: with no picture chosen, clearing it, hiding it or zooming it does
+/// nothing. The rule lives here so the panels disable the same controls instead
+/// of each guessing, and so it can be tested without a window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackgroundControls {
+    /// Whether a picture is selected at all.
+    pub has_image: bool,
+    /// Whether the opacity can still be raised.
+    pub opacity_up: bool,
+    /// Whether the opacity can still be lowered.
+    pub opacity_down: bool,
+    /// Whether the picture can still be zoomed in.
+    pub zoom_in: bool,
+    /// Whether the picture can still be zoomed out.
+    pub zoom_out: bool,
+    /// Whether the picture can be cleared or hidden.
+    pub clearable: bool,
+}
+
+/// The state of the background controls, from the preferences that drive them.
+pub fn background_controls(has_image: bool, opacity: f32, zoom: f64) -> BackgroundControls {
+    let has_image = has_image && opacity.is_finite() && zoom.is_finite();
+    BackgroundControls {
+        has_image,
+        opacity_up: has_image && opacity < 1.0 - 1.0e-6,
+        opacity_down: has_image && opacity > 0.0 + 1.0e-6,
+        zoom_in: has_image && zoom < MAX_ZOOM - 1.0e-9,
+        zoom_out: has_image && zoom > MIN_ZOOM + 1.0e-9,
+        clearable: has_image,
+    }
+}
+
+#[cfg(test)]
+mod background_control_tests {
+    use super::*;
+
+    #[test]
+    fn the_background_controls_report_what_can_be_done() {
+        // Without a picture every control is inert, and the panel says so
+        // instead of offering buttons that do nothing.
+        let none = background_controls(false, 0.5, 1.0);
+        assert!(!none.has_image);
+        assert!(!none.opacity_up && !none.opacity_down);
+        assert!(!none.zoom_in && !none.zoom_out);
+        assert!(!none.clearable);
+
+        // With a picture the adjustments depend on where they already are.
+        let middle = background_controls(true, 0.5, 1.5);
+        assert!(middle.has_image && middle.clearable);
+        assert!(middle.opacity_up && middle.opacity_down);
+        assert!(middle.zoom_in && middle.zoom_out);
+
+        // At the limits only the other direction is offered.
+        let full = background_controls(true, 1.0, MAX_ZOOM);
+        assert!(!full.opacity_up && full.opacity_down);
+        assert!(!full.zoom_in && full.zoom_out);
+
+        let empty = background_controls(true, 0.0, MIN_ZOOM);
+        assert!(empty.opacity_up && !empty.opacity_down);
+        assert!(empty.zoom_in && !empty.zoom_out);
+        assert!(empty.clearable, "a clear picture can still be cleared");
+
+        // Nonsense numbers leave the controls inert rather than misbehaving.
+        let broken = background_controls(true, f32::NAN, f64::NAN);
+        assert!(!broken.has_image && !broken.clearable);
+    }
+}

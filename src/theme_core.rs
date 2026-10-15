@@ -149,7 +149,7 @@ impl Palette {
     }
 
     /// Every colour of the palette, for a test that walks all of them.
-    pub fn all(&self) -> [(&'static str, u32); 18] {
+    pub fn all(&self) -> [(&'static str, u32); 23] {
         [
             ("background", self.background),
             ("panel", self.panel),
@@ -165,6 +165,11 @@ impl Palette {
             ("type", self.syntax_type),
             ("function", self.function),
             ("constant", self.constant),
+            ("variable", self.variable),
+            ("parameter", self.parameter),
+            ("property", self.property),
+            ("macro_name", self.macro_name),
+            ("module", self.module),
             ("preprocessor", self.preprocessor),
             ("literal", self.literal),
             ("comment", self.comment),
@@ -426,7 +431,7 @@ mod tests {
         assert_eq!(Palette::for_scheme(true), Palette::light());
         assert_eq!(Palette::for_scheme(false), Palette::dark());
         let dark = Palette::dark();
-        assert_eq!(dark.all().len(), 18);
+        assert_eq!(dark.all().len(), 23);
         assert!(dark
             .all()
             .iter()

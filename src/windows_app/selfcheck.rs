@@ -406,9 +406,12 @@ pub(super) fn self_check() -> i32 {
                     check(palette.panel, theme_core::TEXT_MINIMUM);
                     check(palette.raised, theme_core::TEXT_MINIMUM);
                 }
-                "keyword" | "literal" | "comment" => {
+                // Every colour the tokenizer can produce is drawn on the code
+                // background, so all of them have to be readable there.
+                "keyword" | "literal" | "comment" | "type" | "function" | "constant"
+                | "variable" | "parameter" | "property" | "macro_name" | "module"
+                | "preprocessor" => {
                     check(palette.background, theme_core::TEXT_MINIMUM);
-                    check(palette.panel, theme_core::TEXT_MINIMUM);
                 }
                 "accent" => {
                     check(palette.background, theme_core::DECORATION_MINIMUM);

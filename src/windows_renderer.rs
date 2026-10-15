@@ -259,6 +259,51 @@ fn settings_row_text(scene: &WindowsScene<'_>, index: usize, fallback: &str) -> 
     }
 }
 
+/// The state of one settings row: not every row can be used at any time.
+///
+/// Clearing the background, changing its opacity or zooming it mean nothing
+/// while no picture is selected, so those rows are drawn disabled and say why
+/// instead of quietly doing nothing.
+fn settings_row_state(
+    scene: &WindowsScene<'_>,
+    index: usize,
+    rect: D2D_RECT_F,
+) -> theme_core::ControlState {
+    // Whether a row can be used comes from the shared rule, so the Windows and
+    // Linux panels disable the same controls for the same reason.
+    let controls = background_core::background_controls(
+        scene.background_path.is_some(),
+        scene.background_opacity,
+        scene.background_zoom as f64,
+    );
+    let enabled = match index {
+        // Row 5 chooses the picture, 6 changes its opacity and zoom, 7 clears
+        // it; the other rows are always usable.
+        5 => true,
+        6 => controls.has_image && (controls.opacity_up || controls.opacity_down),
+        7 => controls.clearable,
+        _ => true,
+    };
+    if !enabled {
+        return theme_core::ControlState::Disabled;
+    }
+    if !hovering(
+        scene.pointer_x,
+        scene.pointer_y,
+        rect.left,
+        rect.top,
+        rect.right,
+        rect.bottom,
+    ) {
+        return theme_core::ControlState::Normal;
+    }
+    if scene.pointer_pressed {
+        theme_core::ControlState::Pressed
+    } else {
+        theme_core::ControlState::Hovered
+    }
+}
+
 /// Whether the pointer is inside a rectangle, for hover feedback.
 fn hovering(pointer_x: i32, pointer_y: i32, left: f32, top: f32, right: f32, bottom: f32) -> bool {
     (pointer_x as f32) >= left
@@ -809,31 +854,48 @@ impl ScenePaint<'_, '_> {
                 // Rows 1..4 are clickable, so they light up under the pointer.
                 let row_top = top + row_y * self.scale;
                 let row_bottom = row_top + (if index == 5 { 34.0 } else { 54.0 }) * self.scale;
+                // Every clickable row is one control: it can be pressed, it can
+                // be disabled when it would do nothing, and it lifts as the
+                // pointer crosses it, all from the shared control model.
                 let clickable = (1..=9).contains(&index);
-                let hovered = clickable
-                    && hovering(
-                        self.scene.pointer_x,
-                        self.scene.pointer_y,
-                        left + 16.0 * self.scale,
-                        row_top - 6.0 * self.scale,
-                        self.width - 30.0 * self.scale,
-                        row_bottom - 6.0 * self.scale,
-                    );
-                if hovered {
-                    unsafe {
-                        DirectEditorRenderer::rounded(
-                            self.target,
-                            &self.raised,
-                            D2D_RECT_F {
-                                left: left + 16.0 * self.scale,
-                                top: row_top - 6.0 * self.scale,
-                                right: self.width - 30.0 * self.scale,
-                                bottom: row_bottom - 6.0 * self.scale,
-                            },
-                            6.0 * self.scale,
-                        )
-                    };
+                let row_left = left + 16.0 * self.scale;
+                let row_right = self.width - 30.0 * self.scale;
+                let row_rect = D2D_RECT_F {
+                    left: row_left,
+                    top: row_top - 6.0 * self.scale,
+                    right: row_right,
+                    bottom: row_bottom - 6.0 * self.scale,
+                };
+                let state = if clickable {
+                    settings_row_state(self.scene, index, row_rect)
+                } else {
+                    theme_core::ControlState::Disabled
+                };
+                let palette = theme_core::Palette::for_scheme(self.scene.light_theme);
+                let visual = palette.control(state, false);
+                // The fill and the text colour both come from the shared control
+                // model, so a row looks the same whether it is pressed, hovered
+                // or disabled.
+                let (fill, row_text) = unsafe {
+                    (
+                        DirectEditorRenderer::brush(self.target, visual.fill, visual.opacity).ok(),
+                        DirectEditorRenderer::brush(self.target, visual.text, 1.0).ok(),
+                    )
+                };
+                if clickable && state != theme_core::ControlState::Normal {
+                    if let Some(fill) = fill.as_ref() {
+                        unsafe {
+                            DirectEditorRenderer::rounded(
+                                self.target,
+                                fill,
+                                row_rect,
+                                6.0 * self.scale,
+                            )
+                        };
+                    }
                 }
+                let row_enabled = clickable && state != theme_core::ControlState::Disabled;
+                let _ = row_enabled;
                 let (row_y, value) = (*row_y, settings_row_text(self.scene, index, value));
                 unsafe {
                     DirectEditorRenderer::text(
@@ -843,10 +905,10 @@ impl ScenePaint<'_, '_> {
                         } else {
                             &self.renderer.small_format
                         },
-                        if index == 0 || hovered {
+                        if index == 0 {
                             &self.bright
-                        } else if index < 4 {
-                            &self.text
+                        } else if clickable {
+                            row_text.as_ref().unwrap_or(&self.text)
                         } else {
                             &self.muted
                         },
@@ -1085,32 +1147,57 @@ impl ScenePaint<'_, '_> {
                     },
                 )
             };
+            let palette = theme_core::Palette::for_scheme(self.scene.light_theme);
             for (index, category) in categories.iter().enumerate() {
                 let y = top + (78.0 + index as f32 * 44.0) * self.scale;
-                if index == self.scene.extension_category {
-                    unsafe {
-                        DirectEditorRenderer::rounded(
+                // A category is a control like any other: the selected one stays
+                // filled, and the one under the pointer lifts or presses.
+                let selected = index == self.scene.extension_category;
+                let state = self.control_state(
+                    left + 14.0 * self.scale,
+                    y - 20.0 * self.scale,
+                    left + 172.0 * self.scale,
+                    y + 14.0 * self.scale,
+                    true,
+                );
+                let visual = palette.control(state, selected);
+                let (fill, label) = unsafe {
+                    (
+                        DirectEditorRenderer::brush(self.target, visual.fill, visual.opacity).ok(),
+                        DirectEditorRenderer::brush(
                             self.target,
-                            &self.selection,
-                            D2D_RECT_F {
-                                left: left + 14.0 * self.scale,
-                                top: y - 20.0 * self.scale,
-                                right: left + 172.0 * self.scale,
-                                bottom: y + 14.0 * self.scale,
+                            if selected {
+                                palette.bright
+                            } else {
+                                visual.text
                             },
-                            7.0 * self.scale,
+                            1.0,
                         )
-                    };
+                        .ok(),
+                    )
+                };
+                if selected || state != theme_core::ControlState::Normal {
+                    if let Some(fill) = fill.as_ref() {
+                        unsafe {
+                            DirectEditorRenderer::rounded(
+                                self.target,
+                                fill,
+                                D2D_RECT_F {
+                                    left: left + 14.0 * self.scale,
+                                    top: y - 20.0 * self.scale,
+                                    right: left + 172.0 * self.scale,
+                                    bottom: y + 14.0 * self.scale,
+                                },
+                                7.0 * self.scale,
+                            )
+                        };
+                    }
                 }
                 unsafe {
                     DirectEditorRenderer::text(
                         self.target,
                         &self.renderer.small_format,
-                        if index == self.scene.extension_category {
-                            &self.bright
-                        } else {
-                            &self.text
-                        },
+                        label.as_ref().unwrap_or(&self.text),
                         category,
                         D2D_RECT_F {
                             left: left + 26.0 * self.scale,
