@@ -13,7 +13,7 @@
 - 共享纯逻辑内核（跨平台、在 Linux 上就能跑单元测试）：`editor_core`、`editor_session`、`graph_core`、`terminal_core`、`text_buffer`、`session_core`、`workspace_core`、`ai_core`、`extension_core`、`lsp_core`、`dap_core`、`syntax_core`、`index_core`、`motion_core`、`package_motion`、`background_core`、`theme_core`，共 **17 个**，全部在 `main.rs` 声明，并被 `tests/platform_boundary.rs` 守着（禁止平台类型/`unsafe` 泄漏进共享核心）。
 - 本地测试：**233 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试**（`cargo test --all-targets`），另有只在各平台 CI 里跑的 Windows/macOS 专属测试。
 - 任务队列（`docs/HANDOFF.md` 第 5 节）：**39 项已勾选 / 4 项部分完成 / 0 项未开始**。
-- **当前有一个失败**：最后一条提交 `aa82388` 的 **macOS job 第 5 步 `--self-check` 失败**（详见 §5）。这是接手后第一件要做的事。
+- 当前 CI 已恢复全绿：`ba427f2` 的 format / Linux / Windows typecheck / Windows / macOS 五个 job 全部通过。
 
 ---
 
@@ -42,7 +42,14 @@ docs/
 
 ---
 
-## 2. 最近 7 轮做了什么（按提交，新→旧）
+## 2. 最近各轮做了什么（按提交，新→旧）
+
+### 第 20 轮
+
+| 提交 | 内容 |
+| --- | --- |
+| `ba427f2` | 修正 macOS 工具链自检中写反的部分安装断言：只安装 `rustfmt` 时，摘要应报告缺失的 `rust-analyzer`，而不是列出已经安装的格式化器。五个 CI job 全绿。 |
+| `e4ff947` | macOS 的真实工具探针改用确定的绝对路径，避免 runner `PATH` 差异；同时修复 AI SSE 集成测试的 Python 脚本，并让测试服务器启动失败时明确失败，不再静默跳过。 |
 
 ### 第 19 轮（本轮）
 
@@ -96,7 +103,7 @@ docs/
 
 ## 4. 任务队列状态（`docs/HANDOFF.md` 第 5 节）
 
-**39 已勾选 / 4 部分完成 / 0 未开始**。四个"部分完成"是：
+**39 已勾选 / 4 部分完成 / 0 未开始**。仍以 `docs/HANDOFF.md` 中的逐项说明为准。
 
 | 编号（文件行号） | 主题 | 已做 | 还差 |
 | --- | --- | --- | --- |
@@ -110,41 +117,11 @@ docs/
 
 ---
 
-## 5. ⚠️ 当前失败：CI 的 macOS job 第 5 步
+## 5. CI 状态
 
-**状态**：`aa82388`（扩展与工具链面板）的 CI **失败**，失败点是 `macos` job 的 `Run the scriptable state layer check`（第 5 步），第 6 步 `cargo test --all-targets` 未执行。其余 4 个 job（format / linux / windows-typecheck / windows）都通过。
+`ba427f2` 对应的第 153 次构建已全绿。此前 macOS `--self-check` 的失败已确认并修复：部分安装探针模拟“只有 `rustfmt`”时，摘要理应列出缺失的 `rust-analyzer`，旧断言却要求出现已经安装的 `rustfmt`。同时，真实可执行文件探测已改为不依赖 runner `PATH` 的绝对路径。
 
-**已知信息（以及为什么难查）**：
-- GitHub 的 **job 日志在本机读不到**（`GET /actions/jobs/{id}/logs` 返回 403 "Must have admin rights"）；job 页面 HTML 只给出 "1 error and 1 notice"。
-- 因此**只有结论，没有失败断言的名单**。这是本会话反复遇到的限制，也是为什么第 16 轮把断言抽成共享 `state_check`（能在 Linux 上跑）——那一次正是靠它找到了缺陷。
-
-**已排除**（逐条核对过）：
-- `workspace_core::format_command("Rust", "main.rs")` 确实是 `rustfmt "main.rs"`，`("Markdown", …)` 确实返回 `None`。
-- 键位：keycode 14 = `e`、3 = `f`，`⌘E` → `ToggleExtensions`、`⌘⇧F` → `FormatFile`，无冲突。
-- `ExtensionsPanel::row_at` 的边界计算、`move_focus` 的夹取、`marks()`/`summary()` 的输出都自洽。
-- 共享测试（233 项）本地全绿，`cargo clippy` 三目标干净，`cargo check --target x86_64-apple-darwin` 干净。
-
-**最可疑的一条**（唯一依赖 macOS 运行环境、且无法在 Linux 上验证的断言）：
-```rust
-report(
-    "the tool probe looks at the real machine",
-    lsp_core::executable_available("sh")
-        && !lsp_core::executable_available("tc-ide-no-such-tool"),
-    &mut failures,
-);
-```
-`lsp_core::executable_available` 只在 `PATH` 里找文件（非 Windows 不试扩展名）。如果 macOS runner 的 `--self-check` 进程环境里 `PATH` 不含 `/bin`（或 `sh` 不在其中），这条就会失败。**建议第一件事**：把它改成不依赖具体环境的写法，例如断言"绝对路径存在时能找到、绝对路径不存在时找不到"：
-```rust
-let probe_ok = lsp_core::executable_available("/bin/sh")
-    && !lsp_core::executable_available("/no/such/tc-ide-tool");
-```
-或者干脆只保留纯逻辑断言（`ToolingRow::probe` + 注入的 `probe` 闭包），把"真实探测"留给 Windows/Linux 的既有自检。
-
-**其他可能的失败源**（若上面改完仍失败，按此顺序排查）：
-1. `shell.extensions.rows.len() == EXTENSION_LANGUAGES.len()` —— `probe_all()` 是否真的被调用（`toggle_extensions` 里调用）。
-2. `rust_row` 查找（`language == "Rust"`）与 `summary().contains("Rust")`。
-3. 设置面板断言 `!dark`（`MacShell::new()` 现在会 `load_preferences()` 读 `~/Library/Application Support/TC-IDE/settings.conf`；runner 上正常不存在 → 默认值 `light_theme = false`。**但若某次运行写过该文件，之后的运行就会拿到非默认值**——自检本身不写盘，风险低但值得一查）。
-4. 若仍无法定位：把自检的失败项**写进退出码**（例如 `100 + index`）或分组 echo 到 stdout，然后靠**替换成更小的断言集合**二分（每次 CI 约 4 分钟）。
+排查这类平台专属失败时，优先打开已登录的 GitHub Actions 页面读取自检打印的 `FAILED: ...`；公共 API 能给出 job/step 状态，但未认证的日志下载可能返回 403 或很快触发速率限制。
 
 ---
 
@@ -194,9 +171,9 @@ CI（`.github/workflows/build.yml`）五个 job：`format`、`linux`（测试 + 
 
 ## 8. 建议的下一步（按性价比排序）
 
-1. **修 `aa82388` 的 macOS 自检**（见 §5），拿到绿 CI。
-2. **macOS 打包/构建面板**或**补齐 Windows 的两个半边**（201 背景图裁剪浮层、203 控件按下/禁用状态）——后者只能在 Windows 实机验收，但可以只做编译期 + 状态层自检 + 更新 `REAL-MACHINE-CHECKLIST.md`。
-3. **语义分析增量（165）**：给 `syntax_core` 加最小可用的一般表达式/返回类型推断（例如记录 `fn` 的返回类型，让 `let x = self.build(); x.prepare()` 能解析），并保持全部在共享核心里、有单元测试。
+1. **补齐 Windows 的两个半边**：背景图裁剪浮层，以及设置/扩展浮层的按下、禁用、键盘焦点状态。
+2. **语义分析增量（165）**：给 `syntax_core` 加最小可用的一般表达式/返回类型推断（例如记录 `fn` 的返回类型，让 `let x = self.build(); x.prepare()` 能解析），并保持全部在共享核心里、有单元测试。
+3. **macOS 打包/构建面板**。
 4. **macOS Metal/CoreText**：工作量最大、本机最不可验证（本机只能类型检查 + 靠 CI 的 macOS runner 跑自检），建议放在最后，且先做"能跑起来、有自检断言"的最小版本。
 
 ---
