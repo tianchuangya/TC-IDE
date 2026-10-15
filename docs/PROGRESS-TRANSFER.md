@@ -191,3 +191,12 @@ CI（`.github/workflows/build.yml`）五个 job：`format`、`linux`（测试 + 
 - **把能在 Linux 上跑的断言尽量下沉到共享核心**（第 16 轮的 `state_check` 就是范例）：CI 的 macOS/Windows 日志读不到，只有本地可跑的断言才可调试。
 - **改 `macos_app.rs` 时小心 Python 批量替换**：本会话多次因 `cargo fmt` 重排导致锚点失配（`AssertionError`/`StopIteration`），且有一次**整个文件被旧草稿覆盖、把之前的修复回滚了**（第 15→16 轮）。改完一定 `git diff --stat` 复核，并重跑全部验证。
 - 用 `git log --oneline` + `docs/HANDOFF.md` 的 `[x]/[~]/[ ]` 标记作为唯一进度真相，不要相信对话记忆。
+
+---
+
+## 21. 一个反复出现的流程教训
+
+`cargo test` 通过不代表可以提交：本轮有一次 `clippy --all-targets -- -D warnings` 失败
+（`items_after_test_module`：我把辅助函数追加到了 `mod tests` 之后）却仍然推了上去，
+CI 的 format 步骤会先挡住它。**推送前必须按顺序跑完 §6 的全部命令**，尤其是三目标 clippy，
+而不是只看测试是否绿。
