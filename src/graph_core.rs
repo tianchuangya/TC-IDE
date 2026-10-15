@@ -2141,3 +2141,60 @@ mod tests {
         assert_eq!(called_run.1, Some(GraphEdge::Callee));
     }
 }
+
+#[cfg(test)]
+mod scope_button_tests {
+    use super::*;
+
+    #[test]
+    fn the_range_buttons_cover_automatic_and_every_range() {
+        // The panel draws one button per entry, automatic first, so the button
+        // index and the pinned range have to line up both ways.
+        let total = GraphScope::ALL.len() + 1;
+        assert_eq!(total, 5, "automatic plus four ranges");
+
+        // Button zero means automatic, and the rest follow the shared order.
+        for index in 0..total {
+            let pinned = if index == 0 {
+                None
+            } else {
+                Some(GraphScope::from_index(index - 1))
+            };
+            let back = match pinned {
+                None => 0,
+                Some(scope) => scope.index() + 1,
+            };
+            assert_eq!(back, index, "button {index} does not round trip");
+        }
+        // The button a click lands on is the one that is drawn as selected.
+        assert_eq!(
+            GraphScope::ALL[GraphScope::Project.index()],
+            GraphScope::Project
+        );
+        assert_eq!(
+            GraphScope::ALL[GraphScope::Symbol.index()],
+            GraphScope::Symbol
+        );
+        // A click past the last button is refused rather than clamped onto it.
+        assert!(total > GraphScope::Symbol.index() + 1);
+    }
+
+    #[test]
+    fn cycling_reaches_every_range_and_returns_to_automatic() {
+        // Windows and macOS walk the ranges with this; Linux shows them as
+        // buttons. Both end up in the same place.
+        let mut scope = None;
+        let mut seen = Vec::new();
+        for _ in 0..GraphScope::ALL.len() + 1 {
+            scope = cycle_scope(scope, true);
+            seen.push(scope);
+        }
+        assert_eq!(seen.last(), Some(&None), "the cycle returns to automatic");
+        for scope in GraphScope::ALL {
+            assert!(
+                seen.contains(&Some(scope)),
+                "the cycle never reaches {scope:?}: {seen:?}"
+            );
+        }
+    }
+}

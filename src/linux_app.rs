@@ -738,7 +738,10 @@ struct App {
     /// pointer was when it was grabbed.
     background_drag: Option<(background_core::Handle, i32, i32)>,
     graph_relation: graph_core::GraphRelation,
-    graph_scope: usize,
+    /// Range the graph shows, or `None` to follow the caret. This is the
+    /// shared model rather than an index into a hand written list, so Linux
+    /// offers the same four ranges and the same automatic state as the others.
+    graph_scope: Option<graph_core::GraphScope>,
     graph_scroll: usize,
     graph_search: String,
     graph_search_focused: bool,
@@ -2629,6 +2632,46 @@ impl App {
             .refresh(fingerprints, |path| contents.get(path).cloned());
     }
 
+    /// The range buttons, in the order the shared model lists them, with the
+    /// automatic range first.
+    fn graph_scope_labels(&self) -> Vec<&'static str> {
+        let mut labels = vec![self.tr("AUTO", "跟随")];
+        labels.extend(
+            graph_core::GraphScope::ALL
+                .into_iter()
+                .map(|scope| match scope {
+                    graph_core::GraphScope::Project => self.tr("PROJECT", "整个项目"),
+                    graph_core::GraphScope::Folder => self.tr("FOLDER", "文件夹"),
+                    graph_core::GraphScope::File => self.tr("FILE", "当前文件"),
+                    graph_core::GraphScope::Symbol => self.tr("SYMBOL", "当前符号"),
+                }),
+        );
+        labels
+    }
+
+    /// Index of the button the current range is on, automatic included.
+    fn graph_scope_index(&self) -> usize {
+        match self.graph_scope {
+            None => 0,
+            Some(scope) => scope.index() + 1,
+        }
+    }
+
+    /// Pick a range by its button.
+    fn set_graph_scope_from_button(&mut self, index: usize) -> bool {
+        let total = graph_core::GraphScope::ALL.len() + 1;
+        if index >= total {
+            return false;
+        }
+        self.graph_scope = if index == 0 {
+            None
+        } else {
+            Some(graph_core::GraphScope::from_index(index - 1))
+        };
+        self.graph_scroll = 0;
+        true
+    }
+
     /// Rows the debug panel would show right now.
     fn debug_panel_rows(&self) -> Vec<dap_core::DebugRow> {
         dap_core::debug_rows(&self.debug_state, self.debug_frame)
@@ -3020,11 +3063,7 @@ impl App {
     ) -> graph_core::Graph {
         let current_file = self.files[self.selected_file].name.as_str();
         let folded = self.graph_folded.iter().cloned().collect::<Vec<_>>();
-        let pinned = match self.graph_scope {
-            0 => graph_core::GraphScope::File,
-            1 => graph_core::GraphScope::Folder,
-            _ => graph_core::GraphScope::Project,
-        };
+        let pinned = self.graph_scope;
         // Declarations come from the incremental index rather than a fresh
         // scan of every open file, because this runs once per frame.
         let declarations = self.project_index.declarations();
@@ -3040,11 +3079,8 @@ impl App {
             folded: &folded,
             relation: self.graph_relation,
         };
-        let scope = graph_core::auto_scope(
-            self.hovered_symbol.as_ref(),
-            &self.graph_search,
-            Some(pinned),
-        );
+        let scope =
+            graph_core::auto_scope(self.hovered_symbol.as_ref(), &self.graph_search, pinned);
         graph_core::build_graph(&inputs, scope, &self.graph_search)
     }
 
@@ -4235,19 +4271,17 @@ impl App {
             .as_ref()
             .map(|symbol| symbol.name.clone())
             .unwrap_or_else(|| self.files[self.selected_file].name.clone());
-        let scope_labels = [
-            self.tr("FILE", "当前文件"),
-            self.tr("FOLDER", "当前文件夹"),
-            self.tr("PROJECT", "整个项目"),
-        ];
-        let scope_w = ((w - s(36)) / 3).max(s(72));
+        let scope_labels = self.graph_scope_labels();
+        let count = scope_labels.len() as i32;
+        let scope_w = ((w - s(36)) / count.max(1)).max(s(56));
         for (index, label) in scope_labels.iter().enumerate() {
             let bx = x + s(14) + index as i32 * scope_w;
-            if self.graph_scope == index {
+            let selected = index == self.graph_scope_index();
+            if selected {
                 self.rect(self.colors.project, bx, y + s(8), scope_w - s(5), s(27));
             }
             self.outline(self.colors.line, bx, y + s(8), scope_w - s(5), s(27));
-            self.text(self.colors.text, bx + s(9), y + s(27), label);
+            self.text(self.colors.text, bx + s(7), y + s(27), label);
         }
         self.rect(self.colors.bg, x + s(14), y + s(43), w - s(28), s(30));
         self.outline(
@@ -6703,21 +6737,17 @@ impl App {
         }
         let (_, graph_y, _, _) = self.graph_bounds();
         if button == 1 && x >= graph_left && y >= graph_y + s(8) && y <= graph_y + s(35) {
-            let scope_w = ((self.width - graph_left - s(36)) / 3).max(s(72));
-            self.graph_scope = ((x - graph_left - s(14)) / scope_w.max(1)).clamp(0, 2) as usize;
-            self.graph_scroll = 0;
-            self.status_message = match self.graph_scope {
-                0 => self.tr("Graph scoped to the current file", "关系图已聚焦当前文件"),
-                1 => self.tr(
-                    "Graph scoped to the current folder",
-                    "关系图已聚焦当前文件夹",
-                ),
-                _ => self.tr(
-                    "Graph scoped to the whole project",
-                    "关系图已切换到整个项目",
-                ),
+            // The buttons are AUTO plus the four ranges the shared model
+            // lists, so the count comes from there rather than a literal.
+            let count = (graph_core::GraphScope::ALL.len() + 1) as i32;
+            let scope_w = ((self.width - graph_left - s(36)) / count).max(s(56));
+            let index = ((x - graph_left - s(14)) / scope_w.max(1)).max(0) as usize;
+            let labels = self.graph_scope_labels();
+            let tapped = labels.get(index).copied().unwrap_or("");
+            if !self.set_graph_scope_from_button(index) {
+                return;
             }
-            .into();
+            self.status_message = format!("{} {tapped}", self.tr("Range:", "范围："));
             return;
         }
         if button == 1 && x >= graph_left + s(14) && y >= graph_y + s(43) && y <= graph_y + s(73) {
@@ -9244,7 +9274,7 @@ pub fn run() {
             extension_upgrades: 0,
             background_drag: None,
             graph_relation: graph_core::GraphRelation::Follow,
-            graph_scope: 0,
+            graph_scope: None,
             graph_scroll: 0,
             graph_search: String::new(),
             graph_search_focused: false,
