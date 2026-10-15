@@ -8,9 +8,8 @@
 //! pure functions here, so the crop box can be dragged instead of nudged with
 //! numbers and the result is the same on every platform.
 //!
-//! The interactive crop box is being adopted backend by backend: the placement
-//! is already shared, while [`Handle`] and [`drag_crop`] are still only used by
-//! the tests until the crop box itself lands on both platforms.
+//! Linux and Windows both use the same placement, hit testing and drag model;
+//! their native renderers only draw the preview and forward pointer movement.
 #![allow(dead_code)]
 
 /// Smallest allowed zoom.
@@ -146,6 +145,26 @@ pub fn placement(image: (f64, f64), view: (f64, f64), zoom: f64, offset: (f64, f
         drawn,
         excess,
         origin,
+    }
+}
+
+/// Fit the whole image inside a preview, centred with letterboxing when the
+/// aspect ratios differ. Unlike [`placement`], this never crops the source.
+pub fn preview_placement(image: (f64, f64), view: (f64, f64)) -> Placement {
+    let image = (finite(image.0, 1.0).max(1.0), finite(image.1, 1.0).max(1.0));
+    let view = (finite(view.0, 0.0).max(0.0), finite(view.1, 0.0).max(0.0));
+    let scale = (view.0 / image.0).min(view.1 / image.1);
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let drawn = (image.0 * scale, image.1 * scale);
+    Placement {
+        scale,
+        drawn,
+        excess: (0.0, 0.0),
+        origin: ((view.0 - drawn.0) * 0.5, (view.1 - drawn.1) * 0.5),
     }
 }
 
@@ -343,6 +362,19 @@ mod tests {
             "twice the zoom shows half of it"
         );
         assert!(closer.width < full.width);
+    }
+
+    #[test]
+    fn a_preview_contains_and_centres_the_whole_picture() {
+        let wide = preview_placement((2000.0, 1000.0), (400.0, 300.0));
+        assert!(close(wide.scale, 0.2));
+        assert_eq!(wide.drawn, (400.0, 200.0));
+        assert!(close(wide.origin.0, 0.0) && close(wide.origin.1, 50.0));
+
+        let tall = preview_placement((1000.0, 2000.0), (400.0, 300.0));
+        assert!(close(tall.scale, 0.15));
+        assert_eq!(tall.drawn, (150.0, 300.0));
+        assert!(close(tall.origin.0, 125.0) && close(tall.origin.1, 0.0));
     }
 
     #[test]

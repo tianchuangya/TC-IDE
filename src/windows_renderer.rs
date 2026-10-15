@@ -27,6 +27,7 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 
+use crate::background_core;
 use crate::editor_core::{self, SymbolOccurrence, TokenKind};
 use crate::graph_core;
 use crate::package_motion;
@@ -171,6 +172,17 @@ pub struct DirectEditorRenderer {
     dpi: f32,
 }
 
+impl DirectEditorRenderer {
+    /// Pixel dimensions of the decoded background used by both drawing and
+    /// the settings crop hit testing.
+    pub fn background_size(&self) -> Option<(f64, f64)> {
+        self.background_bitmap.as_ref().map(|bitmap| {
+            let size = unsafe { bitmap.GetSize() };
+            (size.width.max(1.0) as f64, size.height.max(1.0) as f64)
+        })
+    }
+}
+
 /// Advance of one character cell in the configured code font, in logical pixels.
 ///
 /// DirectWrite measures the real glyphs, so the caret, the selection and the
@@ -242,8 +254,7 @@ fn settings_row_text(scene: &WindowsScene<'_>, index: usize, fallback: &str) -> 
             scene.background_zoom
         ),
         7 => "C   清除背景".to_string(),
-        8 => "H   导入背景图".to_string(),
-        9 => "Esc  关闭设置".to_string(),
+        8 => "Esc  关闭设置".to_string(),
         _ => fallback.to_string(),
     }
 }
@@ -720,7 +731,7 @@ impl ScenePaint<'_, '_> {
                         left,
                         top,
                         right: self.width - 20.0 * self.scale,
-                        bottom: (top + 680.0 * self.scale).min(self.height - 20.0 * self.scale),
+                        bottom: (top + 742.0 * self.scale).min(self.height - 12.0 * self.scale),
                     },
                     16.0 * self.scale,
                 )
@@ -777,22 +788,22 @@ impl ScenePaint<'_, '_> {
                     ),
                 ),
                 (
-                    464.0,
+                    400.0,
                     format!(
                         "B   Background: {}",
                         self.scene.background_path.unwrap_or("not selected")
                     ),
                 ),
                 (
-                    518.0,
+                    594.0,
                     format!(
                         "O/P opacity {:.0}%   Z/X zoom {:.1}x",
                         self.scene.background_opacity * 100.0,
                         self.scene.background_zoom
                     ),
                 ),
-                (572.0, "C   Clear background".into()),
-                (626.0, "Esc  Close settings".into()),
+                (640.0, "C   Clear background".into()),
+                (686.0, "Esc  Close settings".into()),
             ];
             for (index, (row_y, value)) in settings.iter().enumerate() {
                 // Rows 1..4 are clickable, so they light up under the pointer.
@@ -858,7 +869,7 @@ impl ScenePaint<'_, '_> {
                 .filter(|(_, family)| {
                     needle.is_empty() || family.to_ascii_lowercase().contains(&needle)
                 })
-                .take(5)
+                .take(3)
                 .enumerate()
             {
                 let row_top = top + (282.0 + visible as f32 * 34.0) * self.scale;
@@ -903,6 +914,124 @@ impl ScenePaint<'_, '_> {
                         },
                     )
                 };
+            }
+            if let (Some(bitmap), Some(image)) = (
+                self.renderer.background_bitmap.as_ref(),
+                self.renderer.background_size(),
+            ) {
+                let preview = D2D_RECT_F {
+                    left: left + 18.0 * self.scale,
+                    top: top + 444.0 * self.scale,
+                    right: self.width - 34.0 * self.scale,
+                    bottom: top + 576.0 * self.scale,
+                };
+                let preview_size = (
+                    (preview.right - preview.left) as f64,
+                    (preview.bottom - preview.top) as f64,
+                );
+                let fitted = background_core::preview_placement(image, preview_size);
+                let destination = D2D_RECT_F {
+                    left: preview.left + fitted.origin.0 as f32,
+                    top: preview.top + fitted.origin.1 as f32,
+                    right: preview.left + fitted.origin.0 as f32 + fitted.drawn.0 as f32,
+                    bottom: preview.top + fitted.origin.1 as f32 + fitted.drawn.1 as f32,
+                };
+                unsafe {
+                    self.target.DrawBitmap(
+                        bitmap,
+                        Some(&destination),
+                        0.86,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                        None,
+                    );
+                }
+                let view = (
+                    (self.editor_right - self.tree_w).max(1.0) as f64,
+                    (self.body_bottom - self.header_h - 38.0 * self.scale).max(1.0) as f64,
+                );
+                let placed = background_core::placement(
+                    image,
+                    view,
+                    self.scene.background_zoom as f64,
+                    (
+                        self.scene.background_offset_x as f64,
+                        self.scene.background_offset_y as f64,
+                    ),
+                );
+                let crop = placed.crop(view, image);
+                let crop = fitted.project(&crop);
+                let crop = D2D_RECT_F {
+                    left: preview.left + crop.x as f32,
+                    top: preview.top + crop.y as f32,
+                    right: preview.left + crop.right() as f32,
+                    bottom: preview.top + crop.bottom() as f32,
+                };
+                let thickness = 2.0 * self.scale;
+                unsafe {
+                    DirectEditorRenderer::fill(
+                        self.target,
+                        &self.accent,
+                        crop.left,
+                        crop.top,
+                        crop.right,
+                        crop.top + thickness,
+                    );
+                    DirectEditorRenderer::fill(
+                        self.target,
+                        &self.accent,
+                        crop.left,
+                        crop.bottom - thickness,
+                        crop.right,
+                        crop.bottom,
+                    );
+                    DirectEditorRenderer::fill(
+                        self.target,
+                        &self.accent,
+                        crop.left,
+                        crop.top,
+                        crop.left + thickness,
+                        crop.bottom,
+                    );
+                    DirectEditorRenderer::fill(
+                        self.target,
+                        &self.accent,
+                        crop.right - thickness,
+                        crop.top,
+                        crop.right,
+                        crop.bottom,
+                    );
+                    for (x, y) in [
+                        (crop.left, crop.top),
+                        (crop.right, crop.top),
+                        (crop.right, crop.bottom),
+                        (crop.left, crop.bottom),
+                    ] {
+                        DirectEditorRenderer::fill(
+                            self.target,
+                            &self.accent,
+                            x - 4.0 * self.scale,
+                            y - 4.0 * self.scale,
+                            x + 4.0 * self.scale,
+                            y + 4.0 * self.scale,
+                        );
+                    }
+                    DirectEditorRenderer::text(
+                        self.target,
+                        &self.renderer.small_format,
+                        &self.muted,
+                        if self.scene.ui_chinese {
+                            "拖动取景框裁剪，拖角缩放"
+                        } else {
+                            "Drag frame to crop · corners resize"
+                        },
+                        D2D_RECT_F {
+                            left: preview.left,
+                            top: preview.top - 20.0 * self.scale,
+                            right: preview.right,
+                            bottom: preview.top,
+                        },
+                    );
+                }
             }
         }
     }

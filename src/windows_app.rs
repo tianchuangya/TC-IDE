@@ -380,6 +380,8 @@ struct WindowsAppState {
     background_offset_x: f32,
     background_offset_y: f32,
     background_zoom: f32,
+    /// Active drag in the settings background preview.
+    background_drag: Option<(background_core::Handle, i32, i32)>,
     package_open: bool,
     package_motion: f32,
     package_velocity: f32,
@@ -675,6 +677,7 @@ impl WindowsAppState {
             background_offset_x: preferences.background_offset_x,
             background_offset_y: preferences.background_offset_y,
             background_zoom: preferences.background_zoom,
+            background_drag: None,
             package_open: false,
             package_motion: 0.0,
             package_velocity: 0.0,

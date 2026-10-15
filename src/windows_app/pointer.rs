@@ -9,6 +9,60 @@ use super::scene::{
 use super::workspace::save_session;
 use super::*;
 
+fn background_preview_rect(area: &Rect, scale: f32) -> background_core::Rect {
+    let left = area.right as f32 - 410.0 * scale;
+    let top = 58.0 * scale;
+    background_core::Rect::new(
+        (left + 18.0 * scale) as f64,
+        (top + 444.0 * scale) as f64,
+        (358.0 * scale) as f64,
+        (132.0 * scale) as f64,
+    )
+}
+
+fn background_view_size(app: &WindowsAppState, area: &Rect, scale: f32) -> (f64, f64) {
+    let width = area.right as f32;
+    let height = area.bottom as f32;
+    let tree = (width * 0.19).max(220.0 * scale);
+    let graph = (width * 0.27).max(300.0 * scale);
+    let panel = terminal_core::panel_metrics(width, height, scale, app.terminal_motion);
+    (
+        (width - graph - tree).max(1.0) as f64,
+        (height - panel.height - 86.0 * scale).max(1.0) as f64,
+    )
+}
+
+fn background_crop_on_screen(
+    app: &WindowsAppState,
+    area: &Rect,
+    scale: f32,
+    image: (f64, f64),
+) -> (background_core::Rect, background_core::Placement) {
+    let preview_rect = background_preview_rect(area, scale);
+    let preview =
+        background_core::preview_placement(image, (preview_rect.width, preview_rect.height));
+    let view = background_view_size(app, area, scale);
+    let placed = background_core::placement(
+        image,
+        view,
+        app.background_zoom as f64,
+        (
+            app.background_offset_x as f64,
+            app.background_offset_y as f64,
+        ),
+    );
+    let crop = preview.project(&placed.crop(view, image));
+    (
+        background_core::Rect::new(
+            preview_rect.x + crop.x,
+            preview_rect.y + crop.y,
+            crop.width,
+            crop.height,
+        ),
+        preview,
+    )
+}
+
 /// Mouse press: overlays, terminal tabs, the graph, the tree and the editor.
 pub(super) fn handle_left_button_down(window: Hwnd, l_param: Lparam) -> Lresult {
     // A control shows the pressed look while the button stays down.
@@ -133,6 +187,34 @@ pub(super) fn handle_left_button_down(window: Hwnd, l_param: Lparam) -> Lresult 
         let left = area.right as f32 - 410.0 * scale;
         let top = 58.0 * scale;
         if x as f32 >= left && x as f32 <= area.right as f32 - 20.0 * scale && y as f32 >= top {
+            let preview_rect = background_preview_rect(&area, scale);
+            if preview_rect.contains((x as f64, y as f64)) {
+                let image = RENDERER.with(|renderer| {
+                    renderer
+                        .borrow()
+                        .as_ref()
+                        .and_then(DirectEditorRenderer::background_size)
+                });
+                if let Some(image) = image {
+                    let handle = APP.with(|cell| {
+                        let app = cell.borrow();
+                        let (crop, _) = background_crop_on_screen(&app, &area, scale, image);
+                        background_core::handle_at(
+                            &crop,
+                            (x as f64, y as f64),
+                            (12.0 * scale) as f64,
+                        )
+                    });
+                    if let Some(handle) = handle {
+                        APP.with(|cell| {
+                            cell.borrow_mut().background_drag = Some((handle, x, y));
+                        });
+                        unsafe { SetCapture(window) };
+                    }
+                }
+                invalidate(window);
+                return 0;
+            }
             APP.with(|cell| {
                 let mut app = cell.borrow_mut();
                 let local_y = (y as f32 - top) / scale;
@@ -148,17 +230,17 @@ pub(super) fn handle_left_button_down(window: Hwnd, l_param: Lparam) -> Lresult 
                     }
                 } else if (224.0..278.0).contains(&local_y) {
                     app.font_search_focused = true;
-                } else if (278.0..448.0).contains(&local_y) {
+                } else if (278.0..380.0).contains(&local_y) {
                     let visible = ((local_y - 278.0) / 34.0).floor() as usize;
                     if let Some(index) = app.filtered_font_indices().get(visible).copied() {
                         app.code_font_family = index;
                         app.status = format!("Editor font: {}", WindowsAppState::CODE_FONTS[index]);
                     }
-                } else if (448.0..502.0).contains(&local_y) {
+                } else if (380.0..434.0).contains(&local_y) {
                     if let Some(path) = platform::choose_background(window) {
                         app.background_path = Some(path);
                     }
-                } else if (502.0..556.0).contains(&local_y) {
+                } else if (580.0..634.0).contains(&local_y) {
                     let local_x = (x as f32 - left) / (390.0 * scale);
                     if local_x < 0.25 {
                         app.background_opacity = (app.background_opacity - 0.05).max(0.05);
@@ -169,11 +251,13 @@ pub(super) fn handle_left_button_down(window: Hwnd, l_param: Lparam) -> Lresult 
                     } else {
                         app.background_zoom = (app.background_zoom + 0.1).min(3.0);
                     }
-                } else if (556.0..610.0).contains(&local_y) {
+                } else if (634.0..680.0).contains(&local_y) {
                     app.background_path = None;
-                } else if local_y >= 610.0 {
+                    app.background_drag = None;
+                } else if local_y >= 680.0 {
                     app.settings_open = false;
                     app.font_search_focused = false;
+                    app.background_drag = None;
                 }
                 app.save_preferences();
             });
@@ -621,6 +705,19 @@ pub(super) fn handle_left_button_down(window: Hwnd, l_param: Lparam) -> Lresult 
 /// Mouse release: finishes selections and drags.
 pub(super) fn handle_left_button_up(window: Hwnd) -> Lresult {
     APP.with(|cell| cell.borrow_mut().pointer_pressed = false);
+    let background_dragging = APP.with(|cell| {
+        let mut app = cell.borrow_mut();
+        let dragging = app.background_drag.take().is_some();
+        if dragging {
+            app.save_preferences();
+        }
+        dragging
+    });
+    if background_dragging {
+        unsafe { ReleaseCapture() };
+        invalidate(window);
+        return 0;
+    }
     let terminal_dragging = APP.with(|cell| {
         let mut app = cell.borrow_mut();
         let dragging = app.terminal_dragging;
@@ -671,6 +768,64 @@ pub(super) fn handle_mouse_move(window: Hwnd, w_param: Wparam, l_param: Lparam) 
         app.pointer_x = x;
         app.pointer_y = y;
     });
+    let background_dragging = APP.with(|cell| cell.borrow().background_drag.is_some());
+    if background_dragging && w_param & 1 != 0 {
+        let mut area = unsafe { std::mem::zeroed::<Rect>() };
+        unsafe { GetClientRect(window, &mut area) };
+        let scale = platform::dpi_for_window(window) as f32 / 96.0;
+        let image = RENDERER.with(|renderer| {
+            renderer
+                .borrow()
+                .as_ref()
+                .and_then(DirectEditorRenderer::background_size)
+        });
+        if let Some(image) = image {
+            APP.with(|cell| {
+                let mut app = cell.borrow_mut();
+                let Some((handle, last_x, last_y)) = app.background_drag else {
+                    return;
+                };
+                let view = background_view_size(&app, &area, scale);
+                let placed = background_core::placement(
+                    image,
+                    view,
+                    app.background_zoom as f64,
+                    (
+                        app.background_offset_x as f64,
+                        app.background_offset_y as f64,
+                    ),
+                );
+                let crop = placed.crop(view, image);
+                let preview_rect = background_preview_rect(&area, scale);
+                let preview = background_core::preview_placement(
+                    image,
+                    (preview_rect.width, preview_rect.height),
+                );
+                let delta = (
+                    (x - last_x) as f64 / preview.scale,
+                    (y - last_y) as f64 / preview.scale,
+                );
+                let edit = background_core::drag_crop(
+                    &crop,
+                    handle,
+                    delta,
+                    image,
+                    view,
+                    (image.0.min(image.1) * 0.05).max(8.0),
+                );
+                app.background_zoom = edit.zoom as f32;
+                app.background_offset_x = edit.offset.0 as f32;
+                app.background_offset_y = edit.offset.1 as f32;
+                app.background_drag = Some((handle, x, y));
+                app.status = format!(
+                    "Crop {:.0}×{:.0} at {:.0},{:.0} · zoom {:.1}×",
+                    edit.crop.width, edit.crop.height, edit.crop.x, edit.crop.y, edit.zoom
+                );
+            });
+            invalidate(window);
+        }
+        return 0;
+    }
     if terminal_dragging && w_param & 1 != 0 {
         let mut area = unsafe { std::mem::zeroed::<Rect>() };
         unsafe { GetClientRect(window, &mut area) };

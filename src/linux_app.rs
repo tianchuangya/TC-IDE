@@ -1216,8 +1216,7 @@ impl App {
     ) -> Option<(background_core::Rect, background_core::Placement)> {
         self.background_image_size()?;
         let (_, _, width, height) = self.background_preview_rect();
-        let preview =
-            background_core::placement(image, (width as f64, height as f64), 1.0, (0.0, 0.0));
+        let preview = background_core::preview_placement(image, (width as f64, height as f64));
         let view = self.background_view_size();
         let placed = background_core::placement(
             image,
@@ -1268,8 +1267,7 @@ impl App {
             return;
         };
         let (_, _, width, height) = self.background_preview_rect();
-        let preview =
-            background_core::placement(image, (width as f64, height as f64), 1.0, (0.0, 0.0));
+        let preview = background_core::preview_placement(image, (width as f64, height as f64));
         let Some((crop, _)) = self.background_crop_box(image) else {
             return;
         };
@@ -1302,8 +1300,7 @@ impl App {
         let s = |v| self.s(v);
         let (px, py, width, height) = self.background_preview_rect();
         self.rect(self.colors.bg, px, py, width, height);
-        let preview =
-            background_core::placement(image, (width as f64, height as f64), 1.0, (0.0, 0.0));
+        let preview = background_core::preview_placement(image, (width as f64, height as f64));
         unsafe {
             cairo_save(self.cairo);
             cairo_rectangle(

@@ -11,8 +11,8 @@
 - 项目：**TC-IDE**，原生 Rust 多平台 IDE，**零第三方运行时依赖**（Linux 手写 X11/Cairo/Pango FFI，Windows 用 `windows` crate 但仅 cfg 内，macOS 手写 Objective-C 运行时 FFI，没有 WebView / 没有 HTML）。
 - 三个后端：`linux_app.rs`（成熟）、`windows_app.rs` + `windows_app/`（成熟，14 个模块）、`macos_app.rs`（**最近 7 轮从 5 行占位发展到 4585 行可用后端**）。
 - 共享纯逻辑内核（跨平台、在 Linux 上就能跑单元测试）：`editor_core`、`editor_session`、`graph_core`、`terminal_core`、`text_buffer`、`session_core`、`workspace_core`、`ai_core`、`extension_core`、`lsp_core`、`dap_core`、`syntax_core`、`index_core`、`motion_core`、`package_motion`、`background_core`、`theme_core`，共 **17 个**，全部在 `main.rs` 声明，并被 `tests/platform_boundary.rs` 守着（禁止平台类型/`unsafe` 泄漏进共享核心）。
-- 本地测试：**233 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试**（`cargo test --all-targets`），另有只在各平台 CI 里跑的 Windows/macOS 专属测试。
-- 任务队列（`docs/HANDOFF.md` 第 5 节）：**39 项已勾选 / 4 项部分完成 / 0 项未开始**。
+- 本地测试：**234 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试**（`cargo test --all-targets`），另有只在各平台 CI 里跑的 Windows/macOS 专属测试。
+- 任务队列（`docs/HANDOFF.md` 第 5 节）：**40 项已勾选 / 3 项部分完成 / 0 项未开始**。
 - 当前 CI 已恢复全绿：`ba427f2` 的 format / Linux / Windows typecheck / Windows / macOS 五个 job 全部通过。
 
 ---
@@ -103,12 +103,11 @@ docs/
 
 ## 4. 任务队列状态（`docs/HANDOFF.md` 第 5 节）
 
-**39 已勾选 / 4 部分完成 / 0 未开始**。仍以 `docs/HANDOFF.md` 中的逐项说明为准。
+**40 已勾选 / 3 部分完成 / 0 未开始**。仍以 `docs/HANDOFF.md` 中的逐项说明为准。
 
 | 编号（文件行号） | 主题 | 已做 | 还差 |
 | --- | --- | --- | --- |
 | 165 | 语义关系 | `syntax_core` 语言感知操作、接收者（`SelfRef`/`Type`/`Value`）、跨文件解析、构造绑定、`DeclarationRef`、置信度 | **一般表达式与返回类型分析**（仍不建真正的语法树） |
-| 201 | 背景图裁剪框 | Linux 完成（可视化预览 + 拖拽 + 缩放） | Windows 浮层预览/拖拽 |
 | 203 | 控件状态 | 共享控件状态模型 + Linux 完成（悬停/按下/禁用/焦点环）；macOS 设置面板也用上了 | Windows 设置/扩展浮层仍是"只有悬停" |
 | 208 | macOS 原生后端 | 窗口、绘制、着色、编辑、标签、剪贴板、打开面板、访达、菜单、实测字宽、**终端**、关系图、设置、扩展工具链 | Metal 渲染、直接 CoreText 排版、打包面板；**以及真机观感确认** |
 
@@ -171,7 +170,7 @@ CI（`.github/workflows/build.yml`）五个 job：`format`、`linux`（测试 + 
 
 ## 8. 建议的下一步（按性价比排序）
 
-1. **补齐 Windows 的两个半边**：背景图裁剪浮层，以及设置/扩展浮层的按下、禁用、键盘焦点状态。
+1. **补齐 Windows 控件状态**：设置/扩展浮层的按下、禁用、键盘焦点状态。
 2. **语义分析增量（165）**：给 `syntax_core` 加最小可用的一般表达式/返回类型推断（例如记录 `fn` 的返回类型，让 `let x = self.build(); x.prepare()` 能解析），并保持全部在共享核心里、有单元测试。
 3. **macOS 打包/构建面板**。
 4. **macOS Metal/CoreText**：工作量最大、本机最不可验证（本机只能类型检查 + 靠 CI 的 macOS runner 跑自检），建议放在最后，且先做"能跑起来、有自检断言"的最小版本。

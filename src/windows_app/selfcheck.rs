@@ -479,6 +479,24 @@ pub(super) fn self_check() -> i32 {
         placed.scale > 0.0 && crop.height < 1000.0 && crop.width <= 2000.0,
         &mut failures,
     );
+    let preview = background_core::preview_placement((2000.0, 1000.0), (400.0, 300.0));
+    let on_screen = preview.project(&crop);
+    let edited = background_core::drag_crop(
+        &crop,
+        background_core::Handle::Inside,
+        (40.0, 0.0),
+        (2000.0, 1000.0),
+        (800.0, 800.0),
+        40.0,
+    );
+    report(
+        "the background crop preview can be dragged",
+        preview.drawn == (400.0, 200.0)
+            && preview.origin.1 == 50.0
+            && on_screen.width > 0.0
+            && edited.crop.x > crop.x,
+        &mut failures,
+    );
 
     println!(
         "TC-IDE self check: {checks} checks, {} failed",
