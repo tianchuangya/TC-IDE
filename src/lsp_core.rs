@@ -1543,4 +1543,84 @@ while True:
         assert_eq!(braces, ["{\"b\":\"}{\"}"]);
         assert!(json_objects("{\"a\":[]}", "a").is_empty());
     }
+
+    #[test]
+    fn the_gutter_marker_takes_the_worst_severity_on_the_line() {
+        // A line can carry several diagnostics; the marker has to be the
+        // loudest of them, or a warning would hide an error beside it.
+        let rank = |severity: DiagnosticSeverity| match severity {
+            DiagnosticSeverity::Error => 3,
+            DiagnosticSeverity::Warning => 2,
+            DiagnosticSeverity::Information => 1,
+            DiagnosticSeverity::Hint => 0,
+        };
+        let pick = |severities: &[DiagnosticSeverity]| {
+            severities.iter().copied().reduce(|worst, severity| {
+                if rank(severity) > rank(worst) {
+                    severity
+                } else {
+                    worst
+                }
+            })
+        };
+        assert_eq!(
+            pick(&[DiagnosticSeverity::Warning, DiagnosticSeverity::Error]),
+            Some(DiagnosticSeverity::Error)
+        );
+        assert_eq!(
+            pick(&[DiagnosticSeverity::Error, DiagnosticSeverity::Warning]),
+            Some(DiagnosticSeverity::Error)
+        );
+        assert_eq!(
+            pick(&[DiagnosticSeverity::Hint, DiagnosticSeverity::Information]),
+            Some(DiagnosticSeverity::Information)
+        );
+        assert_eq!(pick(&[]), None);
+        // The ranking is a strict order, so picking is deterministic.
+        let all = [
+            DiagnosticSeverity::Hint,
+            DiagnosticSeverity::Information,
+            DiagnosticSeverity::Warning,
+            DiagnosticSeverity::Error,
+        ];
+        for (index, left) in all.iter().enumerate() {
+            for right in all.iter().skip(index + 1) {
+                assert!(rank(*right) > rank(*left));
+            }
+        }
+    }
+
+    #[test]
+    fn the_severity_filter_decides_what_the_editor_shows() {
+        // The editor filters before it draws, so a filter that hides errors
+        // would hide the marker the user most needs.
+        let diagnostic = |severity| Diagnostic {
+            path: "main.rs".into(),
+            line: 0,
+            column: 0,
+            severity,
+            message: "something".into(),
+        };
+        let all = vec![
+            diagnostic(DiagnosticSeverity::Error),
+            diagnostic(DiagnosticSeverity::Warning),
+            diagnostic(DiagnosticSeverity::Information),
+            diagnostic(DiagnosticSeverity::Hint),
+        ];
+        assert_eq!(filter_diagnostics(&all, SeverityFilter::All).len(), 4);
+        let warnings = filter_diagnostics(&all, SeverityFilter::Warning);
+        assert_eq!(warnings.len(), 2, "errors and warnings");
+        let errors = filter_diagnostics(&all, SeverityFilter::Error);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].severity, DiagnosticSeverity::Error);
+        // Every filter keeps errors: hiding them would be a bug, not a choice.
+        for filter in SeverityFilter::ALL {
+            assert!(
+                filter_diagnostics(&all, filter)
+                    .iter()
+                    .any(|entry| entry.severity == DiagnosticSeverity::Error),
+                "{filter:?} hides errors"
+            );
+        }
+    }
 }

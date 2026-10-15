@@ -761,6 +761,15 @@ struct App {
     /// pointer was when it was grabbed.
     background_drag: Option<(background_core::Handle, i32, i32)>,
     graph_relation: graph_core::GraphRelation,
+    /// Language server for the active file, when one is installed.
+    language_server: Option<lsp_core::LanguageServer>,
+    /// Diagnostics the server last published, and the file they describe.
+    lsp_diagnostics: Vec<lsp_core::Diagnostic>,
+    lsp_diagnostic_file: String,
+    /// Severity the user asked to see.
+    lsp_severity: lsp_core::SeverityFilter,
+    /// When the document last changed, so the server is not told every key.
+    lsp_last_change: Option<Instant>,
     /// Whether the AI panel is open, and whether it has the keyboard.
     ai_open: bool,
     ai_focused: bool,
@@ -3245,6 +3254,9 @@ impl App {
                 self.remember_session();
                 let opened = self.files[self.selected_file].name.clone();
                 self.status_message = format!("{} {opened}", self.tr("Opened", "已打开"));
+                // A server for the file that was just opened, if one is
+                // installed; a missing one only says so.
+                self.ensure_language_server();
             }
             Err(error) => {
                 self.status_message = format!(
@@ -3267,6 +3279,9 @@ impl App {
             .file_name()
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_else(|| "TC-IDE".into());
+        // A server belongs to the project it indexed, so a new project gets a
+        // new one rather than answers about the old tree.
+        self.shutdown_language_server();
         self.project_path = Some(folder.clone());
         self.project_name = name.clone();
         self.session.open(Some(folder), name.clone());
@@ -3513,6 +3528,7 @@ impl App {
             self.draw_build_animation();
         }
         self.draw_status();
+        self.draw_diagnostic_status();
         cairo_surface_flush(self.cairo_surface);
         XCopyArea(
             self.display,
@@ -4254,6 +4270,16 @@ impl App {
                 break;
             }
             self.text(self.colors.line, left + s(15), y, &(index + 1).to_string());
+            // A marker in the gutter for a line the server complained about,
+            // in the colour of the worst severity on it.
+            if self.diagnostics_on_line(index) > 0 {
+                let colour = match self.worst_severity_on_line(index) {
+                    Some(lsp_core::DiagnosticSeverity::Error) => self.colors.preprocessor,
+                    Some(lsp_core::DiagnosticSeverity::Warning) => self.colors.literal,
+                    _ => self.colors.muted,
+                };
+                self.rect(colour, left + s(4), y - s(14), s(4), s(14));
+            }
             if let Some(conditional) = self.breakpoint_mark(index) {
                 // A conditional breakpoint may not stop at all, so it is drawn
                 // in a different colour from one that always stops, with a
@@ -5863,6 +5889,43 @@ impl App {
                 ));
                 true
             }
+            "diagnostics" => {
+                // A file with what a server would have said about it, so the
+                // gutter markers and the status line can be inspected without
+                // a language server installed.
+                self.files = vec![FileBuffer::new(
+                    "main.rs".into(),
+                    PathBuf::from("/tmp/tc-ide-preview/main.rs"),
+                    vec![
+                        "use std::collections::HashMap;".into(),
+                        "fn main() {".into(),
+                        "    let unused = 3;".into(),
+                        "    let x: usize = \"text\";".into(),
+                        "    println!(\"{}\", x);".into(),
+                        "}".into(),
+                    ],
+                )];
+                self.selected_file = 0;
+                self.caret_line = 3;
+                self.lsp_diagnostic_file = self.active_breakpoint_path();
+                self.lsp_diagnostics = vec![
+                    lsp_core::Diagnostic {
+                        path: self.lsp_diagnostic_file.clone(),
+                        line: 2,
+                        column: 8,
+                        severity: lsp_core::DiagnosticSeverity::Warning,
+                        message: "unused variable: `unused`".into(),
+                    },
+                    lsp_core::Diagnostic {
+                        path: self.lsp_diagnostic_file.clone(),
+                        line: 3,
+                        column: 17,
+                        severity: lsp_core::DiagnosticSeverity::Error,
+                        message: "mismatched types: expected `usize`, found `&str`".into(),
+                    },
+                ];
+                true
+            }
             "ai-panel" => {
                 // A conversation and a prompt, so the panel can be inspected
                 // without an endpoint to talk to.
@@ -6513,6 +6576,188 @@ impl App {
         }
         parts.push(self.files[self.selected_file].lines[end.0][..end.1].to_string());
         parts.join("\n")
+    }
+
+    /// Start the language server for the active file, when one is installed.
+    ///
+    /// The server is started lazily: opening a project should not spawn a rust
+    /// analyzer for a file nobody has touched.
+    fn ensure_language_server(&mut self) {
+        let name = self.files[self.selected_file].name.clone();
+        let Some(spec) = lsp_core::server_for_file(&name) else {
+            self.shutdown_language_server();
+            return;
+        };
+        // Already running for this file and language: only tell it what changed.
+        let path = self.active_breakpoint_path();
+        let text = self.document_text();
+        if let Some(server) = self.language_server.as_mut() {
+            if server.spec().program == spec.program {
+                let _ = server.change_document(&path, &text);
+                return;
+            }
+        }
+        self.shutdown_language_server();
+        if !lsp_core::executable_available(&spec.program) {
+            self.lsp_diagnostics.clear();
+            self.status_message = format!("{} is not installed for {name}", spec.program);
+            return;
+        }
+        let root = self.project_path.clone().unwrap_or_else(projects_root);
+        match lsp_core::LanguageServer::start(&spec, &root) {
+            Ok(mut server) => {
+                if server.initialize().is_err() || server.notify_initialized().is_err() {
+                    self.status_message = format!("{} did not answer initialize", spec.program);
+                    return;
+                }
+                if let Err(error) = server.open_document(&path, &text) {
+                    self.status_message = error;
+                    return;
+                }
+                self.status_message = format!("{} started for {name}", spec.program);
+                self.language_server = Some(server);
+                self.lsp_diagnostics.clear();
+            }
+            Err(error) => self.status_message = error,
+        }
+    }
+
+    /// Stop the server and forget what it told us.
+    fn shutdown_language_server(&mut self) {
+        let path = self.active_breakpoint_path();
+        if let Some(server) = self.language_server.as_mut() {
+            let _ = server.close_document(&path);
+        }
+        self.language_server = None;
+        self.lsp_diagnostics.clear();
+    }
+
+    /// Collect what the server has said since the last frame.
+    ///
+    /// The server sends diagnostics on its own schedule, so they are read once
+    /// a frame rather than waited for.
+    fn poll_language_server(&mut self) {
+        // The file is read before the server is borrowed, because the events
+        // arrive from the server and the path comes from the editor.
+        let path = self.active_breakpoint_path();
+        let Some(server) = self.language_server.as_mut() else {
+            return;
+        };
+        let mut published = None;
+        while let Some(message) = server.try_message() {
+            // A server asks questions of its own; answering keeps it working.
+            if server.answer_automatically(&message) {
+                continue;
+            }
+            if lsp_core::message_method(&message).as_deref()
+                == Some("textDocument/publishDiagnostics")
+            {
+                published = Some(lsp_core::parse_diagnostics(&message));
+            }
+        }
+        if let Some(diagnostics) = published {
+            self.lsp_diagnostics = diagnostics;
+            self.lsp_diagnostic_file = path;
+        }
+    }
+
+    /// Tell the server the document changed, a moment after typing stops.
+    ///
+    /// Sending every keystroke would make a real server re-analyse on every
+    /// character, so the change waits until the typing pauses.
+    fn sync_language_server(&mut self) {
+        if self.language_server.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        let due = self
+            .lsp_last_change
+            .map(|last| now.duration_since(last) >= Duration::from_millis(400))
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.lsp_last_change = Some(now);
+        let path = self.active_breakpoint_path();
+        let text = self.document_text();
+        if let Some(server) = self.language_server.as_mut() {
+            let _ = server.change_document(&path, &text);
+        }
+    }
+
+    /// Diagnostics of the open file that are worth showing.
+    fn visible_diagnostics(&self) -> Vec<lsp_core::Diagnostic> {
+        if self.lsp_diagnostic_file != self.active_breakpoint_path() {
+            return Vec::new();
+        }
+        lsp_core::filter_diagnostics(&self.lsp_diagnostics, self.lsp_severity)
+    }
+
+    /// Diagnostics on one line, for the marker beside it.
+    fn diagnostics_on_line(&self, line: usize) -> usize {
+        self.visible_diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.line as usize == line)
+            .count()
+    }
+
+    /// The worst severity reported on one line, which is the colour the marker
+    /// beside it takes.
+    fn worst_severity_on_line(&self, line: usize) -> Option<lsp_core::DiagnosticSeverity> {
+        let mut worst = None;
+        for diagnostic in self.visible_diagnostics() {
+            if diagnostic.line as usize != line {
+                continue;
+            }
+            let rank = |severity: lsp_core::DiagnosticSeverity| match severity {
+                lsp_core::DiagnosticSeverity::Error => 3,
+                lsp_core::DiagnosticSeverity::Warning => 2,
+                _ => 1,
+            };
+            if worst.map(|current| rank(diagnostic.severity) > rank(current)) != Some(false) {
+                worst = Some(diagnostic.severity);
+            }
+        }
+        worst
+    }
+
+    /// The diagnostic on the caret line, for the status bar.
+    fn diagnostic_at_caret(&self) -> Option<lsp_core::Diagnostic> {
+        self.visible_diagnostics()
+            .into_iter()
+            .find(|diagnostic| diagnostic.line as usize == self.caret_line)
+    }
+
+    /// The active document as one string, which is what a server is told.
+    fn document_text(&self) -> String {
+        self.files[self.selected_file].lines.join("\n")
+    }
+
+    /// Show the diagnostic on the caret line, if the server reported one.
+    ///
+    /// # Safety
+    /// Requires a live Cairo context.
+    unsafe fn draw_diagnostic_status(&self) {
+        let Some(diagnostic) = self.diagnostic_at_caret() else {
+            return;
+        };
+        let s = |v| self.s(v);
+        let colour = match diagnostic.severity {
+            lsp_core::DiagnosticSeverity::Error => self.colors.preprocessor,
+            lsp_core::DiagnosticSeverity::Warning => self.colors.literal,
+            _ => self.colors.muted,
+        };
+        let label = format!(
+            "{} {}",
+            match diagnostic.severity {
+                lsp_core::DiagnosticSeverity::Error => self.tr("error:", "错误："),
+                lsp_core::DiagnosticSeverity::Warning => self.tr("warning:", "警告："),
+                _ => self.tr("note:", "提示："),
+            },
+            diagnostic.message
+        );
+        let short: String = label.chars().take(120).collect();
+        self.text(colour, s(420), self.height - s(10), &short);
     }
 
     /// Undo the last edit of the active document.
@@ -9693,6 +9938,11 @@ pub fn run() {
             extension_upgrades: 0,
             background_drag: None,
             graph_relation: graph_core::GraphRelation::Follow,
+            language_server: None,
+            lsp_diagnostics: Vec::new(),
+            lsp_diagnostic_file: String::new(),
+            lsp_severity: lsp_core::SeverityFilter::All,
+            lsp_last_change: None,
             ai_open: false,
             ai_focused: false,
             ai_prompt: String::new(),
@@ -9750,6 +10000,8 @@ pub fn run() {
             }
             app.refresh_index();
             app.poll_ai_session();
+            app.poll_language_server();
+            app.sync_language_server();
             app.update_background();
             app.draw();
             let written = export_frame(&app, &path);
