@@ -473,4 +473,39 @@ mod tests {
         assert_eq!(stats.reparsed, 1);
         assert_eq!(stats.reused, 5);
     }
+
+    #[test]
+    fn the_index_hands_back_the_same_symbols_a_scan_would() {
+        use super::IncrementalIndex;
+        use crate::editor_core;
+        use crate::index_core::FileFingerprint;
+        // The graph reads its symbols out of the index to avoid scanning every
+        // frame, so the index has to agree with a scan about what is there.
+        let lines: Vec<String> = vec![
+            "struct Engine {}".to_string(),
+            "impl Engine {".to_string(),
+            "    fn run(&self) {}".to_string(),
+            "}".to_string(),
+            "fn build() -> Engine {".to_string(),
+            "    Engine {}".to_string(),
+            "}".to_string(),
+        ];
+        let mut index = IncrementalIndex::new();
+        index.refresh(
+            vec![FileFingerprint::new("main.rs", lines.len() as u64, 1)],
+            |_| Some(lines.clone()),
+        );
+        let scanned = editor_core::symbol_occurrences(&lines, "main.rs");
+        let indexed: Vec<_> = index
+            .file_symbols("main.rs")
+            .expect("the file is indexed")
+            .iter()
+            .map(|entry| entry.symbol.clone())
+            .collect();
+        assert_eq!(indexed, scanned, "the index must not lose or add a symbol");
+
+        // A file the index has never seen reports nothing, so the caller knows
+        // to scan rather than draw an empty graph.
+        assert!(index.file_symbols("other.rs").is_none());
+    }
 }
