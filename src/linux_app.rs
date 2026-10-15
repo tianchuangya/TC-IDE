@@ -509,6 +509,54 @@ enum PanelDrag {
     Terminal,
 }
 
+/// One row of the File menu.
+#[derive(Clone, PartialEq, Eq)]
+enum FileMenuRow {
+    /// A `New …` action.
+    Create(CreateKind),
+    /// Pick a file from the desktop's file chooser.
+    OpenFile,
+    /// Pick a folder and open it as the project.
+    OpenFolder,
+    /// A heading, drawn but not clickable.
+    Heading(&'static str, &'static str),
+    /// Reopen a project from the recent list.
+    Recent(PathBuf),
+}
+
+impl FileMenuRow {
+    /// Whether the row can be clicked.
+    fn is_action(&self) -> bool {
+        !matches!(self, FileMenuRow::Heading(..))
+    }
+}
+
+/// The rows of the File menu.
+///
+/// Drawing, hit testing and the keyboard all read this one list, so a row can
+/// never be drawn in one place and clicked in another.
+fn file_menu_rows(recent: &[PathBuf]) -> Vec<FileMenuRow> {
+    let mut rows = vec![
+        FileMenuRow::Heading("NEW", "新建"),
+        FileMenuRow::Create(CreateKind::Project),
+        FileMenuRow::Create(CreateKind::File),
+        FileMenuRow::Create(CreateKind::Folder),
+        FileMenuRow::Heading("OPEN", "打开"),
+        FileMenuRow::OpenFile,
+        FileMenuRow::OpenFolder,
+    ];
+    if !recent.is_empty() {
+        rows.push(FileMenuRow::Heading("RECENT", "最近"));
+        for path in recent.iter().take(4) {
+            rows.push(FileMenuRow::Recent(path.clone()));
+        }
+    }
+    rows
+}
+
+/// Height of one File menu row.
+const FILE_MENU_ROW: i32 = 30;
+
 #[derive(Clone, Copy)]
 struct Palette {
     bg: c_ulong,
@@ -1821,6 +1869,102 @@ impl App {
         XDrawLine(self.display, self.canvas, self.gc, a.0, a.1, b.0, b.1);
     }
 
+    /// The rectangle of the terminal's disclosure button.
+    ///
+    /// Drawing and hit testing read this, so the visible button is exactly the
+    /// region that folds the panel.
+    fn terminal_toggle_rect(&self) -> (i32, i32, i32, i32) {
+        let s = |v: i32| (v as f32 * self.scale()).round() as i32;
+        let expanded = self.terminal_height.clamp(s(150), self.height - s(150));
+        let panel_h =
+            s(28) + ((expanded - s(28)) as f32 * self.terminal_motion.value.clamp(0.0, 1.0)) as i32;
+        let top = self.height - panel_h;
+        (s(12), top + s(4), s(20), s(20))
+    }
+
+    /// Whether the pointer is over the terminal's disclosure button.
+    fn terminal_toggle_hovered(&self) -> bool {
+        let (x, y, w, h) = self.terminal_toggle_rect();
+        self.mouse_x >= x && self.mouse_x <= x + w && self.mouse_y >= y && self.mouse_y <= y + h
+    }
+
+    /// The rectangle of the call hierarchy panel's disclosure button.
+    fn graph_toggle_rect(&self) -> (i32, i32, i32, i32) {
+        let s = |v: i32| (v as f32 * self.scale()).round() as i32;
+        (self.graph_left() + s(10), s(58), s(20), s(20))
+    }
+
+    /// Whether the pointer is over the call hierarchy's disclosure button.
+    fn graph_toggle_hovered(&self) -> bool {
+        let (x, y, w, h) = self.graph_toggle_rect();
+        self.mouse_x >= x && self.mouse_x <= x + w && self.mouse_y >= y && self.mouse_y <= y + h
+    }
+
+    /// A disclosure control: a chevron in a small bordered button.
+    ///
+    /// A panel that can be folded has to say so. The `>` that used to be typed
+    /// into the terminal title was easy to miss, so this draws the control the
+    /// user is meant to press: a bordered hit target with a chevron that turns
+    /// from pointing right to pointing down, and an accent border on hover.
+    ///
+    /// # Safety
+    /// Requires a live Cairo context.
+    unsafe fn disclosure(&self, x: i32, y: i32, expanded: bool, hovered: bool, progress: f32) {
+        let s = |v| self.s(v);
+        let size = s(20);
+        self.rect(
+            if hovered {
+                self.colors.panel_2
+            } else {
+                self.colors.panel
+            },
+            x,
+            y,
+            size,
+            size,
+        );
+        self.outline(
+            if hovered {
+                self.colors.accent
+            } else {
+                self.colors.line
+            },
+            x,
+            y,
+            size,
+            size,
+        );
+        self.chevron_colored(
+            x + s(6),
+            y + s(6),
+            if expanded {
+                1.0
+            } else {
+                progress.clamp(0.0, 1.0)
+            },
+            if hovered {
+                self.colors.accent
+            } else {
+                self.colors.text
+            },
+        );
+    }
+
+    /// The chevron, in a colour the caller picks.
+    ///
+    /// # Safety
+    /// Requires a live Cairo context.
+    unsafe fn chevron_colored(&self, x: i32, y: i32, progress: f32, color: c_ulong) {
+        let s = |v| self.s(v);
+        let t = progress.clamp(0.0, 1.0);
+        let mix = |from: i32, to: i32| from + ((to - from) as f32 * t) as i32;
+        let a = (x + s(mix(0, 0)), y + s(mix(-4, -3)));
+        let b = (x + s(mix(5, 4)), y + s(mix(0, 2)));
+        let c = (x + s(mix(0, 8)), y + s(mix(4, -3)));
+        self.line(color, 2, a, b);
+        self.line(color, 2, b, c);
+    }
+
     unsafe fn chevron(&self, x: i32, y: i32, expanded: bool) {
         self.chevron_progress(x, y, if expanded { 1.0 } else { 0.0 });
     }
@@ -2354,6 +2498,129 @@ impl App {
         save_session(&self.session);
     }
 
+    /// Ask the desktop for a file and open it in the editor.
+    fn open_file_dialog(&mut self) {
+        let output = Command::new("zenity")
+            .args([
+                "--file-selection",
+                "--title=TC-IDE Open File",
+                "--file-filter=Sources | *.rs *.c *.h *.cpp *.hpp *.py *.js *.ts *.go *.java *.json *.md *.toml *.txt",
+                "--file-filter=All files | *",
+            ])
+            .output();
+        match output {
+            Ok(result) if result.status.success() => {
+                let path = String::from_utf8_lossy(&result.stdout).trim().to_string();
+                if !path.is_empty() {
+                    self.open_path(PathBuf::from(path));
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {
+                self.status_message = self
+                    .tr(
+                        "Install zenity to open a file",
+                        "需要安装 zenity 才能打开文件",
+                    )
+                    .into();
+            }
+        }
+    }
+
+    /// Ask the desktop for a folder and open it as the project.
+    fn open_folder_dialog(&mut self) {
+        let output = Command::new("zenity")
+            .args([
+                "--file-selection",
+                "--directory",
+                "--title=TC-IDE Open Folder",
+            ])
+            .output();
+        match output {
+            Ok(result) if result.status.success() => {
+                let path = String::from_utf8_lossy(&result.stdout).trim().to_string();
+                if !path.is_empty() {
+                    self.open_project_at(PathBuf::from(path));
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {
+                self.status_message = self
+                    .tr(
+                        "Install zenity to open a folder",
+                        "需要安装 zenity 才能打开文件夹",
+                    )
+                    .into();
+            }
+        }
+    }
+
+    /// Open one file, in a new tab when one is already open.
+    fn open_path(&mut self, path: PathBuf) {
+        if !path.is_file() {
+            self.status_message = self
+                .tr("That file no longer exists", "该文件已不存在")
+                .into();
+            return;
+        }
+        match fs::read_to_string(&path) {
+            Ok(content) => {
+                let name = path
+                    .file_name()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "untitled".into());
+                let mut lines = content.lines().map(str::to_string).collect::<Vec<_>>();
+                if lines.is_empty() {
+                    lines.push(String::new());
+                }
+                self.files.push(FileBuffer { name, path, lines });
+                self.selected_file = self.files.len() - 1;
+                self.caret_line = 0;
+                self.caret_column = 0;
+                self.remember_session();
+                let opened = self.files[self.selected_file].name.clone();
+                self.status_message = format!("{} {opened}", self.tr("Opened", "已打开"));
+            }
+            Err(error) => {
+                self.status_message = format!(
+                    "{}: {error}",
+                    self.tr("Could not read the file", "无法读取文件")
+                );
+            }
+        }
+    }
+
+    /// Make a folder the project and remember it.
+    fn open_project_at(&mut self, folder: PathBuf) {
+        if !folder.is_dir() {
+            self.status_message = self
+                .tr("That folder no longer exists", "该文件夹已不存在")
+                .into();
+            return;
+        }
+        let name = folder
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "TC-IDE".into());
+        self.project_path = Some(folder.clone());
+        self.project_name = name.clone();
+        self.session.open(Some(folder), name.clone());
+        self.remember_session();
+        self.status_message = format!("{} {name}", self.tr("Opened project", "已打开项目"));
+    }
+
+    /// Rows of the File menu, from the shared recent project list.
+    fn file_menu_rows(&self) -> Vec<FileMenuRow> {
+        file_menu_rows(self.session.recent_projects())
+    }
+
+    /// Vertical centre of one File menu row.
+    fn file_menu_row_y(&self, index: usize) -> i32 {
+        let s = |v: i32| (v as f32 * self.scale()).round() as i32;
+        let offset = self.overlay_offset(self.new_menu_motion);
+        s(43) + offset + s(24 + index as i32 * FILE_MENU_ROW)
+    }
+
     /// Restore the previous session: project first, then its documents.
     fn restore_session(&mut self) {
         let session = load_session();
@@ -2632,7 +2899,7 @@ impl App {
             s(88),
             s(27),
         );
-        self.text(self.colors.text, s(124), s(29), self.tr("New", "新建"));
+        self.text(self.colors.text, s(124), s(29), self.tr("File", "文件"));
         self.chevron(s(181), s(24), self.new_menu_open);
         self.outline(
             if self.edit_menu_open {
@@ -3100,24 +3367,65 @@ impl App {
         let s = |v| self.s(v);
         let x = s(112);
         let y = s(43) + self.overlay_offset(self.new_menu_motion);
-        let w = s(220);
-        let h = s(126);
-        self.floating_panel(x, y, w, h);
-        self.text(
-            self.colors.muted,
-            x + s(15),
-            y + s(23),
-            self.tr("CREATE", "新建"),
-        );
-        let labels = if self.ui_chinese {
-            ["新建项目", "新建文件", "新建文件夹"]
-        } else {
-            ["New Project", "New File", "New Folder"]
-        };
-        for (index, label) in labels.iter().enumerate() {
-            let row = y + s(50 + index as i32 * 30);
-            self.text(self.colors.text, x + s(18), row, label);
-            self.text(self.colors.muted, x + w - s(28), row, "+");
+        let w = s(300);
+        let rows = self.file_menu_rows();
+        let height = s(FILE_MENU_ROW * rows.len() as i32 + 12);
+        self.floating_panel(x, y, w, height);
+        for (index, row) in rows.iter().enumerate() {
+            let row_y = self.file_menu_row_y(index);
+            match row {
+                FileMenuRow::Heading(english, chinese) => {
+                    let label = if self.ui_chinese { *chinese } else { *english };
+                    self.text(self.colors.muted, x + s(15), row_y, label);
+                }
+                FileMenuRow::Create(kind) => {
+                    let label = match (kind, self.ui_chinese) {
+                        (CreateKind::Project, true) => "新建项目",
+                        (CreateKind::Project, false) => "New Project",
+                        (CreateKind::File, true) => "新建文件",
+                        (CreateKind::File, false) => "New File",
+                        (CreateKind::Folder, true) => "新建文件夹",
+                        (CreateKind::Folder, false) => "New Folder",
+                    };
+                    self.text(self.colors.text, x + s(18), row_y, label);
+                    self.text(self.colors.muted, x + w - s(28), row_y, "+");
+                }
+                FileMenuRow::OpenFile => {
+                    self.text(
+                        self.colors.text,
+                        x + s(18),
+                        row_y,
+                        self.tr("Open File…", "打开文件…"),
+                    );
+                }
+                FileMenuRow::OpenFolder => {
+                    self.text(
+                        self.colors.text,
+                        x + s(18),
+                        row_y,
+                        self.tr("Open Folder…", "打开文件夹…"),
+                    );
+                }
+                FileMenuRow::Recent(path) => {
+                    let label = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string());
+                    self.text(self.colors.text, x + s(18), row_y, &label);
+                    let parent = path
+                        .parent()
+                        .map(|value| value.display().to_string())
+                        .unwrap_or_default();
+                    let count = parent.chars().count();
+                    let short = if count > 22 {
+                        let tail: String = parent.chars().skip(count - 21).collect();
+                        format!("…{tail}")
+                    } else {
+                        parent
+                    };
+                    self.text(self.colors.muted, x + s(130), row_y, &short);
+                }
+            }
         }
     }
 
@@ -3519,9 +3827,16 @@ impl App {
         self.rect(self.colors.panel, x, s(46), w, self.height - s(70));
         self.line(self.colors.line, 1, (x, s(46)), (x, self.height - s(24)));
         self.line(self.colors.line, 1, (x, s(84)), (self.width, s(84)));
+        self.disclosure(
+            x + s(10),
+            s(58),
+            self.graph_visible,
+            self.graph_toggle_hovered(),
+            1.0,
+        );
         self.text(
             self.colors.text,
-            x + s(14),
+            x + s(38),
             s(71),
             self.tr("Call Hierarchy", "调用层级"),
         );
@@ -3877,15 +4192,19 @@ impl App {
         let top = self.height - panel_h;
         self.rect(self.colors.panel_2, 0, top, self.width, panel_h);
         self.line(self.colors.line, 1, (0, top), (self.width, top));
+        // A real disclosure button, instead of a `>` typed into the title.
+        self.disclosure(
+            s(12),
+            top + s(4),
+            terminal_progress > 0.5,
+            self.terminal_toggle_hovered(),
+            terminal_progress,
+        );
         self.text(
             self.colors.bright,
-            s(14),
+            s(40),
             top + s(20),
-            if terminal_progress > 0.5 {
-                self.tr("v  TERMINAL", "v  终端")
-            } else {
-                self.tr(">  TERMINAL", ">  终端")
-            },
+            self.tr("TERMINAL", "终端"),
         );
         self.text(
             self.colors.muted,
@@ -4742,6 +5061,18 @@ impl App {
                 self.view_menu_motion = UiMotion::new(1.0);
                 self.terminal_open = true;
                 self.terminal_motion = UiMotion::new(1.0);
+                true
+            }
+            "file-menu" => {
+                // The File menu with its New, Open and Recent sections, so the
+                // menu can be inspected without a pointer.
+                for name in ["tc-ide", "notes", "sandbox"] {
+                    let path = PathBuf::from(format!("/tmp/tc-ide-preview/{name}"));
+                    self.session.open(Some(path.clone()), name.to_string());
+                    self.session.remember_project(&path);
+                }
+                self.new_menu_open = true;
+                self.new_menu_motion = UiMotion::new(1.0);
                 true
             }
             "debug" => {
@@ -5923,6 +6254,14 @@ impl App {
             self.graph_scroll = (self.graph_scroll + 1).min(graph.max_scroll(rows));
             return;
         }
+        {
+            let (gx, gy, gw, gh) = self.graph_toggle_rect();
+            if self.graph_visible && x >= gx && x <= gx + gw && y >= gy && y <= gy + gh {
+                self.graph_visible = false;
+                self.status_message = self.tr("Call hierarchy hidden", "已隐藏调用层级").into();
+                return;
+            }
+        }
         if x >= s(112) && x <= s(200) && y < s(46) {
             self.new_menu_open = !self.new_menu_open;
             self.edit_menu_open = false;
@@ -6016,24 +6355,30 @@ impl App {
         }
         if self.new_menu_open {
             let menu_x = s(112);
-            let menu_y = s(43);
-            if x >= menu_x && x <= menu_x + s(220) && y >= menu_y && y <= menu_y + s(126) {
-                for (index, kind) in [CreateKind::Project, CreateKind::File, CreateKind::Folder]
-                    .iter()
-                    .enumerate()
-                {
-                    let row = menu_y + s(50 + index as i32 * 30);
-                    if (y - row).abs() <= s(14) {
-                        self.create_kind = Some(*kind);
-                        self.new_file_name.clear();
-                        self.create_caret = 0;
-                        self.project_location_focused = false;
-                        self.status_message = self.tr("Enter a name", "请输入名称").into();
-                        self.new_menu_open = false;
-                        return;
-                    }
+            let menu_w = s(300);
+            let rows = self.file_menu_rows();
+            for (index, row) in rows.iter().enumerate() {
+                if !row.is_action() {
+                    continue;
                 }
-                return;
+                let row_y = self.file_menu_row_y(index);
+                if x >= menu_x && x <= menu_x + menu_w && (y - row_y).abs() <= s(14) {
+                    self.new_menu_open = false;
+                    match row {
+                        FileMenuRow::Create(kind) => {
+                            self.create_kind = Some(*kind);
+                            self.new_file_name.clear();
+                            self.create_caret = 0;
+                            self.project_location_focused = false;
+                            self.status_message = self.tr("Enter a name", "请输入名称").into();
+                        }
+                        FileMenuRow::OpenFile => self.open_file_dialog(),
+                        FileMenuRow::OpenFolder => self.open_folder_dialog(),
+                        FileMenuRow::Recent(path) => self.open_project_at(path.clone()),
+                        FileMenuRow::Heading(..) => {}
+                    }
+                    return;
+                }
             }
             self.new_menu_open = false;
         }
@@ -6299,7 +6644,13 @@ impl App {
                 self.terminal_focused = true;
                 return;
             }
-            if y <= terminal_top + s(30) && x < s(120) {
+            let (tx, ty, tw, th) = self.terminal_toggle_rect();
+            if x >= tx && x <= tx + tw && y >= ty && y <= ty + th {
+                self.terminal_open = false;
+                self.terminal_focused = false;
+                return;
+            }
+            if y <= terminal_top + s(30) && x < s(160) {
                 self.terminal_open = false;
                 self.terminal_focused = false;
                 return;
@@ -8776,5 +9127,52 @@ mod tests {
             // An unknown pixel still produces something readable.
             assert_eq!(palette_colour_of(&colors, &palette, 9999), palette.text);
         }
+    }
+
+    #[test]
+    fn the_file_menu_lists_new_open_and_recent_projects() {
+        let recent = vec![
+            PathBuf::from("/home/me/tc-ide"),
+            PathBuf::from("/home/me/notes"),
+        ];
+        let rows = file_menu_rows(&recent);
+        // The three creation entries stay where they were.
+        assert!(rows.contains(&FileMenuRow::Create(CreateKind::Project)));
+        assert!(rows.contains(&FileMenuRow::Create(CreateKind::File)));
+        assert!(rows.contains(&FileMenuRow::Create(CreateKind::Folder)));
+        // Opening is part of the same menu instead of a separate button.
+        assert!(rows.contains(&FileMenuRow::OpenFile));
+        assert!(rows.contains(&FileMenuRow::OpenFolder));
+        // The recent projects are listed, newest first.
+        let listed = rows
+            .iter()
+            .filter_map(|row| match row {
+                FileMenuRow::Recent(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(listed, recent);
+
+        // Headings are drawn but never clicked, so a stray click between rows
+        // cannot start an action.
+        assert_eq!(rows.iter().filter(|row| !row.is_action()).count(), 3);
+
+        // Without a recent list the section is left out entirely.
+        let bare = file_menu_rows(&[]);
+        assert!(!bare.iter().any(|row| matches!(row, FileMenuRow::Recent(_))));
+        assert_eq!(bare.iter().filter(|row| !row.is_action()).count(), 2);
+        assert!(bare.len() < rows.len());
+
+        // A long list is capped so the menu cannot grow past the window.
+        let many = (0..40)
+            .map(|index| PathBuf::from(format!("/tmp/project-{index}")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            file_menu_rows(&many)
+                .iter()
+                .filter(|row| matches!(row, FileMenuRow::Recent(_)))
+                .count(),
+            4
+        );
     }
 }
