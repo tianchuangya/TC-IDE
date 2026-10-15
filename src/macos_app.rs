@@ -3665,7 +3665,8 @@ fn self_check() -> i32 {
         "the probe decides what is installed",
         yes.formatter_installed
             && !yes.server_installed
-            && yes.summary().contains("rustfmt")
+            && yes.summary().contains("rust-analyzer")
+            && !yes.summary().contains("format: rustfmt")
             && !none.formatter_installed
             && none.marks() == "· · ·"
             && yes.marks() == "· ✓ ·",
