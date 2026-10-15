@@ -18,6 +18,7 @@ use crate::dap_core;
 use crate::editor_core;
 use crate::extension_core;
 use crate::graph_core;
+use crate::index_core;
 use crate::lsp_core;
 use crate::motion_core;
 use crate::package_motion;
@@ -708,6 +709,9 @@ struct App {
     graph_fraction: f32,
     panel_drag: Option<PanelDrag>,
     breakpoints: dap_core::Breakpoints,
+    /// Incremental index of the open files, so the graph is not rescanned
+    /// on every frame.
+    project_index: index_core::IncrementalIndex,
     /// Terminal cells the pointer has selected, when there are any.
     terminal_selection: Option<terminal_core::TerminalSelection>,
     /// Whether the pointer is dragging a terminal selection.
@@ -2600,6 +2604,31 @@ impl App {
         true
     }
 
+    /// The project index, rebuilt only when the open files change.
+    ///
+    /// The relation graph is drawn every frame, and scanning every open file
+    /// on every frame cost more than a frame has: twelve files of three
+    /// hundred lines took about a hundred and forty milliseconds, so the
+    /// window fell to single figure frames a second while the panel was open.
+    /// The fingerprints say which files changed, so the rest are reused.
+    fn refresh_index(&mut self) {
+        let fingerprints = self
+            .files
+            .iter()
+            .map(|file| {
+                let bytes = file.lines.iter().map(|line| line.len() as u64 + 1).sum();
+                index_core::FileFingerprint::new(file.name.clone(), bytes, file.lines.len() as u64)
+            })
+            .collect::<Vec<_>>();
+        let contents = self
+            .files
+            .iter()
+            .map(|file| (file.name.clone(), file.lines.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        self.project_index
+            .refresh(fingerprints, |path| contents.get(path).cloned());
+    }
+
     /// Rows the debug panel would show right now.
     fn debug_panel_rows(&self) -> Vec<dap_core::DebugRow> {
         dap_core::debug_rows(&self.debug_state, self.debug_frame)
@@ -2982,16 +3011,9 @@ impl App {
             1 => graph_core::GraphScope::Folder,
             _ => graph_core::GraphScope::Project,
         };
-        // Declarations of the open files, with their owners, so the relation
-        // graph can resolve a callee in another file.
-        let declarations = self
-            .files
-            .iter()
-            .flat_map(|file| {
-                let scan = syntax_core::scan(&file.lines, &file.name);
-                syntax_core::declaration_refs(&scan, &file.name)
-            })
-            .collect::<Vec<_>>();
+        // Declarations come from the incremental index rather than a fresh
+        // scan of every open file, because this runs once per frame.
+        let declarations = self.project_index.declarations();
         let inputs = graph_core::GraphInputs {
             project_name: &self.project_name,
             current_file,
@@ -9191,6 +9213,7 @@ pub fn run() {
             graph_fraction: 0.39,
             panel_drag: None,
             breakpoints: dap_core::Breakpoints::new(),
+            project_index: index_core::IncrementalIndex::new(),
             terminal_selection: None,
             terminal_selecting: false,
             breakpoint_prompt: None,
@@ -9256,6 +9279,7 @@ pub fn run() {
                     eprintln!("TC-IDE: unknown render scene {scene}, drawing the editor");
                 }
             }
+            app.refresh_index();
             app.update_background();
             app.draw();
             let written = export_frame(&app, &path);
@@ -9334,6 +9358,7 @@ pub fn run() {
                     _ => {}
                 }
             }
+            app.refresh_index();
             app.update_background();
             app.draw();
             let used = began.elapsed();

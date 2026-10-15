@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn the_first_refresh_parses_every_file() {
-        let mut index = IncrementalIndex::new();
+        let mut index = super::IncrementalIndex::new();
         let stats = index.refresh(
             vec![fingerprint("src/a.rs", 1), fingerprint("src/b.rs", 1)],
             |path| match path {
@@ -421,5 +421,56 @@ mod tests {
 
         index.clear();
         assert!(index.declarations().is_empty());
+    }
+
+    #[test]
+    fn the_project_index_reuses_files_that_did_not_change() {
+        // What the graph does per frame: hand the index the fingerprints and
+        // let it re-parse only what changed.
+        let mut index = IncrementalIndex::new();
+        let files: Vec<Vec<String>> = (0..6)
+            .map(|f| (0..50).map(|i| format!("fn f{f}_{i}() {{}}")).collect())
+            .collect();
+        let fingerprints: Vec<super::FileFingerprint> = files
+            .iter()
+            .enumerate()
+            .map(|(f, lines)| {
+                super::FileFingerprint::new(format!("f{f}.rs"), lines.len() as u64, 1)
+            })
+            .collect();
+
+        let mut reads = 0;
+        let stats = index.refresh(fingerprints.clone(), |path| {
+            reads += 1;
+            let index = path.trim_start_matches('f').trim_end_matches(".rs");
+            index.parse::<usize>().ok().map(|i| files[i].clone())
+        });
+        assert_eq!(stats.reparsed, 6);
+        assert_eq!(reads, 6, "the first frame reads everything");
+        let declarations = index.declarations().len();
+        assert!(declarations >= 6);
+
+        // A second frame with the same fingerprints reads nothing at all, which
+        // is what makes the per frame cost of the graph affordable.
+        let mut reads_again = 0;
+        let stats = index.refresh(fingerprints.clone(), |_| {
+            reads_again += 1;
+            None
+        });
+        assert_eq!(reads_again, 0, "an unchanged frame must not read a file");
+        assert_eq!(stats.reused, 6);
+        assert_eq!(index.declarations().len(), declarations);
+
+        // One file changing re-parses one file, not six.
+        let mut changed = fingerprints.clone();
+        changed[3] = super::FileFingerprint::new("f3.rs", 999, 2);
+        let mut reads_changed = 0;
+        let stats = index.refresh(changed, |_| {
+            reads_changed += 1;
+            Some(files[3].clone())
+        });
+        assert_eq!(reads_changed, 1);
+        assert_eq!(stats.reparsed, 1);
+        assert_eq!(stats.reused, 5);
     }
 }
