@@ -76,6 +76,9 @@
 
 ### macOS 后端
 
+- 扩展与工具链面板：`⌘E` 打开并用共享 `extension_core::language_tools` + `lsp_core::executable_available`
+  真机探测七种语言的 LSP/格式化/调试是否安装，回车重探并列出缺失项，`⌘⇧F` 通过共享
+  `workspace_core::format_command` 把格式化命令送进终端执行。
 - 代码着色：代码列按共享 `editor_core::syntax_tokens` 逐 token 绘制，关键字/字面量/注释取共享调色板颜色
   （浅色主题用修正过的深色 token 配色），横向滚动按列切片。
 - 设置面板：`⌘,` 打开，控件用共享 `theme_core::control()` 的正常/悬停/按下/禁用状态与焦点环，

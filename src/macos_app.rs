@@ -24,7 +24,9 @@ use std::time::Instant;
 
 use crate::editor_core;
 use crate::editor_session;
+use crate::extension_core;
 use crate::graph_core::{self, Graph, GraphNode, GraphRelation, GraphScope};
+use crate::lsp_core;
 use crate::motion_core;
 use crate::syntax_core;
 use crate::terminal_core::{
@@ -1225,6 +1227,156 @@ fn save_preferences(preferences: &workspace_core::Preferences) -> Result<PathBuf
     Ok(path)
 }
 
+// ---------------------------------------------------------------------------
+// Extensions and tooling panel
+// ---------------------------------------------------------------------------
+
+/// Languages the tooling table knows, in the order the panel lists them.
+const EXTENSION_LANGUAGES: [&str; 7] = [
+    "Rust",
+    "Python",
+    "C",
+    "C++",
+    "Java",
+    "Go",
+    "TypeScript / JavaScript",
+];
+
+/// One row of the extensions panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ToolingRow {
+    language: String,
+    server: Option<String>,
+    formatter: Option<String>,
+    debugger: Option<String>,
+    server_installed: bool,
+    formatter_installed: bool,
+    debugger_installed: bool,
+}
+
+impl ToolingRow {
+    /// Build a row from the shared tooling table and a probe.
+    fn probe(language: &str, probe: impl Fn(&str) -> bool) -> Self {
+        let tools = extension_core::language_tools(language, probe);
+        Self {
+            language: tools.language.clone(),
+            server: tools.server.clone(),
+            formatter: tools.formatter.clone(),
+            debugger: tools.debugger.clone(),
+            server_installed: tools.server_installed,
+            formatter_installed: tools.formatter_installed,
+            debugger_installed: tools.debugger_installed,
+        }
+    }
+
+    /// `LSP`, `format` and `debug` columns, with a tick for what is installed.
+    fn marks(&self) -> String {
+        let mark = |installed: bool| if installed { "✓" } else { "·" };
+        format!(
+            "{} {} {}",
+            mark(self.server_installed),
+            mark(self.formatter_installed),
+            mark(self.debugger_installed)
+        )
+    }
+
+    /// What is missing, for the status line.
+    fn summary(&self) -> String {
+        let missing = [
+            ("LSP", self.server.as_deref(), self.server_installed),
+            (
+                "format",
+                self.formatter.as_deref(),
+                self.formatter_installed,
+            ),
+            ("debug", self.debugger.as_deref(), self.debugger_installed),
+        ]
+        .into_iter()
+        .filter(|(_, tool, installed)| tool.is_some() && !installed)
+        .map(|(label, tool, _)| format!("{label}: {}", tool.unwrap_or_default()))
+        .collect::<Vec<_>>();
+        if missing.is_empty() {
+            format!("{} tooling is complete", self.language)
+        } else {
+            format!("{} missing {}", self.language, missing.join(", "))
+        }
+    }
+}
+
+/// The view state of the extensions panel.
+struct ExtensionsPanel {
+    open: bool,
+    focused: bool,
+    focus: usize,
+    /// One row per language, probed when the panel opens.
+    rows: Vec<ToolingRow>,
+}
+
+impl ExtensionsPanel {
+    fn new() -> Self {
+        Self {
+            open: false,
+            focused: false,
+            focus: 0,
+            rows: Vec::new(),
+        }
+    }
+
+    /// Probe every language with the real executables on this machine.
+    fn probe_all(&mut self) {
+        self.rows = EXTENSION_LANGUAGES
+            .iter()
+            .map(|language| ToolingRow::probe(language, lsp_core::executable_available))
+            .collect();
+        self.focus = self.focus.min(self.rows.len().saturating_sub(1));
+    }
+
+    /// Probe one language again.
+    fn probe_one(&mut self, index: usize) {
+        let Some(language) = EXTENSION_LANGUAGES.get(index).copied() else {
+            return;
+        };
+        let row = ToolingRow::probe(language, lsp_core::executable_available);
+        if let Some(slot) = self.rows.get_mut(index) {
+            *slot = row;
+        }
+    }
+
+    /// The row a point of the panel is over.
+    fn row_at(y: f64, top: f64, rows: usize) -> Option<usize> {
+        let header = top + EXTENSIONS_HEADER_HEIGHT;
+        if y < header {
+            return None;
+        }
+        let row = ((y - header) / EXTENSIONS_ROW_HEIGHT).floor();
+        if row < 0.0 {
+            return None;
+        }
+        let row = row as usize;
+        if row < rows {
+            Some(row)
+        } else {
+            None
+        }
+    }
+
+    /// Move the selection within the list.
+    fn move_focus(&mut self, delta: i64) {
+        let count = self.rows.len() as i64;
+        if count == 0 {
+            return;
+        }
+        self.focus = (self.focus as i64 + delta).clamp(0, count - 1) as usize;
+    }
+}
+
+/// Height of the extensions panel header.
+const EXTENSIONS_HEADER_HEIGHT: f64 = 52.0;
+/// Height of one extensions row.
+const EXTENSIONS_ROW_HEIGHT: f64 = 32.0;
+/// Width of the extensions panel.
+const EXTENSIONS_WIDTH: f64 = 420.0;
+
 /// Index of the tab a point of the header is over.
 ///
 /// The tabs are a fixed width strip starting at the left margin, which keeps the
@@ -1280,6 +1432,11 @@ enum MacCommand {
     SettingNext,
     SettingPrevious,
     SettingUse,
+    ToggleExtensions,
+    ExtensionNext,
+    ExtensionPrevious,
+    ExtensionProbe,
+    FormatFile,
 }
 
 /// Map a key code and modifiers to an editor command.
@@ -1321,6 +1478,9 @@ fn key_command(key_code: u16, command: bool, shift: bool) -> Option<MacCommand> 
         5 if command => Some(MacCommand::ToggleGraph),
         // ⌘, opens the settings, as it does in every macOS application.
         43 if command => Some(MacCommand::ToggleSettings),
+        // ⌘E opens the tooling panel, ⌘⇧F formats the current file.
+        14 if command => Some(MacCommand::ToggleExtensions),
+        3 if command && shift => Some(MacCommand::FormatFile),
         // The panel owns these while it has the keyboard.
         _ => None,
     }
@@ -1350,6 +1510,8 @@ fn command_for_menu_action(action: &str) -> Option<MacCommand> {
         "tcGraphRelation:" => Some(MacCommand::GraphRelation),
         "tcGraphScope:" => Some(MacCommand::GraphScope),
         "tcSettings:" => Some(MacCommand::ToggleSettings),
+        "tcExtensions:" => Some(MacCommand::ToggleExtensions),
+        "tcFormat:" => Some(MacCommand::FormatFile),
         _ => None,
     }
 }
@@ -1374,6 +1536,8 @@ struct MacShell {
     graph: GraphPanel,
     /// The settings panel.
     settings: SettingsPanel,
+    /// The extensions and tooling panel.
+    extensions: ExtensionsPanel,
     /// The pointer, for hover and pressed states.
     mouse: (f64, f64),
     mouse_pressed: bool,
@@ -1411,6 +1575,7 @@ impl MacShell {
             started: Instant::now(),
             graph: GraphPanel::new(),
             settings: SettingsPanel::new(),
+            extensions: ExtensionsPanel::new(),
             mouse: (0.0, 0.0),
             mouse_pressed: false,
             project: None,
@@ -1558,6 +1723,11 @@ impl MacShell {
             MacCommand::ToggleSettings => self.toggle_settings(),
             MacCommand::SettingNext => self.step_settings_focus(true),
             MacCommand::SettingPrevious => self.step_settings_focus(false),
+            MacCommand::ToggleExtensions => self.toggle_extensions(),
+            MacCommand::ExtensionNext => self.extensions.move_focus(1),
+            MacCommand::ExtensionPrevious => self.extensions.move_focus(-1),
+            MacCommand::ExtensionProbe => self.probe_selected_language(),
+            MacCommand::FormatFile => self.format_current_file(),
             MacCommand::SettingUse => {
                 if let Some(control) = self.settings.focus {
                     self.activate_setting(control);
@@ -1885,6 +2055,75 @@ impl MacShell {
         }
     }
 
+    /// Show or hide the extensions panel, probing the tools when it opens.
+    fn toggle_extensions(&mut self) {
+        self.extensions.open = !self.extensions.open;
+        self.extensions.focused = self.extensions.open;
+        if self.extensions.open {
+            self.extensions.probe_all();
+            let languages = self.extensions.rows.len();
+            self.status = format!("Tooling for {languages} language(s) probed");
+        } else {
+            self.status = "Extensions closed".into();
+        }
+    }
+
+    /// Probe the selected language again and report what is missing.
+    fn probe_selected_language(&mut self) {
+        let index = self.extensions.focus;
+        self.extensions.probe_one(index);
+        self.status = match self.extensions.rows.get(index) {
+            Some(row) => row.summary(),
+            None => "No language selected".into(),
+        };
+    }
+
+    /// Type the formatter command of the current file into the terminal.
+    fn format_current_file(&mut self) {
+        let name = self.session.document().name.clone();
+        let language = editor_core::language_for_file(&name);
+        let Some(command) = workspace_core::format_command(language, &name) else {
+            self.status = format!("No formatter is configured for {language}");
+            return;
+        };
+        if self.terminal.is_none() {
+            self.toggle_terminal();
+        }
+        let Some(terminal) = self.terminal.as_mut() else {
+            self.status = "The terminal could not be started".into();
+            return;
+        };
+        terminal.open = true;
+        terminal.pty.send(&format!("{command}\n"));
+        terminal.scroll_to_bottom();
+        self.terminal_focused = true;
+        self.status = format!("Formatting {name} with {command}");
+    }
+
+    /// Rectangle of the extensions panel in view coordinates.
+    fn extensions_rect(&self) -> CGRect {
+        CGRect::new(
+            (self.view_width() - EXTENSIONS_WIDTH).max(0.0) * 0.5,
+            12.0,
+            EXTENSIONS_WIDTH,
+            EXTENSIONS_HEADER_HEIGHT
+                + EXTENSIONS_ROW_HEIGHT * EXTENSION_LANGUAGES.len() as f64
+                + 12.0,
+        )
+    }
+
+    /// The language row under a point of the view.
+    fn extensions_row_at(&self, x: f64, y: f64) -> Option<usize> {
+        if !self.extensions.open {
+            return None;
+        }
+        let panel = self.extensions_rect();
+        if !panel.contains(CGPoint { x, y }) {
+            return None;
+        }
+        ExtensionsPanel::row_at(y, panel.y, self.extensions.rows.len())
+    }
+
     /// Step everything that moves in one frame and collect what the shell wrote.
     fn tick(&mut self) {
         self.session.tick();
@@ -2118,6 +2357,14 @@ impl MacShell {
             return;
         }
         self.mouse = (x, y);
+        if let Some(row) = self.extensions_row_at(x, y) {
+            self.extensions.focused = true;
+            self.extensions.focus = row;
+            if let Some(entry) = self.extensions.rows.get(row) {
+                self.status = format!("{}  {}", entry.language, entry.marks());
+            }
+            return;
+        }
         if let Some(control) = self.settings_control_at(x, y) {
             self.settings.pressed = Some(control);
             self.settings.focus = Some(control);
@@ -2359,6 +2606,92 @@ unsafe fn draw_frame(shell: &mut MacShell) {
                 CGRect::new(x, y, 2.0, (step - 4.0).max(1.0)),
                 palette.bright,
                 0.35 + 0.65 * pulse as f64,
+            );
+        }
+    }
+
+    // The extensions and tooling panel, in front of the editor.
+    if shell.extensions.open {
+        let panel = shell.extensions_rect();
+        fill_rect(panel, palette.background, 0.96);
+        fill_rect(
+            CGRect::new(panel.x, panel.y, panel.width, 1.0),
+            palette.border,
+            1.0,
+        );
+        draw_text(
+            "LANGUAGES & TOOLING",
+            panel.x + 16.0,
+            panel.y + 16.0,
+            14.0,
+            palette.bright,
+            false,
+        );
+        draw_text(
+            "LSP · format · debug",
+            panel.x + 16.0,
+            panel.y + 34.0,
+            11.0,
+            palette.muted,
+            false,
+        );
+        if shell.extensions.rows.is_empty() {
+            draw_text(
+                "Opening the panel probes the tools on this machine",
+                panel.x + 16.0,
+                panel.y + EXTENSIONS_HEADER_HEIGHT + 4.0,
+                11.0,
+                palette.muted,
+                false,
+            );
+        }
+        for (index, row) in shell.extensions.rows.iter().enumerate() {
+            let y = panel.y + EXTENSIONS_HEADER_HEIGHT + index as f64 * EXTENSIONS_ROW_HEIGHT;
+            let selected = shell.extensions.focused && index == shell.extensions.focus;
+            if selected {
+                fill_rect(
+                    CGRect::new(
+                        panel.x + 8.0,
+                        y,
+                        panel.width - 16.0,
+                        EXTENSIONS_ROW_HEIGHT - 4.0,
+                    ),
+                    palette.selection,
+                    1.0,
+                );
+            }
+            draw_text(
+                &row.language,
+                panel.x + 16.0,
+                y + 7.0,
+                12.0,
+                if selected {
+                    palette.bright
+                } else {
+                    palette.text
+                },
+                false,
+            );
+            draw_text(
+                &row.marks(),
+                panel.x + 210.0,
+                y + 8.0,
+                11.0,
+                palette.accent,
+                false,
+            );
+            draw_text(
+                &format!(
+                    "{}  {}  {}",
+                    row.server.as_deref().unwrap_or("—"),
+                    row.formatter.as_deref().unwrap_or("—"),
+                    row.debugger.as_deref().unwrap_or("—"),
+                ),
+                panel.x + 264.0,
+                y + 8.0,
+                11.0,
+                palette.muted,
+                false,
             );
         }
     }
@@ -2672,6 +3005,29 @@ unsafe extern "C" fn editor_key_down(_view: Id, _selector: Sel, event: Id) {
         }
         // While the graph has the keyboard it takes the keys the editor would
         // otherwise use, so a fold never turns into a line break.
+        if shell.extensions.open && shell.extensions.focused {
+            match key_code {
+                125 => {
+                    shell.apply(MacCommand::ExtensionNext);
+                    return;
+                }
+                126 => {
+                    shell.apply(MacCommand::ExtensionPrevious);
+                    return;
+                }
+                36 | 76 => {
+                    shell.apply(MacCommand::ExtensionProbe);
+                    return;
+                }
+                53 => {
+                    shell.extensions.open = false;
+                    shell.extensions.focused = false;
+                    shell.status = "Extensions closed".into();
+                    return;
+                }
+                _ => {}
+            }
+        }
         if shell.settings.open {
             match key_code {
                 48 => {
@@ -2883,6 +3239,8 @@ unsafe fn install_menu_bar() {
         ("Toggle Terminal", "tcToggleTerminal:", "j"),
         ("Relation Graph", "tcToggleGraph:", "g"),
         ("Settings…", "tcSettings:", ","),
+        ("Extensions & Tooling…", "tcExtensions:", "e"),
+        ("Format File", "tcFormat:", "F"),
     ] {
         let item = menu_item(title, action, key, target);
         msg_void_id(edit_menu, "addItem:", item);
@@ -3275,6 +3633,91 @@ fn self_check() -> i32 {
         shell.session.documents().len() == 1 && shell.session.active() == 0,
         &mut failures,
     );
+    // The tooling panel probes the real executables through the shared table.
+    shell.apply(MacCommand::ToggleExtensions);
+    report(
+        "the tooling panel probes every known language",
+        shell.extensions.open && shell.extensions.rows.len() == EXTENSION_LANGUAGES.len(),
+        &mut failures,
+    );
+    let rust_row = shell
+        .extensions
+        .rows
+        .iter()
+        .find(|row| row.language == "Rust")
+        .cloned();
+    report(
+        "a probed row names its tools and their marks",
+        rust_row
+            .as_ref()
+            .map(|row| {
+                row.server.as_deref() == Some("rust-analyzer")
+                    && row.formatter.as_deref() == Some("rustfmt")
+                    && row.marks().split(' ').count() == 3
+                    && row.summary().contains("Rust")
+            })
+            .unwrap_or(false),
+        &mut failures,
+    );
+    let yes = ToolingRow::probe("Rust", |tool| tool == "rustfmt");
+    let none = ToolingRow::probe("Rust", |_| false);
+    report(
+        "the probe decides what is installed",
+        yes.formatter_installed
+            && !yes.server_installed
+            && yes.summary().contains("rustfmt")
+            && !none.formatter_installed
+            && none.marks() == "· · ·"
+            && yes.marks() == "· ✓ ·",
+        &mut failures,
+    );
+    // The probe itself is behavioural: a tool that exists is found, one that
+    // cannot exist is not.
+    report(
+        "the tool probe looks at the real machine",
+        lsp_core::executable_available("sh")
+            && !lsp_core::executable_available("tc-ide-no-such-tool"),
+        &mut failures,
+    );
+    let format = workspace_core::format_command("Rust", "main.rs");
+    report(
+        "formatting uses the shared command",
+        format.as_deref() == Some("rustfmt \"main.rs\"")
+            && workspace_core::format_command("Markdown", "README.md").is_none(),
+        &mut failures,
+    );
+    shell.extensions.move_focus(1);
+    let moved = shell.extensions.focus;
+    shell.extensions.move_focus(-9);
+    report(
+        "the language selection moves and clamps",
+        moved == 1
+            && shell.extensions.focus == 0
+            && ExtensionsPanel::row_at(
+                EXTENSIONS_HEADER_HEIGHT + 4.0,
+                0.0,
+                EXTENSION_LANGUAGES.len(),
+            ) == Some(0)
+            && ExtensionsPanel::row_at(EXTENSIONS_HEADER_HEIGHT - 1.0, 0.0, 7).is_none()
+            && ExtensionsPanel::row_at(
+                EXTENSIONS_HEADER_HEIGHT + EXTENSIONS_ROW_HEIGHT * 7.0,
+                0.0,
+                7,
+            )
+            .is_none(),
+        &mut failures,
+    );
+    report(
+        "the tooling panel has a shortcut and a menu item",
+        key_command(14, true, false) == Some(MacCommand::ToggleExtensions)
+            && key_command(3, true, true) == Some(MacCommand::FormatFile)
+            && command_for_menu_action("tcExtensions:") == Some(MacCommand::ToggleExtensions)
+            && command_for_menu_action("tcFormat:") == Some(MacCommand::FormatFile),
+        &mut failures,
+    );
+    shell.extensions.open = false;
+    shell.extensions.focused = false;
+
     // The code column is drawn per syntax token, from the shared tokenizer and
     // the shared palette.
     let dark_palette = theme_core::Palette::dark();
@@ -4046,6 +4489,88 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_tooling_rows_describe_what_is_installed() {
+        let complete = ToolingRow::probe("Rust", |_| true);
+        assert!(complete.server_installed && complete.formatter_installed);
+        assert_eq!(complete.marks(), "✓ ✓ ✓");
+        assert!(complete.summary().contains("complete"));
+
+        let partial = ToolingRow::probe("Rust", |tool| tool == "rustfmt");
+        assert!(!partial.server_installed && partial.formatter_installed);
+        assert_eq!(partial.marks(), "· ✓ ·");
+        assert!(partial.summary().contains("rust-analyzer"));
+
+        let none = ToolingRow::probe("Rust", |_| false);
+        assert_eq!(none.marks(), "· · ·");
+        assert!(none.summary().contains("format"));
+
+        // A language without tools still has a row.
+        let unknown = ToolingRow::probe("Markdown", |_| true);
+        assert!(unknown.server.is_none() && unknown.formatter.is_none());
+        assert_eq!(unknown.marks(), "· · ·");
+    }
+
+    #[test]
+    fn the_tooling_rows_are_mapped_and_bounded() {
+        let mut panel = ExtensionsPanel::new();
+        assert!(panel.rows.is_empty());
+        panel.rows = EXTENSION_LANGUAGES
+            .iter()
+            .map(|language| ToolingRow::probe(language, |_| false))
+            .collect();
+        assert_eq!(panel.rows.len(), EXTENSION_LANGUAGES.len());
+        panel.move_focus(1);
+        assert_eq!(panel.focus, 1);
+        panel.move_focus(100);
+        assert_eq!(panel.focus, EXTENSION_LANGUAGES.len() - 1);
+        panel.move_focus(-100);
+        assert_eq!(panel.focus, 0);
+
+        assert_eq!(
+            ExtensionsPanel::row_at(EXTENSIONS_HEADER_HEIGHT + 4.0, 0.0, 7),
+            Some(0)
+        );
+        assert_eq!(
+            ExtensionsPanel::row_at(
+                EXTENSIONS_HEADER_HEIGHT + EXTENSIONS_ROW_HEIGHT + 4.0,
+                0.0,
+                7
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            ExtensionsPanel::row_at(EXTENSIONS_HEADER_HEIGHT - 1.0, 0.0, 7),
+            None
+        );
+        assert_eq!(
+            ExtensionsPanel::row_at(
+                EXTENSIONS_HEADER_HEIGHT + EXTENSIONS_ROW_HEIGHT * 7.0,
+                0.0,
+                7
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_tooling_commands_are_mapped() {
+        assert_eq!(
+            key_command(14, true, false),
+            Some(MacCommand::ToggleExtensions)
+        );
+        assert_eq!(key_command(3, true, true), Some(MacCommand::FormatFile));
+        assert_eq!(key_command(3, true, false), None);
+        assert_eq!(
+            command_for_menu_action("tcExtensions:"),
+            Some(MacCommand::ToggleExtensions)
+        );
+        assert_eq!(
+            command_for_menu_action("tcFormat:"),
+            Some(MacCommand::FormatFile)
+        );
     }
 
     #[test]
