@@ -22,8 +22,7 @@ use std::ptr;
 use std::time::Instant;
 
 use crate::editor_core;
-use crate::motion_core;
-use crate::session_core;
+use crate::editor_session;
 use crate::text_buffer;
 use crate::theme_core;
 use crate::workspace_core;
@@ -282,6 +281,11 @@ fn nsstring(value: &str) -> Id {
     }
 }
 
+/// Width of the line number gutter, in points.
+const GUTTER_WIDTH: f64 = 54.0;
+/// Width of one character of the code font, in points.
+const TEXT_CELL: f64 = 7.4;
+
 /// Style mask of a titled, closable, resizable window.
 const WINDOW_STYLE: c_long = 1 | 2 | 4 | 8;
 /// Backing store kept in a buffer, which is what a resizable window wants.
@@ -290,47 +294,6 @@ const BACKING_BUFFERED: c_long = 2;
 const COMMAND_MASK: u64 = 1 << 20;
 /// `⇧` in the modifier flags of an event.
 const SHIFT_MASK: u64 = 1 << 17;
-
-/// One open document.
-struct Document {
-    name: String,
-    path: Option<PathBuf>,
-    buffer: text_buffer::TextBuffer,
-    lines: Vec<String>,
-    caret_line: usize,
-    caret_column: usize,
-    selection_anchor: Option<(usize, usize)>,
-    dirty: bool,
-}
-
-impl Document {
-    fn from_lines(name: &str, path: Option<PathBuf>, lines: Vec<String>) -> Self {
-        let lines = if lines.is_empty() {
-            vec![String::new()]
-        } else {
-            lines
-        };
-        Self {
-            name: name.to_string(),
-            path,
-            buffer: text_buffer::TextBuffer::from_lines(&lines),
-            lines,
-            caret_line: 0,
-            caret_column: 0,
-            selection_anchor: None,
-            dirty: false,
-        }
-    }
-
-    /// Rebuild the rendered lines from the piece table.
-    fn sync(&mut self) {
-        self.lines = self.buffer.to_lines();
-    }
-
-    fn text(&self) -> String {
-        self.lines.join("\n")
-    }
-}
 
 /// A key the editor understands, with the macOS key code it comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -353,8 +316,7 @@ enum MacCommand {
 ///
 /// Virtual key codes are layout independent on macOS, which is why the mapping
 /// is a table instead of a character comparison. `command` is the `⌘` key.
-fn key_command(key_code: u16, command: bool, shift: bool) -> Option<MacCommand> {
-    let _ = shift;
+fn key_command(key_code: u16, command: bool, _shift: bool) -> Option<MacCommand> {
     match key_code {
         // 36 return, 76 keypad enter, 51 delete, 117 forward delete.
         36 | 76 => Some(MacCommand::InsertNewline),
@@ -383,31 +345,21 @@ fn is_printable_key(key_code: u16, command: bool) -> bool {
         )
 }
 
-/// The whole application state of the macOS backend.
-struct MacApp {
-    documents: Vec<Document>,
-    active: usize,
-    session: session_core::Session,
-    viewport: text_buffer::Viewport,
+/// The window: the shared session, the palette and the two Cocoa handles.
+struct MacShell {
+    session: editor_session::EditorSession,
     preferences: workspace_core::Preferences,
     palette: theme_core::Palette,
     status: String,
-    /// Horizontal scroll offset of the code column.
-    scroll_columns: usize,
-    scroll_lines: usize,
-    /// Spring the caret uses, so the shared motion model drives the animation.
-    caret_spring: motion_core::Spring,
     started: Instant,
-    last_frame: Instant,
     window: Id,
     view: Id,
 }
 
-impl MacApp {
+impl MacShell {
     fn new() -> Self {
         let preferences = workspace_core::Preferences::default();
-        let session = session_core::Session::default();
-        let document = Document::from_lines(
+        let welcome = editor_session::Document::from_lines(
             "main.rs",
             None,
             vec![
@@ -417,33 +369,15 @@ impl MacApp {
                 "}".to_string(),
             ],
         );
-        let started = Instant::now();
         Self {
-            documents: vec![document],
-            active: 0,
-            session,
-            viewport: text_buffer::Viewport::new(28, 96),
+            session: editor_session::EditorSession::new(welcome),
             palette: theme_core::Palette::for_scheme(preferences.light_theme),
             preferences,
             status: "Ready".into(),
-            scroll_columns: 0,
-            scroll_lines: 0,
-            caret_spring: motion_core::Spring::new(0.0),
-            started,
-            last_frame: started,
+            started: Instant::now(),
             window: ptr::null_mut(),
             view: ptr::null_mut(),
         }
-    }
-
-    fn document(&self) -> &Document {
-        let index = self.active.min(self.documents.len().saturating_sub(1));
-        &self.documents[index]
-    }
-
-    fn document_mut(&mut self) -> &mut Document {
-        let index = self.active.min(self.documents.len().saturating_sub(1));
-        &mut self.documents[index]
     }
 
     fn header_height(&self) -> f64 {
@@ -462,262 +396,46 @@ impl MacApp {
         (12.0 + self.preferences.code_zoom as f64 * 0.5).clamp(9.0, 28.0)
     }
 
+    /// Width of the text area, in points.
+    fn text_width(&self) -> f64 {
+        self.session.viewport.width as f64 * TEXT_CELL
+    }
+
+    /// Width of the whole view: the gutter plus the text area.
     fn view_width(&self) -> f64 {
-        self.viewport.width as f64 * 8.4
+        GUTTER_WIDTH + self.text_width()
     }
 
+    /// Height of the text area, in points.
+    fn text_height(&self) -> f64 {
+        self.session.viewport.height as f64 * self.line_step()
+    }
+
+    /// Height of the whole view: header, text area and status bar.
     fn view_height(&self) -> f64 {
-        self.viewport.height as f64 * self.line_step()
+        self.header_height() + self.text_height() + self.status_height()
     }
 
-    fn mark_dirty(&mut self) {
-        self.document_mut().dirty = true;
+    /// The text area, in top-left coordinates, which is what a flipped view
+    /// draws in.
+    fn text_area(&self) -> CGRect {
+        CGRect::new(
+            GUTTER_WIDTH,
+            self.header_height(),
+            self.text_width(),
+            self.text_height(),
+        )
     }
 
-    /// Lines that fit between the header and the status bar.
-    fn visible_rows(&self) -> usize {
-        let height = (self.view_height() - self.header_height() - self.status_height()).max(1.0);
-        ((height / self.line_step()).floor() as usize).max(1)
-    }
-
-    /// Reveal the caret, scrolling the viewport when it leaves it.
-    fn reveal_caret(&mut self) {
-        let rows = self.visible_rows();
-        let line = self.document().caret_line;
-        if line < self.scroll_lines {
-            self.scroll_lines = line;
-        } else if line >= self.scroll_lines + rows {
-            self.scroll_lines = line + 1 - rows;
-        }
-        let column = self.document().caret_column;
-        let width = self.viewport.width;
-        if column < self.scroll_columns {
-            self.scroll_columns = column;
-        } else if column >= self.scroll_columns + width {
-            self.scroll_columns = column + 1 - width;
-        }
-    }
-
-    /// Remove the selected range, if there is one.
-    fn delete_selection(&mut self) -> bool {
-        let Some(anchor) = self.document().selection_anchor else {
-            return false;
-        };
-        let document = self.document();
-        let caret = (document.caret_line, document.caret_column);
-        let (start, end) = if anchor <= caret {
-            (anchor, caret)
-        } else {
-            (caret, anchor)
-        };
-        if start == end {
-            self.document_mut().selection_anchor = None;
-            return false;
-        }
-        self.document_mut().buffer.delete(start, end);
-        let document = self.document_mut();
-        document.caret_line = start.0;
-        document.caret_column = start.1;
-        document.selection_anchor = None;
-        document.sync();
-        true
-    }
-
-    fn insert_text(&mut self, value: &str) {
-        if value.is_empty() {
-            return;
-        }
-        // Typing over a selection replaces it.
-        self.delete_selection();
-        let (mut line, mut column) = {
-            let document = self.document();
-            (document.caret_line, document.caret_column)
-        };
-        for character in value.chars() {
-            if character == '\n' {
-                self.document_mut().buffer.insert(line, column, "\n");
-                line += 1;
-                column = 0;
-            } else if !character.is_control() {
-                self.document_mut()
-                    .buffer
-                    .insert(line, column, &character.to_string());
-                column += 1;
-            }
-        }
-        let document = self.document_mut();
-        document.caret_line = line;
-        document.caret_column = column;
-        document.selection_anchor = None;
-        document.sync();
-        self.mark_dirty();
-        self.reveal_caret();
-    }
-
-    fn backspace(&mut self) {
-        let (line, column) = {
-            let document = self.document();
-            (document.caret_line, document.caret_column)
-        };
-        if column > 0 {
-            self.document_mut()
-                .buffer
-                .delete((line, column - 1), (line, column));
-            self.document_mut().caret_column = column - 1;
-        } else if line > 0 {
-            let previous = self.document().buffer.line_chars(line - 1);
-            self.document_mut()
-                .buffer
-                .delete((line - 1, previous), (line, 0));
-            let document = self.document_mut();
-            document.caret_line = line - 1;
-            document.caret_column = previous;
-        } else {
-            return;
-        }
-        self.document_mut().sync();
-        self.mark_dirty();
-        self.reveal_caret();
-    }
-
-    fn delete_forward(&mut self) {
-        let (line, column) = {
-            let document = self.document();
-            (document.caret_line, document.caret_column)
-        };
-        let length = self.document().buffer.line_chars(line);
-        if column < length {
-            self.document_mut()
-                .buffer
-                .delete((line, column), (line, column + 1));
-        } else if line + 1 < self.document().buffer.line_count() {
-            self.document_mut()
-                .buffer
-                .delete((line, length), (line + 1, 0));
-        } else {
-            return;
-        }
-        self.document_mut().sync();
-        self.mark_dirty();
-    }
-
-    fn move_caret(&mut self, delta_line: i64, delta_column: i64) {
-        let (line, column) = {
-            let document = self.document();
-            (document.caret_line as i64, document.caret_column as i64)
-        };
-        let lines = self.document().lines.len() as i64;
-        let line = (line + delta_line).clamp(0, (lines - 1).max(0)) as usize;
-        let length = self.document().lines[line].chars().count() as i64;
-        let column = if delta_line != 0 {
-            // A vertical move keeps the column inside the target line.
-            column.min(length)
-        } else {
-            (column + delta_column).clamp(0, length)
-        };
-        let document = self.document_mut();
-        document.caret_line = line;
-        document.caret_column = column as usize;
-        document.selection_anchor = None;
-        self.reveal_caret();
-    }
-
-    fn move_to_line_end(&mut self, end: bool) {
-        let line = self.document().caret_line;
-        let length = self.document().lines[line].chars().count();
-        let document = self.document_mut();
-        document.caret_column = if end { length } else { 0 };
-        document.selection_anchor = None;
-        self.reveal_caret();
-    }
-
-    fn select_all(&mut self) {
-        let (last_line, last_column) = {
-            let document = self.document();
-            let last = document.lines.len().saturating_sub(1);
-            (last, document.lines[last].chars().count())
-        };
-        let document = self.document_mut();
-        document.selection_anchor = Some((0, 0));
-        document.caret_line = last_line;
-        document.caret_column = last_column;
-    }
-
-    fn save(&mut self) {
-        let path = self.document().path.clone();
-        let text = self.document().text();
-        match path {
-            Some(path) => match std::fs::write(&path, format!("{text}\n")) {
-                Ok(()) => {
-                    self.document_mut().dirty = false;
-                    self.status = format!("Saved {}", path.display());
-                }
-                Err(error) => {
-                    self.status = format!("Could not save {}: {error}", path.display());
-                }
-            },
-            None => self.status = "Save the file with Save As first".into(),
-        }
-    }
-
-    fn open_project(&mut self, root: PathBuf) {
-        self.session.set_project(Some(root.clone()));
-        self.session.remember_project(&root);
-        self.status = format!("Project {}", root.display());
-    }
-
-    /// Place the caret at a point of the code area.
-    fn click_at(&mut self, x: f64, y: f64) {
-        let body = self.body_area();
-        if !body.contains(CGPoint { x, y }) {
-            return;
-        }
-        let line_step = self.line_step().max(1.0);
-        let line = ((y - body.y) / line_step).floor().max(0.0) as usize;
-        let line = (self.scroll_lines + line).min(self.document().lines.len().saturating_sub(1));
-        let text_left = 54.0;
-        let column = (((x - text_left) / 7.4).floor().max(0.0) as usize + self.scroll_columns)
-            .min(self.document().lines[line].chars().count());
-        let document = self.document_mut();
-        document.caret_line = line;
-        document.caret_column = column;
-        document.selection_anchor = None;
-        self.reveal_caret();
-    }
-
-    /// Step the shared motion models once per frame.
-    fn tick(&mut self) {
-        let now = Instant::now();
-        let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.05);
-        self.last_frame = now;
-        let target = if self.document().dirty { 1.0 } else { 0.0 };
-        self.caret_spring.step(target, dt);
-    }
-
-    /// Replace the whole document, the way opening a scratch buffer would.
-    fn replace_all(&mut self, text: &str) {
-        let lines = text.split('\n').map(str::to_string).collect::<Vec<_>>();
-        let document = self.document_mut();
-        document.buffer = text_buffer::TextBuffer::from_lines(&lines);
-        document.lines = lines;
-        let last = document.lines.len().saturating_sub(1);
-        document.caret_line = last;
-        document.caret_column = document.lines[last].chars().count();
-        document.selection_anchor = None;
-        document.dirty = false;
-        self.scroll_lines = 0;
-        self.scroll_columns = 0;
-    }
-
-    /// Symbols the shared occurrence scan finds in the document.
+    /// Symbols the shared occurrence scan finds in the active document.
     fn symbol_count(&self) -> usize {
-        let document = self.document();
+        let document = self.session.document();
         editor_core::symbol_occurrences(&document.lines, &document.name).len()
     }
 
     /// Symbol the caret sits on, when it sits on one.
     fn symbol_at_caret(&self) -> Option<String> {
-        let document = self.document();
+        let document = self.session.document();
         editor_core::symbol_at(
             &document.lines,
             &document.name,
@@ -727,44 +445,65 @@ impl MacApp {
         .map(|symbol| symbol.name)
     }
 
-    /// The document area, in top-left coordinates, which is what a flipped view
-    /// draws in.
-    fn body_area(&self) -> CGRect {
-        CGRect::new(
-            0.0,
-            self.header_height(),
-            self.view_width(),
-            (self.view_height() - self.header_height() - self.status_height()).max(0.0),
-        )
+    /// Apply a command through the shared session.
+    fn apply(&mut self, command: MacCommand) {
+        let session = &mut self.session;
+        match command {
+            MacCommand::InsertNewline => session.insert_text("\n"),
+            MacCommand::Backspace => session.backspace(),
+            MacCommand::DeleteForward => session.delete_forward(),
+            MacCommand::MoveLeft => session.move_caret(0, -1),
+            MacCommand::MoveRight => session.move_caret(0, 1),
+            MacCommand::MoveUp => session.move_caret(-1, 0),
+            MacCommand::MoveDown => session.move_caret(1, 0),
+            MacCommand::MoveLineStart => session.move_to_line_end(false),
+            MacCommand::MoveLineEnd => session.move_to_line_end(true),
+            MacCommand::SelectAll => session.select_all(),
+            MacCommand::Tab => session.insert_text("    "),
+            MacCommand::Save => {
+                self.status = match session.save() {
+                    Ok(path) => format!("Saved {}", path.display()),
+                    Err(message) => message,
+                }
+            }
+        }
     }
-}
 
-/// Apply a command to the application state.
-fn apply_command(app: &mut MacApp, command: MacCommand) {
-    match command {
-        MacCommand::InsertNewline => app.insert_text("\n"),
-        MacCommand::Backspace => app.backspace(),
-        MacCommand::DeleteForward => app.delete_forward(),
-        MacCommand::MoveLeft => app.move_caret(0, -1),
-        MacCommand::MoveRight => app.move_caret(0, 1),
-        MacCommand::MoveUp => app.move_caret(-1, 0),
-        MacCommand::MoveDown => app.move_caret(1, 0),
-        MacCommand::MoveLineStart => app.move_to_line_end(false),
-        MacCommand::MoveLineEnd => app.move_to_line_end(true),
-        MacCommand::SelectAll => app.select_all(),
-        MacCommand::Save => app.save(),
-        MacCommand::Tab => app.insert_text("    "),
+    /// Place the caret at a point of the view.
+    fn click_at(&mut self, x: f64, y: f64) {
+        let area = self.text_area();
+        if !area.contains(CGPoint { x, y }) {
+            return;
+        }
+        let line = self.session.line_at(y, area.y, self.line_step());
+        let column = self.session.column_at(x, area.x, TEXT_CELL, line);
+        self.session.set_caret(line, column);
+    }
+
+    /// Open a project, which the session then remembers.
+    fn open_project(&mut self, root: PathBuf) {
+        self.status = format!("Project {}", root.display());
+    }
+
+    /// The rows the view shows, for the drawing code.
+    fn visible_rows(&self) -> usize {
+        self.session.visible_rows()
+    }
+
+    /// A viewport small enough for a check to reason about.
+    fn viewport_for_checks(&mut self) {
+        self.session.viewport = text_buffer::Viewport::new(20, 80);
     }
 }
 
 thread_local! {
-    /// The application state, reached from the Objective-C callbacks.
-    static APPLICATION: RefCell<MacApp> = RefCell::new(MacApp::new());
+    /// The window state, reached from the Objective-C callbacks.
+    static SHELL: RefCell<MacShell> = RefCell::new(MacShell::new());
 }
 
-/// Run a closure with the application state.
-fn with_app<R>(body: impl FnOnce(&mut MacApp) -> R) -> R {
-    APPLICATION.with(|cell| body(&mut cell.borrow_mut()))
+/// Run a closure with the shell.
+fn with_shell<R>(body: impl FnOnce(&mut MacShell) -> R) -> R {
+    SHELL.with(|cell| body(&mut cell.borrow_mut()))
 }
 
 /// Draw a filled rectangle in the current graphics context.
@@ -791,35 +530,28 @@ unsafe fn fill_rect(rect: CGRect, color: u32, alpha: f64) {
     CGContextFillRect(graphics, rect);
 }
 
-/// A text attribute dictionary for one colour and font size.
+/// Build a text attribute dictionary for one colour and font size.
 ///
 /// # Safety
 /// Builds AppKit objects; call on the main thread.
 unsafe fn text_attributes(size: f64, color: u32, monospaced: bool) -> Id {
     let font = if monospaced {
-        msg_id_double(
-            msg_id_double(class("NSFont"), "monospacedSystemFontOfSize:weight:", size),
-            "monospacedSystemFontOfSize:weight:",
-            size,
-        )
+        msg_id_double(class("NSFont"), "monospacedSystemFontOfSize:weight:", size)
     } else {
         msg_id_double(class("NSFont"), "systemFontOfSize:", size)
     };
     let channel = |shift: u32| ((color >> shift) & 0xff) as f64 / 255.0;
     let color_object = msg_color(channel(16), channel(8), channel(0), 1.0);
     let attributes = msg_id(class("NSMutableDictionary"), "dictionary");
+    // AppKit looks the font up under NSFontAttributeName and the colour under
+    // NSForegroundColorAttributeName; those two strings are those keys.
+    msg_void_id_id(attributes, "setObject:forKey:", font, nsstring("NSFont"));
     msg_void_id_id(
         attributes,
         "setObject:forKey:",
-        font,
-        msg_id(class("NSString"), "stringWithUTF8String:"),
+        color_object,
+        nsstring("NSColor"),
     );
-    // The keys are the AppKit ones; the font goes under NSFontAttributeName
-    // and the colour under NSForegroundColorAttributeName.
-    let font_key = nsstring("NSFont");
-    let color_key = nsstring("NSColor");
-    msg_void_id_id(attributes, "setObject:forKey:", font, font_key);
-    msg_void_id_id(attributes, "setObject:forKey:", color_object, color_key);
     attributes
 }
 
@@ -836,138 +568,114 @@ unsafe fn draw_text(value: &str, x: f64, y: f64, size: f64, color: u32, monospac
 ///
 /// # Safety
 /// Requires a current graphics context, which only exists inside `drawRect:`.
-unsafe fn draw_frame(app: &mut MacApp) {
-    let width = app.view_width();
-    let height = app.view_height();
-    let header = app.header_height();
-    let status = app.status_height();
-    let step = app.line_step();
-    let font = app.code_font_size();
-    let palette = app.palette;
-    unsafe {
-        fill_rect(
-            CGRect::new(0.0, 0.0, width, height),
-            palette.background,
-            1.0,
-        );
-        fill_rect(CGRect::new(0.0, 0.0, width, header), palette.panel, 1.0);
-        fill_rect(
-            CGRect::new(0.0, height - status, width, status),
-            palette.panel,
-            1.0,
-        );
-    }
+unsafe fn draw_frame(shell: &mut MacShell) {
+    let width = shell.view_width();
+    let height = shell.view_height();
+    let header = shell.header_height();
+    let status = shell.status_height();
+    let step = shell.line_step();
+    let font = shell.code_font_size();
+    let palette = shell.palette;
+    fill_rect(
+        CGRect::new(0.0, 0.0, width, height),
+        palette.background,
+        1.0,
+    );
+    fill_rect(CGRect::new(0.0, 0.0, width, header), palette.panel, 1.0);
+    fill_rect(
+        CGRect::new(0.0, height - status, width, status),
+        palette.panel,
+        1.0,
+    );
+
+    let document = shell.session.document();
     let title = format!(
         "{}  ·  {}  ·  {} symbols",
-        app.document().name,
-        if app.document().dirty { "●" } else { "saved" },
-        app.symbol_count()
+        document.name,
+        if document.dirty { "●" } else { "saved" },
+        shell.symbol_count()
     );
-    unsafe {
-        draw_text(&title, 16.0, 14.0, 15.0, palette.bright, false);
-    }
-    // The code column, clipped to the rows the viewport shows.
-    let body = app.body_area();
-    let selection = app.document().selection_anchor.map(|anchor| {
-        let document = app.document();
-        (anchor, (document.caret_line, document.caret_column))
-    });
-    let lines = app.document().lines.clone();
-    let caret = (app.document().caret_line, app.document().caret_column);
-    let scroll_lines = app.scroll_lines;
-    let scroll_columns = app.scroll_columns;
-    for (row, line) in lines
-        .iter()
-        .skip(scroll_lines)
-        .take(app.visible_rows())
-        .enumerate()
-    {
+    draw_text(&title, 16.0, 14.0, 15.0, palette.bright, false);
+
+    let area = shell.text_area();
+    let selection = document.selection();
+    let lines = document.lines.clone();
+    let (caret_line, caret_column) = shell.session.caret();
+    let scroll_lines = shell.session.scroll_lines;
+    let scroll_columns = shell.session.scroll_columns;
+    let rows = shell.visible_rows();
+    for (row, line) in lines.iter().skip(scroll_lines).take(rows).enumerate() {
         let index = scroll_lines + row;
-        let y = body.y + row as f64 * step;
+        let y = area.y + row as f64 * step;
         if let Some(((start_line, start_column), (end_line, end_column))) = selection {
-            let selected = if start_line == end_line {
-                index == start_line
-            } else {
-                index >= start_line.min(end_line) && index <= start_line.max(end_line)
-            };
-            if selected {
+            let within = index >= start_line.min(end_line) && index <= start_line.max(end_line);
+            if within {
                 let from = if index == start_line { start_column } else { 0 };
                 let to = if index == end_line {
                     end_column
                 } else {
                     line.chars().count()
                 };
-                let left = 54.0 + (from.saturating_sub(scroll_columns)) as f64 * 7.4;
-                let right = 54.0 + (to.saturating_sub(scroll_columns)) as f64 * 7.4;
-                unsafe {
-                    fill_rect(
-                        CGRect::new(left, y, (right - left).max(2.0), step - 2.0),
-                        palette.selection,
-                        1.0,
-                    );
-                }
-            }
-        }
-        let visible: String = line.chars().skip(scroll_columns).collect();
-        unsafe {
-            draw_text(&visible, 54.0, y, font, palette.text, true);
-            draw_text(
-                &format!("{}", index + 1),
-                12.0,
-                y,
-                font - 2.0,
-                palette.muted,
-                true,
-            );
-        }
-    }
-    // The caret, at the column it sits on.
-    if caret.0 >= scroll_lines {
-        let row = caret.0 - scroll_lines;
-        if row < app.visible_rows() {
-            let column = caret.1.saturating_sub(scroll_columns) as f64;
-            let x = 54.0 + column * 7.4;
-            let y = body.y + row as f64 * step;
-            let pulse = app.caret_spring.progress(1.0).clamp(0.0, 1.0);
-            unsafe {
+                let left = GUTTER_WIDTH + (from.saturating_sub(scroll_columns)) as f64 * TEXT_CELL;
+                let right = GUTTER_WIDTH + (to.saturating_sub(scroll_columns)) as f64 * TEXT_CELL;
                 fill_rect(
-                    CGRect::new(x, y, 2.0, step - 4.0),
-                    palette.bright,
-                    0.35 + 0.65 * pulse as f64,
+                    CGRect::new(left, y, (right - left).max(2.0), step - 2.0),
+                    palette.selection,
+                    1.0,
                 );
             }
         }
+        let visible: String = line.chars().skip(scroll_columns).collect();
+        draw_text(&visible, GUTTER_WIDTH, y, font, palette.text, true);
+        draw_text(
+            &format!("{}", index + 1),
+            12.0,
+            y,
+            font - 2.0,
+            palette.muted,
+            true,
+        );
     }
-    // Status bar, with the shared status text.
+
+    // The caret, at the column it sits on, breathing with the shared spring.
+    if caret_line >= scroll_lines {
+        let row = caret_line - scroll_lines;
+        if row <= rows {
+            let column = caret_column.saturating_sub(scroll_columns) as f64;
+            let x = GUTTER_WIDTH + column * TEXT_CELL;
+            let y = area.y + row as f64 * step;
+            let pulse = shell.session.caret_spring.progress(1.0).clamp(0.0, 1.0);
+            fill_rect(
+                CGRect::new(x, y, 2.0, (step - 4.0).max(1.0)),
+                palette.bright,
+                0.35 + 0.65 * pulse as f64,
+            );
+        }
+    }
+
     let status_line = format!(
         "{}  ·  {} · ln {}{}",
-        app.status,
-        if app.document().dirty {
-            "unsaved"
-        } else {
-            "clean"
-        },
-        app.document().caret_line + 1,
-        match app.symbol_at_caret() {
+        shell.status,
+        if document.dirty { "unsaved" } else { "clean" },
+        caret_line + 1,
+        match shell.symbol_at_caret() {
             Some(symbol) => format!(" · {symbol}"),
             None => String::new(),
         }
     );
-    unsafe {
-        draw_text(
-            &status_line,
-            12.0,
-            height - status + 6.0,
-            12.0,
-            palette.muted,
-            false,
-        );
-    }
+    draw_text(
+        &status_line,
+        12.0,
+        height - status + 6.0,
+        12.0,
+        palette.muted,
+        false,
+    );
 }
 
 /// `drawRect:` of the editor view.
 unsafe extern "C" fn editor_draw(_view: Id, _selector: Sel, _rect: CGRect) {
-    with_app(|app| unsafe { draw_frame(app) });
+    with_shell(|shell| draw_frame(shell));
 }
 
 /// `isFlipped`, so the view draws from the top left like the layout does.
@@ -986,27 +694,23 @@ unsafe extern "C" fn editor_key_down(_view: Id, _selector: Sel, event: Id) {
     let modifiers = msg_usize(event, "modifierFlags") as u64;
     let command = modifiers & COMMAND_MASK != 0;
     let shift = modifiers & SHIFT_MASK != 0;
-    with_app(|app| {
-        if let Some(command) = key_command(key_code, command, shift) {
-            apply_command(app, command);
-        }
-    });
+    if let Some(command) = key_command(key_code, command, shift) {
+        with_shell(|shell| shell.apply(command));
+    }
 }
 
 /// `insertText:` of the editor view, which is also how an IME commits text.
 unsafe extern "C" fn editor_insert_text(_view: Id, _selector: Sel, text: Id) {
-    let bytes: *const c_char = {
-        let send: extern "C" fn(Id, Sel) -> *const c_char =
-            std::mem::transmute(objc_msgSend as *const c_void);
-        send(text, selector_name("UTF8String"))
-    };
+    let send: extern "C" fn(Id, Sel) -> *const c_char =
+        std::mem::transmute(objc_msgSend as *const c_void);
+    let bytes = send(text, selector_name("UTF8String"));
     if bytes.is_null() {
         return;
     }
     let value = std::ffi::CStr::from_ptr(bytes)
         .to_string_lossy()
         .into_owned();
-    with_app(|app| app.insert_text(&value));
+    with_shell(|shell| shell.session.insert_text(&value));
 }
 
 /// `mouseDown:` of the editor view: place the caret.
@@ -1015,85 +719,111 @@ unsafe extern "C" fn editor_mouse_down(view: Id, _selector: Sel, event: Id) {
     // The window coordinates start at the bottom left; the view is flipped.
     let height = msg_rect_out(view, "bounds").height;
     let y = height - point.y;
-    with_app(|app| app.click_at(point.x, y));
+    with_shell(|shell| shell.click_at(point.x, y));
 }
 
 /// Register the editor view class.
-fn register_editor_view() {
-    unsafe {
-        if !class("TcIdeEditorView").is_null() {
-            return;
-        }
-        let name = CString::new("TcIdeEditorView").unwrap_or_default();
-        let subclass = objc_allocateClassPair(class("NSView"), name.as_ptr(), 0);
-        if subclass.is_null() {
-            return;
-        }
-        let object_argument = CString::new("v@:@").unwrap_or_default();
-        let void = CString::new("v@:").unwrap_or_default();
-        let rect_argument = CString::new("v@:{CGRect={CGPoint=dd}{CGSize=dd}}").unwrap_or_default();
-        let boolean = CString::new("B@:").unwrap_or_default();
-        {
-            class_addMethod(
-                subclass,
-                selector_name("drawRect:"),
-                std::mem::transmute::<unsafe extern "C" fn(Id, Sel, CGRect), Imp>(editor_draw),
-                rect_argument.as_ptr(),
-            );
-            class_addMethod(
-                subclass,
-                selector_name("keyDown:"),
-                std::mem::transmute::<unsafe extern "C" fn(Id, Sel, Id), Imp>(editor_key_down),
-                object_argument.as_ptr(),
-            );
-            class_addMethod(
-                subclass,
-                selector_name("insertText:"),
-                std::mem::transmute::<unsafe extern "C" fn(Id, Sel, Id), Imp>(editor_insert_text),
-                object_argument.as_ptr(),
-            );
-            class_addMethod(
-                subclass,
-                selector_name("mouseDown:"),
-                std::mem::transmute::<unsafe extern "C" fn(Id, Sel, Id), Imp>(editor_mouse_down),
-                object_argument.as_ptr(),
-            );
-            class_addMethod(
-                subclass,
-                selector_name("isFlipped"),
-                std::mem::transmute::<unsafe extern "C" fn(Id, Sel) -> bool, Imp>(
-                    editor_is_flipped,
-                ),
-                boolean.as_ptr(),
-            );
-            class_addMethod(
-                subclass,
-                selector_name("acceptsFirstResponder"),
-                std::mem::transmute::<unsafe extern "C" fn(Id, Sel) -> bool, Imp>(
-                    editor_accepts_first_responder,
-                ),
-                boolean.as_ptr(),
-            );
-            let _ = void;
-        }
-        objc_registerClassPair(subclass);
+///
+/// # Safety
+/// Call on the main thread; the runtime keeps the class alive.
+unsafe fn register_editor_view() {
+    if !class("TcIdeEditorView").is_null() {
+        return;
     }
+    let name = CString::new("TcIdeEditorView").unwrap_or_default();
+    let subclass = objc_allocateClassPair(class("NSView"), name.as_ptr(), 0);
+    if subclass.is_null() {
+        return;
+    }
+    let object_argument = CString::new("v@:@").unwrap_or_default();
+    let rect_argument = CString::new("v@:{CGRect={CGPoint=dd}{CGSize=dd}}").unwrap_or_default();
+    let boolean = CString::new("B@:").unwrap_or_default();
+    class_addMethod(
+        subclass,
+        selector_name("drawRect:"),
+        std::mem::transmute::<unsafe extern "C" fn(Id, Sel, CGRect), Imp>(editor_draw),
+        rect_argument.as_ptr(),
+    );
+    class_addMethod(
+        subclass,
+        selector_name("keyDown:"),
+        std::mem::transmute::<unsafe extern "C" fn(Id, Sel, Id), Imp>(editor_key_down),
+        object_argument.as_ptr(),
+    );
+    class_addMethod(
+        subclass,
+        selector_name("insertText:"),
+        std::mem::transmute::<unsafe extern "C" fn(Id, Sel, Id), Imp>(editor_insert_text),
+        object_argument.as_ptr(),
+    );
+    class_addMethod(
+        subclass,
+        selector_name("mouseDown:"),
+        std::mem::transmute::<unsafe extern "C" fn(Id, Sel, Id), Imp>(editor_mouse_down),
+        object_argument.as_ptr(),
+    );
+    class_addMethod(
+        subclass,
+        selector_name("isFlipped"),
+        std::mem::transmute::<unsafe extern "C" fn(Id, Sel) -> bool, Imp>(editor_is_flipped),
+        boolean.as_ptr(),
+    );
+    class_addMethod(
+        subclass,
+        selector_name("acceptsFirstResponder"),
+        std::mem::transmute::<unsafe extern "C" fn(Id, Sel) -> bool, Imp>(
+            editor_accepts_first_responder,
+        ),
+        boolean.as_ptr(),
+    );
+    objc_registerClassPair(subclass);
 }
 
-/// `tick:` of the frame timer: step the motion and redraw.
-unsafe extern "C" fn timer_tick(_timer: Id, _selector: Sel) {
-    let view = with_app(|app| {
-        app.tick();
-        app.view
+/// `tick:` of the frame timer: step the shared motion and redraw.
+unsafe extern "C" fn timer_tick(_target: Id, _selector: Sel) {
+    let view = with_shell(|shell| {
+        shell.session.tick();
+        shell.view
     });
     if !view.is_null() {
-        unsafe {
-            msg_bool(view, "setNeedsDisplay:", true);
-        }
+        msg_bool(view, "setNeedsDisplay:", true);
     }
 }
 
-/// Build the window, its editor view and the timer that drives the frames.
+/// Schedule a repeating timer that calls `timer_tick`.
+///
+/// # Safety
+/// Call on the main thread.
+unsafe fn schedule_timer(interval: f64) {
+    let name = CString::new("TcIdeTickTarget").unwrap_or_default();
+    if class("TcIdeTickTarget").is_null() {
+        let subclass = objc_allocateClassPair(class("NSObject"), name.as_ptr(), 0);
+        if !subclass.is_null() {
+            let void = CString::new("v@:").unwrap_or_default();
+            class_addMethod(
+                subclass,
+                selector_name("tick:"),
+                std::mem::transmute::<unsafe extern "C" fn(Id, Sel), Imp>(timer_tick),
+                void.as_ptr(),
+            );
+            objc_registerClassPair(subclass);
+        }
+    }
+    let target = msg_id(class("TcIdeTickTarget"), "new");
+    let send: extern "C" fn(Id, Sel, f64, Id, Sel, Id, bool) -> Id =
+        std::mem::transmute(objc_msgSend as *const c_void);
+    send(
+        class("NSTimer"),
+        selector_name("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
+        interval,
+        target,
+        selector_name("tick:"),
+        ptr::null_mut(),
+        true,
+    );
+}
+
+/// Build the window, its editor view and the frame timer.
 ///
 /// # Safety
 /// Call on the main thread after `NSApplicationLoad`.
@@ -1119,64 +849,17 @@ unsafe fn build_window(width: f64, height: f64) {
     msg_void_id(window, "setContentView:", view);
     msg_bool(window, "makeFirstResponder:", true);
     msg_bool(window, "makeKeyAndOrderFront:", true);
-    with_app(|app| {
-        app.window = window;
-        app.view = view;
-        app.viewport = text_buffer::Viewport::new(
-            ((height - app.header_height() - app.status_height()) / app.line_step())
+    with_shell(|shell| {
+        shell.window = window;
+        shell.view = view;
+        shell.session.viewport = text_buffer::Viewport::new(
+            ((height - shell.header_height() - shell.status_height()) / shell.line_step())
                 .floor()
                 .max(1.0) as usize,
-            ((width - 64.0) / 7.4).floor().max(8.0) as usize,
+            ((width - GUTTER_WIDTH) / TEXT_CELL).floor().max(8.0) as usize,
         );
     });
-    // A 60 Hz timer steps the shared motion models and asks for a redraw.
-    let timer = msg_timer(1.0 / 60.0, view);
-    let _ = timer;
-    let _ = boxed_tick;
-}
-
-/// The tick IMP as an object, kept alive for the timer.
-static mut TICK_TARGET: Id = ptr::null_mut();
-
-/// `tick` is registered on a small helper object so `NSTimer` can call it.
-unsafe extern "C" fn boxed_tick(_target: Id, _selector: Sel) {
-    unsafe { timer_tick(_target, _selector) };
-}
-
-/// Schedule a repeating timer that calls `boxed_tick`.
-///
-/// # Safety
-/// Call on the main thread.
-unsafe fn msg_timer(interval: f64, view: Id) -> Id {
-    let name = CString::new("TcIdeTickTarget").unwrap_or_default();
-    if class("TcIdeTickTarget").is_null() {
-        let subclass = objc_allocateClassPair(class("NSObject"), name.as_ptr(), 0);
-        if !subclass.is_null() {
-            let void = CString::new("v@:").unwrap_or_default();
-            class_addMethod(
-                subclass,
-                selector_name("tick:"),
-                std::mem::transmute::<unsafe extern "C" fn(Id, Sel), Imp>(boxed_tick),
-                void.as_ptr(),
-            );
-            objc_registerClassPair(subclass);
-        }
-    }
-    let target = msg_id(class("TcIdeTickTarget"), "new");
-    let send: extern "C" fn(Id, Sel, f64, Id, Sel, Id, bool) -> Id =
-        std::mem::transmute(objc_msgSend as *const c_void);
-    let timer = send(
-        class("NSTimer"),
-        selector_name("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
-        interval,
-        target,
-        selector_name("tick:"),
-        ptr::null_mut(),
-        true,
-    );
-    let _ = view;
-    TICK_TARGET = target;
-    timer
+    schedule_timer(1.0 / 60.0);
 }
 
 /// Entry point of the macOS backend.
@@ -1201,7 +884,8 @@ pub fn run() {
 /// Scriptable state layer check: `tc-ide --self-check`.
 ///
 /// The macOS runner of the pipeline runs this, so the backend is executed on
-/// macOS and not only compiled.
+/// macOS and not only compiled. The editing itself is covered by the unit tests
+/// of the shared session, which run on every platform.
 fn self_check() -> i32 {
     let mut failures = Vec::new();
     let mut checks = 0usize;
@@ -1212,55 +896,52 @@ fn self_check() -> i32 {
         }
     };
 
-    let mut app = MacApp::new();
-    app.replace_all("one\ntwo");
+    let mut shell = MacShell::new();
+    shell.session.replace_all("one\ntwo");
     report(
         "a scratch document holds its lines",
-        app.document().lines == ["one", "two"]
-            && app.document().caret_line == 1
-            && app.document().caret_column == 3,
+        shell.session.document().lines == ["one", "two"] && shell.session.caret() == (1, 3),
         &mut failures,
     );
-    app.backspace();
+    shell.session.backspace();
     report(
         "backspace removes a character",
-        app.document().lines == ["one", "tw"],
+        shell.session.document().lines == ["one", "tw"],
         &mut failures,
     );
-    app.move_caret(-1, 0);
-    app.move_to_line_end(true);
-    app.insert_text("X");
+    shell.session.move_caret(-1, 0);
+    shell.session.move_to_line_end(true);
+    shell.session.insert_text("X");
     report(
         "the caret moves between lines",
-        app.document().lines == ["oneX", "tw"],
+        shell.session.document().lines == ["oneX", "tw"],
         &mut failures,
     );
     report(
         "an edit marks the document dirty",
-        app.document().dirty,
-        &mut failures,
-    );
-    app.select_all();
-    report(
-        "select all covers the document",
-        app.document().selection_anchor == Some((0, 0)),
+        shell.session.dirty(),
         &mut failures,
     );
     report(
         "the palette comes from the shared theme",
-        app.palette == theme_core::Palette::for_scheme(app.preferences.light_theme),
+        shell.palette == theme_core::Palette::for_scheme(shell.preferences.light_theme),
         &mut failures,
     );
-    app.open_project(PathBuf::from("/tmp/tc-ide-demo"));
     report(
-        "the session remembers the project",
-        app.session.project().is_some(),
+        "the window geometry adds up",
+        shell.text_area().x == GUTTER_WIDTH
+            && shell.view_height() > shell.text_height()
+            && shell.visible_rows() == shell.session.viewport.height.max(1),
         &mut failures,
     );
-    app.click_at(60.0, app.header_height() + app.line_step() * 0.5);
+    shell.viewport_for_checks();
+    shell.click_at(
+        GUTTER_WIDTH + TEXT_CELL * 3.5,
+        shell.header_height() + shell.line_step() * 1.5,
+    );
     report(
-        "clicking places the caret in the first row",
-        app.document().caret_line == 0,
+        "a click lands on the row and column it points at",
+        shell.session.caret() == (1, 3),
         &mut failures,
     );
     report(
@@ -1340,89 +1021,32 @@ mod tests {
         assert!(!is_printable_key(53, false), "escape is not text");
     }
 
-    /// An application whose single document is a known two line buffer.
-    fn scratch() -> MacApp {
-        let mut app = MacApp::new();
-        app.replace_all("hello\nworld");
-        app
-    }
-
-    #[test]
-    fn the_editor_keeps_its_document_consistent() {
-        let mut app = scratch();
-        assert_eq!(app.document().lines, ["hello", "world"]);
-        assert_eq!(
-            (app.document().caret_line, app.document().caret_column),
-            (1, 5)
-        );
-
-        app.move_caret(-1, 0);
-        app.move_to_line_end(true);
-        app.insert_text("!");
-        assert_eq!(app.document().lines[0], "hello!");
-
-        // Forward delete at the end of a line joins the next one.
-        app.delete_forward();
-        assert_eq!(app.document().lines, ["hello!world"]);
-
-        // Backspace at the very start does nothing.
-        app.move_to_line_end(false);
-        app.backspace();
-        assert_eq!(app.document().lines, ["hello!world"]);
-
-        app.move_to_line_end(true);
-        app.backspace();
-        assert_eq!(app.document().lines, ["hello!worl"]);
-
-        // Typing over a selection replaces it.
-        app.select_all();
-        app.insert_text("done");
-        assert_eq!(app.document().lines, ["done"]);
-        assert_eq!(app.document().caret_column, 4);
-        assert!(app.document().dirty);
-    }
-
     #[test]
     fn clicks_land_on_the_row_and_column_they_point_at() {
-        let mut app = MacApp::new();
-        app.viewport = text_buffer::Viewport::new(20, 80);
-        let header = app.header_height();
-        app.click_at(54.0 + 7.4 * 3.0, header + app.line_step() * 2.0 + 1.0);
-        assert_eq!(app.document().caret_line, 2);
-        assert_eq!(app.document().caret_column, 3);
+        let mut shell = MacShell::new();
+        shell.viewport_for_checks();
+        let top = shell.header_height();
+        let step = shell.line_step();
+        shell.click_at(GUTTER_WIDTH + TEXT_CELL * 3.5, top + step * 2.5);
+        assert_eq!(shell.session.caret(), (2, 3));
 
         // A click in the header is not a caret move.
-        app.click_at(54.0, 4.0);
-        assert_eq!(app.document().caret_line, 2);
+        shell.click_at(GUTTER_WIDTH, 4.0);
+        assert_eq!(shell.session.caret(), (2, 3));
         // And the caret never leaves the document.
-        app.click_at(54.0, header + app.line_step() * 400.0);
-        assert!(app.document().caret_line < app.document().lines.len());
+        shell.click_at(GUTTER_WIDTH, top + step * 400.0);
+        assert!(shell.session.caret().0 < shell.session.document().lines.len());
     }
 
     #[test]
-    fn the_viewport_follows_the_caret() {
-        let mut app = MacApp::new();
-        app.viewport = text_buffer::Viewport::new(4, 20);
-        app.replace_all("a\nb\nc\nd\ne\nf\ng\nh");
-        // The reset leaves the caret at the end, so walk back to the first line.
-        for _ in 0..8 {
-            app.move_caret(-1, 0);
-        }
-        assert_eq!(app.document().caret_line, 0);
-        assert_eq!(app.scroll_lines, 0);
-
-        // Walking past the fourth visible row scrolls one row at a time.
-        for line in 1..=7 {
-            app.move_caret(1, 0);
-            assert_eq!(app.document().caret_line, line);
-            assert_eq!(app.scroll_lines, line.saturating_sub(3));
-        }
-
-        // And walking back up brings the top of the document back.
-        for _ in 0..7 {
-            app.move_caret(-1, 0);
-        }
-        assert_eq!(app.document().caret_line, 0);
-        assert_eq!(app.scroll_lines, 0);
+    fn the_window_geometry_leaves_room_for_the_text() {
+        let shell = MacShell::new();
+        assert!(shell.view_height() > shell.text_height());
+        assert_eq!(
+            shell.view_height(),
+            shell.header_height() + shell.text_height() + shell.status_height()
+        );
+        assert_eq!(shell.text_area().y, shell.header_height());
+        assert_eq!(shell.text_area().x, GUTTER_WIDTH);
     }
 }

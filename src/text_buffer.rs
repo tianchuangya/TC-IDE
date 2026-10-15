@@ -127,6 +127,15 @@ impl TextBuffer {
     }
 
     /// Number of lines in the document.
+    /// Whether the document ends with a newline.
+    ///
+    /// The line list drops a trailing empty line, so this is how a caller tells
+    /// a caret that sits on the line after the last newline from one that is out
+    /// of range.
+    pub fn ends_with_newline(&self) -> bool {
+        self.to_text().ends_with('\n')
+    }
+
     pub fn line_count(&self) -> usize {
         self.to_lines().len()
     }

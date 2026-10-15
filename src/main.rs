@@ -2,6 +2,7 @@ mod ai_core;
 mod background_core;
 mod dap_core;
 mod editor_core;
+mod editor_session;
 mod extension_core;
 mod graph_core;
 mod index_core;
