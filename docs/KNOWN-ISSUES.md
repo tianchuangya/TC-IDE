@@ -39,51 +39,34 @@ TC-IDE 尚未发布正式版本，也尚未完成 Windows 实机验收。
 - 发布工作流只能手动触发；在项目所有者说"正式开始"之前不会创建标签或 Release。
 - AppImage 步骤依赖联网下载 appimagetool，失败时不会阻断发布，但产物会缺失（文件清单会说明）。
 
-## 待办：返回类型推断在 Windows 上导致测试失败（已回滚，待重新落地）
+## 已在本地复现 Windows 测试（重要方法）
 
-第 21 轮曾实现"函数声明的返回类型"推断（`let engine = build(); engine.run()` 解析到 `Engine::run`，关系图画出真实 Callee 边），
-本地全绿（245 项测试 + 三目标 clippy + fmt），但 **Windows job 的第 4 步 `cargo test --all-targets` 变红**。
+本项目此前无法在本机验证 Windows 行为，只能靠 CI 猜。现在可以了：
 
-已确认与运行器无关：在该提交之上再推一个**空提交**同样失败，而它之前/之后的提交都绿；`046c194` 与失败树只差这两个文件。
+```bash
+# 1. 一次性地把 mingw 运行时与 binutils 取下来（无需 root）
+mkdir -p /tmp/mingw && cd /tmp/mingw
+apt-get download gcc-mingw-w64-x86-64-win32 gcc-mingw-w64-x86-64-win32-runtime \
+                 mingw-w64-x86-64-dev binutils-mingw-w64-x86-64
+for f in *.deb; do dpkg-deb -x "$f" root/; done
 
-已经排除的：
-- Windows 目标编译（`cargo check --all-targets --target x86_64-pc-windows-msvc`）干净；`--tests`/`--profile test` 也干净。
-- 新增解析对畸形输入不 panic（做过一轮 fuzz）。
-- `TokenKind` 新增变体后三端 match 均完整；Windows 只有 5 个测试且都是 UI 状态，不涉及分词。
-- 缩小规则（只认 `name(...)` 这一种形状）后仍然失败。
+# 2. 让 cargo 用 rust-lld 加这些库来链接 Windows 目标
+#    （.cargo/config.toml）
+#    [target.x86_64-pc-windows-gnu]
+#    linker = "rust-lld"
+#    rustflags = ["-C","link-self-contained=yes",
+#                 "-L","native=/tmp/mingw/root/usr/x86_64-w64-mingw32/lib",
+#                 "-L","native=/tmp/mingw/root/usr/lib/gcc/x86_64-w64-mingw32/13-win32"]
 
-因此**嫌疑集中在 `scan()` 的行为改动**：它在每一行上调用新的 `declared_return_type`，而 `scan` 被关系图、各面板与两个原生后端读取。
-本机无法读取 GitHub 的 job 日志（API 返回 403），也没有 Windows 实机，所以不能在本地复现。
+# 3. 编译并在 Wine 里跑真正的 Windows 测试二进制
+export PATH="/tmp/mingw/root/usr/bin:$PATH"
+cargo test --target x86_64-pc-windows-gnu --no-run
+wine target/x86_64-pc-windows-gnu/debug/deps/tc_ide-*.exe --test-threads=4
+```
 
-**已做的二分结果（第 22 轮）**：
-1. 只加 `declared_return_type` 纯函数与测试、不接入 `scan` → **CI 绿**（保留在 main，提交 `a5380b6`）。
-2. 让 `scan` 记录返回类型、绑定逻辑完全不变 → **Windows 仍然红**（提交 `bfeb029`，随后回滚 `77aa01c`）。
-
-结论：问题出在「`scan` 注意到返回类型」这件事本身，**与由它派生的绑定无关**，所以第三步不必再试。
-`scan` 每一行都会跑，且被关系图、各面板与两个原生后端读取，在没有 Windows 实机或可读日志之前不应继续猜。
-
-**第二、三次二分（更精确）**：
-- 只让 `scan` 记录返回类型、**不带新测试**（14 行代码）→ **Windows 仍然红**（`31b0434`，回滚 `2ac08e3`）。
-  因此既不是新测试、也不是由它派生的绑定，而是「`scan` 注意到返回类型」这件事本身。
-
-**已排除**：Windows 目标编译（含 test profile）干净；解析对畸形输入不 panic；**性能无差异**（400 行文件扫 200 次，
-带与不带记录都是 3.46s / 3.48s）；`FileScan` 从不做相等比较；被改的文件里没有 Windows 专属编译分支。
-
-**剩下的线索**：绿的 Windows 测试步骤约 60 秒，红的三次都是 37–46 秒——这是**某个测试耗尽等待期限**而不是断言的典型特征。
-共享测试里有四个带 20 秒期限的用例（两个驱动 DAP adapter、两个驱动语言服务器，都通过管道），
-它们在没有 python 时会自我跳过。一个与它们无关的 `scan` 改动为什么会拖垮其中之一，**在本机无法判断**。
-
-**第四次尝试：证伪了"等待期限"假说**。先把两个管道测试改成各用私有目录、期限从 20s 放宽到 60s（提交 `d2b9f87`，**这个修复保留**），
-再把同样的 14 行记录代码放回去（`7719b0c`）——**Windows 仍在同一步失败**，随后回滚（`820b3ba`）。
-所以失败不是"某个测试耗尽期限"造成的。
-
-**当前结论**：纯函数绿；「`scan` 注意到返回类型」红；新测试与派生绑定都已排除；不是期限问题。
-剩下的判断需要 **Windows 实机或可读的 job 日志**，本机做不到。
-
-**重新落地的建议**：拆成可二分的小步——
-1. 先只加 `declared_return_type` 纯函数与它的单元测试（不改 `scan`），推一次确认绿；
-2. 再让 `scan` 记录返回类型但不产生绑定，推一次；
-3. 最后才让 `local_binding` 使用它。
-每一步都能定位到具体是哪一处触发 Windows 失败。
-
-实现与测试都在 git 历史里（`82b2b93`、`703f76b`，回滚见 `ab0e979`）。
+要点：
+- 需要把 `src/main.rs` 换成 `src/lib.rs`（去掉各平台的 `fn main`、去掉 `compile_error!`、模块改成 `pub mod`），
+  并把 `windows_app` 的 `#[cfg(target_os = "windows")]` 去掉，才能在 Linux 上编出 Windows 后端。
+- 还要拷贝 `assets/`（图标被 `include_bytes!` 引用）。
+- 这套东西跑 **240 项**测试（Linux 上是 255 项），多出来的正是 **5 个只在 Windows 存在的 `windows_app` 测试**——
+  返回类型推断的 panic（`a < b > c` 被当成泛型，`rfind('>')` 落在 `<` 之前）就是这样被抓到的。
