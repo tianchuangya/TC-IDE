@@ -1685,4 +1685,70 @@ while True:
         );
         assert_eq!(message_id(""), None);
     }
+
+    #[test]
+    fn a_rename_response_is_grouped_per_file_and_applied() {
+        // What a rename looks like coming back: edits for several files, out
+        // of order, which have to land on the right lines.
+        let response = r#"{"jsonrpc":"2.0","id":9,"result":{"changes":{
+            "file:///tmp/b.rs":{"edits":[
+                {"range":{"start":{"line":1,"character":4},
+                "end":{"line":1,"character":10}},"newText":"Engine"}]},
+            "file:///tmp/a.rs":{"edits":[
+                {"range":{"start":{"line":0,"character":7},"end":{"line":0,"character":12}},"newText":"Engine"},
+                {"range":{"start":{"line":3,"character":0},"end":{"line":3,"character":5}},"newText":"Engine"}]}}}}"#;
+        let edits = parse_rename_edits(response);
+        assert_eq!(edits.len(), 3, "one edit per range");
+
+        // Grouping by file is what the editor does before it writes anything.
+        let mut files: Vec<(String, usize)> = Vec::new();
+        for edit in &edits {
+            match files.iter_mut().find(|(path, _)| *path == edit.path) {
+                Some((_, count)) => *count += 1,
+                None => files.push((edit.path.clone(), 1)),
+            }
+        }
+        files.sort();
+        assert_eq!(files.len(), 2, "two files are touched");
+        assert_eq!(files[0].1, 2, "a.rs has two edits");
+        assert_eq!(files[1].1, 1, "b.rs has one");
+
+        // Applying the edits of one file renames every occurrence on it, and
+        // the later edit still lands correctly after the earlier one changed
+        // the line length.
+        let source = "pub fn build() {}\n\nfn other() {}\nbuild();\n";
+        let for_a: Vec<_> = edits
+            .iter()
+            .filter(|edit| edit.path.ends_with("a.rs"))
+            .cloned()
+            .collect();
+        let updated = apply_edits(source, &for_a);
+        assert!(updated.contains("pub fn Engine()"), "{updated}");
+        assert!(updated.contains("Engine();"), "{updated}");
+        assert!(!updated.contains("build"), "nothing is left unrenamed");
+
+        // A response with no edits is a refusal, not an empty rename.
+        assert!(parse_rename_edits(r#"{"jsonrpc":"2.0","id":9,"result":null}"#).is_empty());
+    }
+
+    #[test]
+    fn a_completion_list_keeps_the_label_and_the_detail_apart() {
+        // The editor inserts the label and only shows the detail, so the two
+        // have to arrive separately.
+        let response = r#"{"jsonrpc":"2.0","id":4,"result":{"items":[
+            {"label":"build","detail":"fn() -> Engine"},
+            {"label":"builder","kind":3},
+            {"label":"build_all"}]}}"#;
+        let completions = parse_completions(response);
+        assert_eq!(completions.len(), 3);
+        assert_eq!(completions[0].0, "build");
+        assert_eq!(completions[0].1, "fn() -> Engine");
+        // An item with no detail still has a label, which is what gets typed.
+        assert_eq!(completions[2].0, "build_all");
+        assert!(completions[2].1.is_empty());
+        // A server that offers nothing gives an empty list rather than a
+        // suggestion invented here.
+        assert!(parse_completions(r#"{"jsonrpc":"2.0","id":4,"result":null}"#).is_empty());
+        assert!(parse_completions("").is_empty());
+    }
 }

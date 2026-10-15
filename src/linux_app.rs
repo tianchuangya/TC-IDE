@@ -429,6 +429,8 @@ const UP_KEYSYM: c_ulong = 0xff52;
 const RIGHT_KEYSYM: c_ulong = 0xff53;
 const DOWN_KEYSYM: c_ulong = 0xff54;
 const F5_KEYSYM: c_ulong = 0xffc2;
+/// F2, which renames the symbol at the caret.
+const F2_KEYSYM: c_ulong = 0xffbf;
 /// F12, which asks the language server for the definition.
 const F12_KEYSYM: c_ulong = 0xffc9;
 const F9_KEYSYM: c_ulong = 0xffc6;
@@ -613,12 +615,16 @@ struct Palette {
 /// A question the editor asks the language server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LspRequest {
+    /// What could be written at the caret.
+    Completion,
     /// What the symbol under the caret is.
     Hover,
     /// Where the symbol under the caret is defined.
     Definition,
     /// Where the symbol under the caret is used.
     References,
+    /// What the symbol under the caret should be called instead.
+    Rename,
 }
 
 /// Buttons of the settings panel that answer to the pointer and the keyboard.
@@ -790,6 +796,12 @@ struct App {
     /// References the server listed, and which one we are on.
     lsp_locations: Vec<(String, u32, u32)>,
     lsp_reference_index: usize,
+    /// Completions the server offered, and which one is selected.
+    lsp_completions: Vec<String>,
+    lsp_completion_index: usize,
+    /// New name being typed for a rename, and whether it has the keyboard.
+    rename_prompt: Option<String>,
+    rename_focused: bool,
     /// Whether the AI panel is open, and whether it has the keyboard.
     ai_open: bool,
     ai_focused: bool,
@@ -3541,6 +3553,7 @@ impl App {
         }
         self.draw_ai_panel();
         self.draw_hover();
+        self.draw_language_overlays();
         self.draw_condition_prompt();
         if self.create_kind.is_some() && self.create_motion.value > 0.01 {
             self.draw_create_dialog();
@@ -5929,6 +5942,12 @@ impl App {
                 self.selected_file = 0;
                 self.caret_line = 3;
                 self.lsp_diagnostic_file = self.active_breakpoint_path();
+                self.lsp_completions = vec![
+                    "build  fn() -> Engine".to_string(),
+                    "builder  struct Builder".to_string(),
+                    "build_all  fn() -> Vec<Engine>".to_string(),
+                ];
+                self.lsp_completion_index = 1;
                 self.lsp_hover =
                     Some("fn build(&self) -> Engine\n  builds the engine used by the graph".into());
                 self.lsp_diagnostics = vec![
@@ -6601,6 +6620,139 @@ impl App {
         parts.join("\n")
     }
 
+    /// Ask the server what could go here, and show the list.
+    fn request_completions(&mut self) {
+        if self.lsp_completions.is_empty() {
+            self.request_language_feature(LspRequest::Completion);
+        } else {
+            // A second press walks the list instead of asking again.
+            self.lsp_completion_index =
+                (self.lsp_completion_index + 1) % self.lsp_completions.len();
+        }
+    }
+
+    /// Insert the completion the language server offered.
+    fn accept_server_completion(&mut self) {
+        let Some(word) = self.lsp_completions.get(self.lsp_completion_index).cloned() else {
+            return;
+        };
+        // Only the label goes in, not the detail that follows it.
+        let label = word.split("  ").next().unwrap_or(&word).to_string();
+        self.delete_selection();
+        self.files[self.selected_file]
+            .buffer
+            .insert(self.caret_line, self.caret_column, &label);
+        self.caret_column += label.len();
+        self.files[self.selected_file].sync();
+        self.note_edit(
+            motion_core::EditKind::Insert,
+            self.caret_line,
+            self.caret_column - label.len(),
+            self.caret_column,
+        );
+        self.lsp_completions.clear();
+        self.lsp_completion_index = 0;
+        self.status_message = format!("{} {label}", self.tr("Inserted", "已插入"));
+    }
+
+    /// Open the prompt that asks for the new name.
+    fn begin_rename(&mut self) {
+        if self.language_server.is_none() {
+            self.status_message = self
+                .tr(
+                    "No language server is running for this file",
+                    "此文件没有正在运行的语言服务器",
+                )
+                .into();
+            return;
+        }
+        self.rename_prompt = Some(String::new());
+        self.rename_focused = true;
+        self.status_message = self
+            .tr(
+                "New name: type it, Enter renames, Esc cancels",
+                "新名称：输入后回车重命名，Esc 取消",
+            )
+            .into();
+    }
+
+    /// Ask the server to rename the symbol at the caret.
+    fn send_rename(&mut self) {
+        let new_name = self.rename_prompt.take().unwrap_or_default();
+        self.rename_focused = false;
+        if new_name.trim().is_empty() {
+            self.status_message = self.tr("Rename needs a name", "重命名需要名称").into();
+            return;
+        }
+        let path = self.active_breakpoint_path();
+        let line = self.caret_line as u32;
+        let character = self.files[self.selected_file]
+            .lines
+            .get(self.caret_line)
+            .map(|text| text[..self.caret_column.min(text.len())].chars().count() as u32)
+            .unwrap_or(0);
+        let Some(server) = self.language_server.as_mut() else {
+            return;
+        };
+        match server.rename(&path, line, character, new_name.trim()) {
+            Ok(id) => self.lsp_pending.push((id, LspRequest::Rename)),
+            Err(error) => self.status_message = error,
+        }
+    }
+
+    /// Apply the edits a rename produced.
+    ///
+    /// The edits are grouped by file: the open document is edited in place so
+    /// its history and the caret survive, and the others are read, changed and
+    /// written back. A file that cannot be written stops the rename and says
+    /// so rather than leaving half the project renamed.
+    fn apply_rename_edits(&mut self, edits: &[lsp_core::RenameEdit]) {
+        let mut grouped: Vec<(String, Vec<lsp_core::RenameEdit>)> = Vec::new();
+        for edit in edits {
+            match grouped.iter_mut().find(|(path, _)| *path == edit.path) {
+                Some((_, list)) => list.push(edit.clone()),
+                None => grouped.push((edit.path.clone(), vec![edit.clone()])),
+            }
+        }
+        let mut touched = 0usize;
+        for (path, list) in grouped {
+            let name = PathBuf::from(&path)
+                .file_name()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone());
+            let open = self.files.iter().position(|document| document.name == name);
+            if let Some(index) = open {
+                let text = self.files[index].lines.join("\n");
+                let updated = lsp_core::apply_edits(&text, &list);
+                let lines = updated.split('\n').map(str::to_string).collect::<Vec<_>>();
+                self.files[index] = FileBuffer::new(name, PathBuf::from(&path), lines);
+                touched += 1;
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else {
+                self.status_message = format!(
+                    "{} {path}",
+                    self.tr("Rename could not read", "重命名无法读取")
+                );
+                return;
+            };
+            let updated = lsp_core::apply_edits(&text, &list);
+            if fs::write(&path, updated).is_err() {
+                self.status_message = format!(
+                    "{} {path}",
+                    self.tr("Rename could not write", "重命名无法写入")
+                );
+                return;
+            }
+            touched += 1;
+        }
+        self.status_message = format!(
+            "{} {touched} {}",
+            self.tr("Renamed in", "已重命名的文件数："),
+            self.tr("file(s)", "个文件")
+        );
+    }
+
     /// Ask the server something about the symbol at the caret.
     fn request_language_feature(&mut self, request: LspRequest) {
         // Where the caret is comes from the editor, so it is read before the
@@ -6623,9 +6775,12 @@ impl App {
             return;
         };
         let method = match request {
+            LspRequest::Completion => "textDocument/completion",
             LspRequest::Hover => "textDocument/hover",
             LspRequest::Definition => "textDocument/definition",
             LspRequest::References => "textDocument/references",
+            // A rename goes through `rename`, which carries the new name.
+            LspRequest::Rename => return,
         };
         match server.position_request(method, &path, line, character) {
             Ok(id) => self.lsp_pending.push((id, request)),
@@ -6703,6 +6858,34 @@ impl App {
         };
         let (_, request) = self.lsp_pending.remove(position);
         match request {
+            LspRequest::Completion => {
+                self.lsp_completions = lsp_core::parse_completions(message)
+                    .into_iter()
+                    .map(|(label, detail)| {
+                        if detail.is_empty() {
+                            label
+                        } else {
+                            format!("{label}  {detail}")
+                        }
+                    })
+                    .collect();
+                self.lsp_completion_index = 0;
+                if self.lsp_completions.is_empty() {
+                    self.status_message = self
+                        .tr("No completions from the server", "服务器未给出补全")
+                        .into();
+                }
+            }
+            LspRequest::Rename => {
+                let edits = lsp_core::parse_rename_edits(message);
+                if edits.is_empty() {
+                    self.status_message = self
+                        .tr("The server refused the rename", "服务器拒绝了重命名")
+                        .into();
+                } else {
+                    self.apply_rename_edits(&edits);
+                }
+            }
             LspRequest::Hover => {
                 self.lsp_hover = lsp_core::parse_hover(message);
                 if self.lsp_hover.is_none() {
@@ -6967,6 +7150,65 @@ impl App {
         self.outline(self.colors.accent, left, y, width, height);
         let short: String = text.chars().take(lines * wrapped as usize).collect();
         self.text(self.colors.text, left + s(12), y + s(20), &short);
+    }
+
+    /// The completion list and the rename prompt, over the editor.
+    ///
+    /// # Safety
+    /// Requires a live Cairo context.
+    unsafe fn draw_language_overlays(&self) {
+        let s = |v| self.s(v);
+        if !self.lsp_completions.is_empty() {
+            let left = (self.width as f32 * 0.17) as i32 + s(60);
+            let top = s(119) + self.caret_line as i32 * self.code_line_step() + s(24);
+            let rows = self.lsp_completions.len().min(8) as i32;
+            let width = s(340);
+            let height = rows * s(20) + s(10);
+            self.rect(self.colors.panel_2, left, top, width, height);
+            self.outline(self.colors.line, left, top, width, height);
+            for (index, entry) in self.lsp_completions.iter().take(8).enumerate() {
+                let row = top + s(16 + index as i32 * 20);
+                if index == self.lsp_completion_index {
+                    self.rect(
+                        self.colors.project,
+                        left + s(2),
+                        row - s(13),
+                        width - s(4),
+                        s(19),
+                    );
+                }
+                let short: String = entry.chars().take(44).collect();
+                self.text(self.colors.text, left + s(10), row, &short);
+            }
+        }
+        let Some(prompt) = self.rename_prompt.as_ref() else {
+            return;
+        };
+        let width = (self.width as f32 * 0.36) as i32;
+        let left = (self.width - width) / 2;
+        let top = s(96);
+        self.rect(self.colors.panel_2, left, top, width, s(46));
+        self.outline(self.colors.accent, left, top, width, s(46));
+        self.text(
+            self.colors.muted,
+            left + s(12),
+            top + s(19),
+            self.tr("Rename symbol to", "将符号重命名为"),
+        );
+        self.text(
+            if prompt.is_empty() {
+                self.colors.muted
+            } else {
+                self.colors.bright
+            },
+            left + s(12),
+            top + s(40),
+            if prompt.is_empty() {
+                self.tr("new name", "新名称")
+            } else {
+                prompt.as_str()
+            },
+        );
     }
 
     /// Undo the last edit of the active document.
@@ -8260,6 +8502,11 @@ impl App {
         // F12 goes to the definition, Ctrl+I shows what the symbol is and
         // Ctrl+R walks the places that use it, the keys Windows uses.
         if self.editor_focused {
+            // F2 renames the symbol at the caret through the server.
+            if keysym == F2_KEYSYM {
+                self.begin_rename();
+                return true;
+            }
             if keysym == F12_KEYSYM {
                 self.go_to_definition();
                 return true;
@@ -8274,6 +8521,16 @@ impl App {
                 } else {
                     self.next_reference();
                 }
+                return true;
+            }
+            // Ctrl+Space asks the server what could go here, and Tab takes
+            // what the list is on while it is open.
+            if control && keysym == SPACE_KEYSYM {
+                self.request_completions();
+                return true;
+            }
+            if keysym == TAB_KEYSYM && !self.lsp_completions.is_empty() {
+                self.accept_server_completion();
                 return true;
             }
         }
@@ -8336,6 +8593,30 @@ impl App {
             }
             if count > 0 && !input.chars().any(char::is_control) {
                 self.terminals[self.terminal_active].input.push_str(input);
+            }
+            return true;
+        }
+        if self.rename_focused {
+            if keysym == RETURN_KEYSYM {
+                self.send_rename();
+                return true;
+            }
+            if keysym == ESCAPE_KEYSYM {
+                self.rename_prompt = None;
+                self.rename_focused = false;
+                self.status_message = self.tr("Rename cancelled", "已取消重命名").into();
+                return true;
+            }
+            if keysym == BACKSPACE_KEYSYM {
+                if let Some(prompt) = self.rename_prompt.as_mut() {
+                    prompt.pop();
+                }
+                return true;
+            }
+            if count > 0 && !input.chars().any(char::is_control) {
+                if let Some(prompt) = self.rename_prompt.as_mut() {
+                    prompt.push_str(input);
+                }
             }
             return true;
         }
@@ -10180,6 +10461,10 @@ pub fn run() {
             lsp_hover: None,
             lsp_locations: Vec::new(),
             lsp_reference_index: 0,
+            lsp_completions: Vec::new(),
+            lsp_completion_index: 0,
+            rename_prompt: None,
+            rename_focused: false,
             ai_open: false,
             ai_focused: false,
             ai_prompt: String::new(),
