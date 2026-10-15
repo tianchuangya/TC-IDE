@@ -1079,6 +1079,19 @@ fn balanced_object(text: &str) -> Option<String> {
     None
 }
 
+/// A private directory for one test, so a stale file from an earlier or a
+/// concurrent run can never be picked up instead of the fixture just written.
+#[cfg(test)]
+pub(crate) fn test_directory(name: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let process = std::process::id();
+    let directory = std::env::temp_dir().join(format!("{name}-{process}-{unique}"));
+    let _ = std::fs::create_dir_all(&directory);
+    directory
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1530,17 +1543,4 @@ while True:
         assert_eq!(braces, ["{\"b\":\"}{\"}"]);
         assert!(json_objects("{\"a\":[]}", "a").is_empty());
     }
-}
-
-/// A private directory for one test, so a stale file from an earlier or a
-/// concurrent run can never be picked up instead of the fixture just written.
-#[cfg(test)]
-pub(crate) fn test_directory(name: &str) -> std::path::PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let process = std::process::id();
-    let directory = std::env::temp_dir().join(format!("{name}-{process}-{unique}"));
-    let _ = std::fs::create_dir_all(&directory);
-    directory
 }
