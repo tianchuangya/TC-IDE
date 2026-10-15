@@ -23,6 +23,7 @@ use crate::motion_core;
 use crate::package_motion;
 use crate::session_core;
 use crate::syntax_core;
+use crate::terminal_core;
 use crate::theme_core;
 use crate::workspace_core;
 
@@ -707,6 +708,10 @@ struct App {
     graph_fraction: f32,
     panel_drag: Option<PanelDrag>,
     breakpoints: dap_core::Breakpoints,
+    /// Terminal cells the pointer has selected, when there are any.
+    terminal_selection: Option<terminal_core::TerminalSelection>,
+    /// Whether the pointer is dragging a terminal selection.
+    terminal_selecting: bool,
     /// Text of the condition prompt, when it is open.
     breakpoint_prompt: Option<String>,
     /// Caret position inside the condition prompt.
@@ -2519,6 +2524,80 @@ impl App {
             self.pango_text(color, cursor, y, &token.text, true);
             cursor += self.code_text_width(&token.text);
         }
+    }
+
+    /// The terminal cell a point of the panel is over.
+    ///
+    /// The panel draws its newest lines at the bottom, so the row is counted
+    /// back from the last line of output rather than forwards.
+    fn terminal_point_at(&self, x: i32, y: i32) -> Option<terminal_core::TerminalPoint> {
+        if !self.terminal_open {
+            return None;
+        }
+        let s = |v: i32| (v as f32 * self.scale()).round() as i32;
+        let top = self.terminal_top();
+        let step = s(24);
+        if y < top + s(30) || step <= 0 {
+            return None;
+        }
+        let rows = self.terminal_visible_rows();
+        let row = ((y - top - s(30)) / step).max(0) as usize;
+        if row >= rows {
+            return None;
+        }
+        let cell = s(8).max(1);
+        let column = ((x - s(24)).max(0) / cell) as usize;
+        // Row zero of the panel is the oldest of the visible lines.
+        let line = self.terminal_lines().len().saturating_sub(rows) + row;
+        Some(terminal_core::TerminalPoint { line, column })
+    }
+
+    /// How many terminal rows the panel shows.
+    fn terminal_visible_rows(&self) -> usize {
+        let s = |v: i32| (v as f32 * self.scale()).round() as i32;
+        let height = self.height - self.terminal_top() - s(34);
+        ((height / s(24).max(1)).max(1)) as usize
+    }
+
+    /// The lines the terminal panel is showing.
+    fn terminal_lines(&self) -> Vec<String> {
+        self.terminals
+            .get(
+                self.terminal_active
+                    .min(self.terminals.len().saturating_sub(1)),
+            )
+            .map(|terminal| {
+                terminal
+                    .output
+                    .lock()
+                    .map(|lines| lines.clone())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Copy the terminal selection, the way `Ctrl+Shift+C` does.
+    fn copy_terminal_selection(&mut self) -> bool {
+        let Some(selection) = self.terminal_selection else {
+            return false;
+        };
+        let lines = self.terminal_lines();
+        let Some(text) = terminal_core::selected_text(&lines, &selection) else {
+            return false;
+        };
+        if text.is_empty() {
+            return false;
+        }
+        self.clipboard = text.clone();
+        self.status_message = format!(
+            "{} {}",
+            self.tr(
+                "Copied characters from the terminal:",
+                "已从终端复制字符数："
+            ),
+            text.chars().count()
+        );
+        true
     }
 
     /// Rows the debug panel would show right now.
@@ -4584,16 +4663,62 @@ impl App {
                 }
             }
             let terminal = &self.terminals[self.terminal_active.min(self.terminals.len() - 1)];
-            if let Ok(lines) = terminal.output.lock() {
-                let visible = lines.iter().rev().take(6).collect::<Vec<_>>();
-                for (offset, line) in visible.iter().rev().enumerate() {
-                    let max_chars = ((list_x - s(52)) / s(8).max(1)).max(8) as usize;
-                    let display_line = line.chars().take(max_chars).collect::<String>();
+            let lines = terminal
+                .output
+                .lock()
+                .map(|lines| lines.clone())
+                .unwrap_or_default();
+            let rows = self.terminal_visible_rows();
+            let first_line = lines.len().saturating_sub(rows);
+            let visible = lines.iter().rev().take(6).collect::<Vec<_>>();
+            for (offset, line) in visible.iter().rev().enumerate() {
+                let max_chars = ((list_x - s(52)) / s(8).max(1)).max(8) as usize;
+                let display_line = line.chars().take(max_chars).collect::<String>();
+                // A selected cell is filled behind the glyphs, so the choice is
+                // visible the way it is in the editor.
+                if let Some(selection) = self.terminal_selection.as_ref() {
+                    let index = first_line + offset;
+                    let (from, to) = selection.ordered();
+                    if index >= from.line && index <= to.line {
+                        let start = if index == from.line { from.column } else { 0 };
+                        let end = if index == to.line {
+                            to.column + 1
+                        } else {
+                            display_line.chars().count()
+                        };
+                        if end > start {
+                            let cell = s(8).max(1);
+                            // The same fill the editor uses for a selection.
+                            self.rect(
+                                self.colors.project,
+                                s(24) + start as i32 * cell,
+                                top + s(45 + offset as i32 * 24),
+                                ((end - start) as i32 * cell).max(2),
+                                s(18),
+                            );
+                        }
+                    }
+                }
+                self.text(
+                    self.colors.text,
+                    s(24),
+                    top + s(55 + offset as i32 * 24),
+                    &display_line,
+                );
+            }
+            if self.terminal_selection.is_some() {
+                let selected = self
+                    .terminal_selection
+                    .as_ref()
+                    .and_then(|selection| terminal_core::selected_text(&lines, selection))
+                    .map(|text| text.chars().count())
+                    .unwrap_or(0);
+                if selected > 0 {
                     self.text(
-                        self.colors.text,
+                        self.colors.accent,
                         s(24),
-                        top + s(55 + offset as i32 * 24),
-                        &display_line,
+                        self.height - s(18),
+                        &format!("{} {selected}", self.tr("selected", "已选中")),
                     );
                 }
             }
@@ -5343,6 +5468,27 @@ impl App {
                 self.view_menu_motion = UiMotion::new(1.0);
                 self.terminal_open = true;
                 self.terminal_motion = UiMotion::new(1.0);
+                // Give the terminal output and a selection over part of it, so
+                // the frame covers the highlight and the selected count.
+                if let Some(terminal) = self.terminals.first() {
+                    if let Ok(mut lines) = terminal.output.lock() {
+                        *lines = (0..12)
+                            .map(|index| format!("$ cargo test --target {index}"))
+                            .collect();
+                    }
+                }
+                let rows = self.terminal_visible_rows();
+                let first = 12usize.saturating_sub(rows);
+                self.terminal_selection = Some(terminal_core::TerminalSelection::new(
+                    terminal_core::TerminalPoint {
+                        line: first + 1,
+                        column: 2,
+                    },
+                    terminal_core::TerminalPoint {
+                        line: first + 3,
+                        column: 12,
+                    },
+                ));
                 true
             }
             "file-menu" => {
@@ -6327,6 +6473,24 @@ impl App {
         true
     }
 
+    /// Extend a terminal selection while the pointer is down.
+    fn drag_terminal_selection(&mut self, x: i32, y: i32) {
+        if !self.terminal_selecting {
+            return;
+        }
+        let Some(point) = self.terminal_point_at(x, y) else {
+            return;
+        };
+        if let Some(selection) = self.terminal_selection.as_ref() {
+            self.terminal_selection = Some(selection.extended_to(point));
+        }
+    }
+
+    /// The pointer was released: the selection stays, dragging stops.
+    fn end_terminal_selection(&mut self) {
+        self.terminal_selecting = false;
+    }
+
     fn handle_click(&mut self, x: i32, y: i32, button: u32, state: c_uint) {
         let scale = self.scale();
         let s = move |v: i32| (v as f32 * scale).round() as i32;
@@ -6977,6 +7141,17 @@ impl App {
                 self.terminal_focused = true;
                 return;
             }
+            // A press in the body starts a selection; the header controls are
+            // handled below, so they still work.
+            if button == 1 && y > terminal_top + s(30) {
+                if let Some(point) = self.terminal_point_at(x, y) {
+                    self.terminal_selection =
+                        Some(terminal_core::TerminalSelection::new(point, point));
+                    self.terminal_selecting = true;
+                    self.terminal_focused = true;
+                    return;
+                }
+            }
             let (tx, ty, tw, th) = self.terminal_toggle_rect();
             if x >= tx && x <= tx + tw && y >= ty && y <= ty + th {
                 self.terminal_open = false;
@@ -7198,6 +7373,16 @@ impl App {
             .collect::<Vec<_>>();
         let input = std::str::from_utf8(&bytes).unwrap_or("");
         let control = event.state & CONTROL_MASK != 0;
+        // Ctrl+Shift+C copies the terminal selection; Ctrl+C is left alone so
+        // it still interrupts the running program.
+        if control
+            && event.state & SHIFT_MASK != 0
+            && keysym == ('C' as c_ulong | 0x20)
+            && self.terminal_focused
+            && self.copy_terminal_selection()
+        {
+            return true;
+        }
         if keysym == F9_KEYSYM {
             // Shift+F9 conditions the breakpoint instead of toggling it, which
             // is the key Windows uses for the same thing.
@@ -9006,6 +9191,8 @@ pub fn run() {
             graph_fraction: 0.39,
             panel_drag: None,
             breakpoints: dap_core::Breakpoints::new(),
+            terminal_selection: None,
+            terminal_selecting: false,
             breakpoint_prompt: None,
             condition_caret: 0,
             condition_focused: false,
@@ -9125,8 +9312,14 @@ pub fn run() {
                         app.update_panel_drag(motion.x, motion.y, motion.state);
                         app.update_drag_selection(motion.x, motion.y, motion.state);
                         app.update_background_drag(motion.x, motion.y, motion.state);
+                        if motion.state & BUTTON1_MASK != 0 {
+                            app.drag_terminal_selection(motion.x, motion.y);
+                        }
                         if motion.state & BUTTON1_MASK == 0 {
                             app.settings_pressed = None;
+                            // The button came up, so any drag in progress is
+                            // over; the selection itself stays.
+                            app.end_terminal_selection();
                         }
                         app.update_hover();
                     }

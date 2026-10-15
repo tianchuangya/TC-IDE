@@ -991,4 +991,50 @@ mod key_and_chunk_tests {
         assert_eq!(chunker.push(&bytes[1..]), "你");
         assert_eq!(chunker.pending_len(), 0);
     }
+
+    #[test]
+    fn a_terminal_point_counts_rows_back_from_the_newest_line() {
+        // The panel shows the newest output at the bottom, so the row under a
+        // point has to be counted back from the end of the buffer rather than
+        // forward from its start.
+        let lines: Vec<String> = (0..10).map(|i| format!("line {i}")).collect();
+        let rows = 4usize;
+        let first = lines.len() - rows;
+        // The top visible row is the fourth from the end, not the first line.
+        assert_eq!(first, 6);
+        assert_eq!(lines[first], "line 6");
+
+        // A selection over the last two visible rows reads back in order.
+        let selection = TerminalSelection::new(
+            TerminalPoint {
+                line: first + 2,
+                column: 0,
+            },
+            TerminalPoint {
+                line: first + 3,
+                column: 3,
+            },
+        );
+        let text = selected_text(&lines, &selection).expect("a selection");
+        // A terminal copies whole lines separated the way a terminal does, and
+        // the last line stops at the column the selection ended on.
+        assert_eq!(text, "line 8\r\nlin");
+
+        // Dragging upwards still reads in reading order.
+        let backwards = TerminalSelection::new(
+            TerminalPoint {
+                line: first + 3,
+                column: 3,
+            },
+            TerminalPoint {
+                line: first + 2,
+                column: 0,
+            },
+        );
+        assert_eq!(
+            selected_text(&lines, &backwards).as_deref(),
+            Some(text.as_str()),
+            "dragging upwards reads the same as dragging down"
+        );
+    }
 }
