@@ -384,6 +384,54 @@ pub(super) fn self_check() -> i32 {
         &mut failures,
     );
 
+    // The settings panel is a control grid walked with Tab. The rows the
+    // keyboard can reach and what each one needs come from the shared model,
+    // so the Windows panel cannot disagree with Linux about what is usable.
+    let with_picture = background_core::background_controls(true, 0.5, 1.5);
+    let without_picture = background_core::background_controls(false, 0.5, 1.5);
+    let reachable = background_core::SettingsRow::focusable(with_picture);
+    report(
+        "the settings panel walks only usable rows",
+        !reachable.contains(&background_core::SettingsRow::Heading)
+            && reachable.contains(&background_core::SettingsRow::AdjustBackground)
+            && reachable.contains(&background_core::SettingsRow::ClearBackground)
+            && reachable.len() == 8,
+        &mut failures,
+    );
+    let bare = background_core::SettingsRow::focusable(without_picture);
+    report(
+        "rows that need a picture are skipped without one",
+        !bare.contains(&background_core::SettingsRow::AdjustBackground)
+            && !bare.contains(&background_core::SettingsRow::ClearBackground)
+            && bare.contains(&background_core::SettingsRow::ChooseBackground)
+            && bare.len() + 2 == reachable.len(),
+        &mut failures,
+    );
+    // Tab walks forward, shift Tab walks back, and both wrap.
+    let forward = theme_core::step_focus(&reachable, None, true);
+    let backward = theme_core::step_focus(&reachable, None, false);
+    report(
+        "tab starts at the ends and wraps around",
+        forward == reachable.first().copied()
+            && backward == reachable.last().copied()
+            && theme_core::step_focus(&reachable, reachable.last().copied(), true)
+                == reachable.first().copied()
+            && theme_core::step_focus(&reachable, reachable.first().copied(), false)
+                == reachable.last().copied(),
+        &mut failures,
+    );
+    // Walking from a row that is no longer reachable starts over instead of
+    // leaving the keyboard nowhere.
+    report(
+        "a focus that went away restarts from an end",
+        theme_core::step_focus(
+            &bare,
+            Some(background_core::SettingsRow::ClearBackground),
+            true,
+        ) == bare.first().copied(),
+        &mut failures,
+    );
+
     // The palettes of both themes have to be readable, which is the check the
     // settings panel cannot do by eye. The rule follows where each colour is
     // actually drawn: text and hints also sit on raised controls, syntax colours
