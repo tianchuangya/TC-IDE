@@ -604,14 +604,25 @@ fn local_binding(masked: &str, returns: &[(String, String)]) -> Option<(String, 
     {
         return Some((name.to_string(), class));
     }
-    // `let engine = build()`: the value is a call, so the binding holds
-    // whatever the called function declares it returns.
-    if after.starts_with('(') || value.contains('(') {
-        if let Some((_, returned)) = returns.iter().find(|(known, _)| known == &class) {
-            return Some((name.to_string(), returned.clone()));
-        }
+    // `let engine = build()`: the value is a plain call whose name matches a
+    // function with a declared return type, so the binding holds that type.
+    // The check is deliberately narrow - the value has to be exactly
+    // `name(...)` and nothing else - so a member call (`a.build()`), a chain or
+    // any other expression is left to the ordinary rules instead of being
+    // guessed at.
+    // A statement ends with `;`, so that is allowed after the closing brace.
+    let call = after.strip_suffix(';').unwrap_or(after).trim_end();
+    if !call.starts_with('(') || !call.ends_with(')') {
+        return None;
     }
-    None
+    let arguments = &call[1..call.len() - 1];
+    if arguments.contains('(') || arguments.contains(')') {
+        return None;
+    }
+    returns
+        .iter()
+        .find(|(known, _)| known == &class)
+        .map(|(_, returned)| (name.to_string(), returned.clone()))
 }
 
 /// The return type a function declaration names, when it names one.
@@ -1671,5 +1682,37 @@ mod tests {
         let scan = scan(&lines, "main.rs");
         assert!(scan.binding_of("thing", 7, 1).is_none());
         assert!(!scan.returns.iter().any(|(name, _)| name == "make"));
+    }
+
+    #[test]
+    fn only_a_plain_call_takes_its_return_type() {
+        // The rule is deliberately narrow: a member call, a chain or a call
+        // wrapped in anything else is left to the ordinary rules, so the
+        // scanner never invents a type it cannot prove.
+        let returns = vec![("build".to_string(), "Engine".to_string())];
+        assert_eq!(
+            local_binding("let engine = build();", &returns),
+            Some(("engine".to_string(), "Engine".to_string()))
+        );
+        assert_eq!(
+            local_binding("let engine = build()", &returns),
+            Some(("engine".to_string(), "Engine".to_string()))
+        );
+        // A member call names its own receiver, which this rule does not cover.
+        assert_eq!(
+            local_binding("let engine = factory.build();", &returns),
+            None
+        );
+        // A chain is not a constructor either.
+        assert_eq!(
+            local_binding("let engine = build().finish();", &returns),
+            None
+        );
+        // Arguments are fine, and so is a call the table does not know.
+        assert_eq!(
+            local_binding("let engine = build(1, 2);", &returns),
+            Some(("engine".to_string(), "Engine".to_string()))
+        );
+        assert_eq!(local_binding("let other = unknown();", &returns), None);
     }
 }

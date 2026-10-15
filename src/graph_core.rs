@@ -1373,7 +1373,7 @@ mod tests {
             project_entry("src/engine.rs", "run", 5, SymbolRole::Declaration),
         ];
         let inputs = inputs_current_file(&lines, &symbols, &project, None);
-        let graph = build_graph(&inputs, GraphScope::Symbol, "");
+        let graph = build_graph(&inputs, GraphScope::File, "");
         let captions = graph
             .nodes
             .iter()
