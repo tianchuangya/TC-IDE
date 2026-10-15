@@ -943,4 +943,68 @@ server.serve_forever()
         assert!(body.contains("ping"));
         assert!(body.contains("\"stream\":false"));
     }
+
+    #[test]
+    fn a_conversation_survives_a_round_trip_through_the_project_file() {
+        // What the Linux panel does: save the conversation with the project and
+        // read it back when the project opens again.
+        let mut conversation = Conversation::new();
+        assert!(conversation.is_empty());
+        conversation.push_user("where is the graph built?");
+        conversation.append_answer("graph_core::build_graph");
+        conversation.push_user("and the index?");
+        conversation.append_answer("index_core keeps fingerprints");
+
+        let saved = conversation.serialize();
+        let restored = Conversation::parse(&saved);
+        assert_eq!(restored.turns(), conversation.turns());
+        assert_eq!(restored.turns().len(), 4);
+        // The turns keep their side: the question is from the user and the
+        // answer is not, which is what the panel colours differently.
+        let sides = restored
+            .turns()
+            .iter()
+            .map(|(from_user, _)| *from_user)
+            .collect::<Vec<_>>();
+        assert_eq!(sides, [true, false, true, false]);
+        // A key never reaches the file: only the conversation is written.
+        assert!(!saved.contains("TC_IDE_AI_KEY"));
+        assert!(!saved.to_ascii_lowercase().contains("api_key"));
+
+        // An empty or damaged file gives an empty conversation rather than a
+        // failure, so opening a project cannot fail because of its history.
+        assert!(Conversation::parse("").is_empty());
+        assert!(Conversation::parse("nonsense without sections\n").is_empty());
+    }
+
+    #[test]
+    fn the_prompt_carries_the_conversation_and_the_key_stays_out_of_the_text() {
+        // The panel sends the project's turns with the prompt so the answer has
+        // context, and the key travels in the environment, never in the body.
+        let mut conversation = Conversation::new();
+        conversation.push_user("earlier question");
+        conversation.append_answer("earlier answer");
+        let turns = conversation.turns().to_vec();
+        let history = turns
+            .iter()
+            .map(|(from_user, text)| (if *from_user { "user" } else { "assistant" }, text.as_str()))
+            .collect::<Vec<_>>();
+        let body = chat_body_with_history("gpt-5.1", &history, true);
+        assert!(body.contains("earlier question"));
+        assert!(body.contains("earlier answer"));
+        assert!(body.contains("\"role\":\"user\""));
+        assert!(body.contains("\"role\":\"assistant\""));
+        // The body never holds the key, whatever it is.
+        let secret = "sk-not-a-real-key";
+        assert!(!body.contains(secret));
+        // And the command line only ever names the environment variable.
+        let settings = AiSettings {
+            endpoint: "https://api.openai.com/v1".into(),
+            model: "gpt-5.1".into(),
+        };
+        let command =
+            chat_command(&settings, "/tmp/body.json", true, 60, Shell::Unix).expect("a command");
+        assert!(command.contains(API_KEY_ENV), "{command}");
+        assert!(!command.contains(secret));
+    }
 }

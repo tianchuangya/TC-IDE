@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::ai_core;
 use crate::background_core;
 use crate::dap_core;
 use crate::editor_core;
@@ -738,6 +739,16 @@ struct App {
     /// pointer was when it was grabbed.
     background_drag: Option<(background_core::Handle, i32, i32)>,
     graph_relation: graph_core::GraphRelation,
+    /// Whether the AI panel is open, and whether it has the keyboard.
+    ai_open: bool,
+    ai_focused: bool,
+    /// Prompt being typed.
+    ai_prompt: String,
+    /// Conversation with the project, loaded when it opens.
+    ai_messages: ai_core::Conversation,
+    /// Request in flight, when there is one.
+    ai_session: Option<ai_core::ChatSession>,
+    ai_error: Option<String>,
     /// Range the graph shows, or `None` to follow the caret. This is the
     /// shared model rather than an index into a hand written list, so Linux
     /// offers the same four ranges and the same automatic state as the others.
@@ -2632,6 +2643,269 @@ impl App {
             .refresh(fingerprints, |path| contents.get(path).cloned());
     }
 
+    /// Open or close the AI panel.
+    fn toggle_ai(&mut self) {
+        self.ai_open = !self.ai_open;
+        self.ai_focused = self.ai_open;
+        if self.ai_open {
+            self.status_message = self
+                .tr(
+                    "AI: type a prompt, Enter sends, Esc cancels",
+                    "AI：输入提示词，回车发送，Esc 取消",
+                )
+                .into();
+        }
+        // The panel starts with the prompt, not with a settings field.
+        self.ai_field_focused = None;
+    }
+
+    /// Where the AI conversation of the current project is kept.
+    fn ai_history_path(&self) -> PathBuf {
+        let root = self.project_path.clone().unwrap_or_else(projects_root);
+        root.join(".tc-ide-ai").join("history.conf")
+    }
+
+    /// Load the conversation saved with the project, if there is one.
+    fn load_ai_history(&mut self) {
+        self.ai_messages = match fs::read_to_string(self.ai_history_path()) {
+            Ok(content) => ai_core::Conversation::parse(&content),
+            Err(_) => ai_core::Conversation::new(),
+        };
+    }
+
+    /// Save the conversation with the project.
+    fn save_ai_history(&self) {
+        let path = self.ai_history_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&path, self.ai_messages.serialize());
+    }
+
+    /// Write the request body next to the project, the way the other backend
+    /// does, because the key travels through the environment and not the file.
+    fn write_ai_body(&self, body: &str) -> Option<PathBuf> {
+        let root = self.project_path.clone().unwrap_or_else(projects_root);
+        let directory = root.join(".tc-ide-ai");
+        fs::create_dir_all(&directory).ok()?;
+        let path = directory.join("request.json");
+        fs::write(&path, body).ok()?;
+        Some(path)
+    }
+
+    /// Send the prompt in the panel to the configured endpoint.
+    fn send_ai_prompt(&mut self) {
+        let prompt = self.ai_prompt.trim().to_string();
+        if prompt.is_empty() {
+            return;
+        }
+        if self.ai_key.is_empty() {
+            self.ai_error = Some(
+                self.tr(
+                    "Set an API key for this session before sending",
+                    "发送前请先为本会话设置 API Key",
+                )
+                .into(),
+            );
+            return;
+        }
+        let settings = ai_core::AiSettings {
+            endpoint: self.ai_endpoint.clone(),
+            model: self.ai_model.clone(),
+        };
+        // The conversation so far goes with the prompt, so the answer has the
+        // context of the project rather than only this line.
+        let turns = self.ai_messages.turns().to_vec();
+        let history = turns
+            .iter()
+            .map(|(from_user, text)| (if *from_user { "user" } else { "assistant" }, text.as_str()))
+            .collect::<Vec<_>>();
+        let body = ai_core::chat_body_with_history(&settings.model, &history, true);
+        let Some(path) = self.write_ai_body(&body) else {
+            self.ai_error = Some(
+                self.tr("Could not write the request body", "无法写入请求体")
+                    .into(),
+            );
+            return;
+        };
+        match ai_core::ChatSession::start(
+            &settings,
+            &self.ai_key,
+            &prompt,
+            &path,
+            ai_core::DEFAULT_TIMEOUT_SECONDS,
+        ) {
+            Ok(session) => {
+                self.ai_messages.push_user(&prompt);
+                self.ai_prompt.clear();
+                self.ai_error = None;
+                self.ai_session = Some(session);
+                self.status_message = self
+                    .tr(
+                        "AI request running; Esc cancels it",
+                        "AI 请求进行中，Esc 可取消",
+                    )
+                    .into();
+            }
+            Err(error) => self.ai_error = Some(error.message()),
+        }
+    }
+
+    /// Collect the streamed answer of a running request.
+    fn poll_ai_session(&mut self) {
+        let Some(mut session) = self.ai_session.take() else {
+            return;
+        };
+        let prompt = session.prompt().to_string();
+        let events = session.poll();
+        let mut finished = false;
+        let mut failure = None;
+        for event in events {
+            match event {
+                ai_core::ChatEvent::Delta(text) => self.ai_messages.append_answer(&text),
+                ai_core::ChatEvent::Done(status) => {
+                    finished = true;
+                    if let Some(status) = status {
+                        if status >= 400 {
+                            failure = Some(ai_core::describe_status(status, &prompt));
+                        }
+                    }
+                }
+                ai_core::ChatEvent::Error(error) => {
+                    finished = true;
+                    failure = Some(error);
+                }
+            }
+        }
+        let running = session.is_running();
+        if finished || !running {
+            if let Some(error) = failure {
+                self.ai_error = Some(error.clone());
+                self.status_message = error;
+            } else {
+                self.status_message = self.tr("AI answer received", "已收到 AI 回答").into();
+                self.save_ai_history();
+            }
+        } else {
+            self.ai_session = Some(session);
+        }
+    }
+
+    /// Stop a running request.
+    fn cancel_ai_request(&mut self) {
+        if let Some(mut session) = self.ai_session.take() {
+            session.cancel();
+        }
+        self.status_message = self
+            .tr(
+                "AI request cancelled; the partial answer is kept",
+                "已取消 AI 请求，已收到的部分会保留",
+            )
+            .into();
+    }
+
+    /// Rectangle of the AI panel, on the right.
+    fn ai_bounds(&self) -> (i32, i32, i32, i32) {
+        let s = |v: i32| (v as f32 * self.scale()).round() as i32;
+        let width = s(430);
+        let left = self.width - width - s(16);
+        (left, s(52), width, s(430))
+    }
+
+    /// Draw the AI panel: the conversation and the prompt line.
+    ///
+    /// # Safety
+    /// Requires a live Cairo context.
+    unsafe fn draw_ai_panel(&self) {
+        if !self.ai_open {
+            return;
+        }
+        let s = |v| self.s(v);
+        let (x, y, w, h) = self.ai_bounds();
+        self.rect(self.colors.panel, x, y, w, h);
+        self.outline(self.colors.line, x, y, w, h);
+        self.text(
+            self.colors.muted,
+            x + s(12),
+            y + s(20),
+            &format!("{}  {}", self.tr("AI", "AI"), self.ai_model),
+        );
+        if let Some(error) = self.ai_error.as_ref() {
+            self.text(self.colors.preprocessor, x + s(12), y + s(42), error);
+        }
+
+        // The conversation, newest last, scrolled to the end.
+        let turns = self.ai_messages.turns();
+        let rows = ((h - s(110)) / s(20)).max(1) as usize;
+        let start = turns.len().saturating_sub(rows);
+        for (index, (from_user, text)) in turns.iter().skip(start).enumerate() {
+            let row_y = y + s(58 + index as i32 * 20);
+            let (label, color) = if *from_user {
+                (self.tr("you", "你"), self.colors.accent)
+            } else {
+                (self.tr("ai", "AI"), self.colors.literal)
+            };
+            self.text(color, x + s(12), row_y, label);
+            // One turn is one row here: the panel is narrow, and the full
+            // answer is in the conversation that gets saved.
+            let short: String = text.chars().take(48).collect();
+            self.text(self.colors.text, x + s(46), row_y, &short);
+        }
+        if turns.is_empty() {
+            self.text(
+                self.colors.muted,
+                x + s(12),
+                y + s(58),
+                self.tr("Ask about this project", "就这个项目提问"),
+            );
+        }
+
+        // The prompt line.
+        let field_y = y + h - s(34);
+        self.rect(
+            self.colors.panel_2,
+            x + s(12),
+            field_y - s(18),
+            w - s(24),
+            s(26),
+        );
+        self.outline(
+            if self.ai_focused {
+                self.colors.accent
+            } else {
+                self.colors.line
+            },
+            x + s(12),
+            field_y - s(18),
+            w - s(24),
+            s(26),
+        );
+        let value = if self.ai_prompt.is_empty() {
+            self.tr("Ask the model...", "向模型提问…")
+        } else {
+            self.ai_prompt.as_str()
+        };
+        self.text(
+            if self.ai_prompt.is_empty() {
+                self.colors.muted
+            } else {
+                self.colors.bright
+            },
+            x + s(20),
+            field_y,
+            value,
+        );
+        if self.ai_focused && blink_phase(self.started) {
+            let caret = x + s(20) + self.pango_text_size(&self.ai_prompt, false).0;
+            self.line(
+                self.colors.bright,
+                1,
+                (caret, field_y - s(14)),
+                (caret, field_y + s(4)),
+            );
+        }
+    }
+
     /// The range buttons, in the order the shared model lists them, with the
     /// automatic range first.
     fn graph_scope_labels(&self) -> Vec<&'static str> {
@@ -3209,6 +3483,7 @@ impl App {
         if self.extensions_motion.value > 0.01 {
             self.draw_extensions();
         }
+        self.draw_ai_panel();
         self.draw_condition_prompt();
         if self.create_kind.is_some() && self.create_motion.value > 0.01 {
             self.draw_create_dialog();
@@ -5561,6 +5836,24 @@ impl App {
                 ));
                 true
             }
+            "ai-panel" => {
+                // A conversation and a prompt, so the panel can be inspected
+                // without an endpoint to talk to.
+                self.ai_open = true;
+                self.ai_focused = true;
+                self.ai_model = "gpt-5.1".to_string();
+                self.ai_messages = ai_core::Conversation::new();
+                self.ai_messages.push_user("where is the graph built?");
+                self.ai_messages
+                    .append_answer("The relation graph is built by graph_core::build_graph,");
+                self.ai_messages
+                    .append_answer("which the three backends all call.");
+                self.ai_messages.push_user("and the index?");
+                self.ai_messages
+                    .append_answer("index_core keeps one fingerprint per file.");
+                self.ai_prompt = "summarise this project".to_string();
+                true
+            }
             "file-menu" => {
                 // The File menu with its New, Open and Recent sections, so the
                 // menu can be inspected without a pointer.
@@ -7449,6 +7742,13 @@ impl App {
         {
             return true;
         }
+        if control && event.state & SHIFT_MASK != 0 && keysym == ('I' as c_ulong | 0x20) {
+            self.toggle_ai();
+            if self.ai_open {
+                self.load_ai_history();
+            }
+            return true;
+        }
         if keysym == F9_KEYSYM {
             // Shift+F9 conditions the breakpoint instead of toggling it, which
             // is the key Windows uses for the same thing.
@@ -7486,6 +7786,31 @@ impl App {
             }
             if count > 0 && !input.chars().any(char::is_control) {
                 self.terminals[self.terminal_active].input.push_str(input);
+            }
+            return true;
+        }
+        if self.ai_focused && self.ai_open {
+            // Enter sends, Esc cancels a running request or closes, and the
+            // rest of the typing goes into the prompt.
+            if keysym == RETURN_KEYSYM {
+                self.send_ai_prompt();
+                return true;
+            }
+            if keysym == ESCAPE_KEYSYM {
+                if self.ai_session.is_some() {
+                    self.cancel_ai_request();
+                } else {
+                    self.ai_open = false;
+                    self.ai_focused = false;
+                }
+                return true;
+            }
+            if keysym == BACKSPACE_KEYSYM {
+                self.ai_prompt.pop();
+                return true;
+            }
+            if count > 0 && !input.chars().any(char::is_control) {
+                self.ai_prompt.push_str(input);
             }
             return true;
         }
@@ -9274,6 +9599,12 @@ pub fn run() {
             extension_upgrades: 0,
             background_drag: None,
             graph_relation: graph_core::GraphRelation::Follow,
+            ai_open: false,
+            ai_focused: false,
+            ai_prompt: String::new(),
+            ai_messages: ai_core::Conversation::new(),
+            ai_session: None,
+            ai_error: None,
             graph_scope: None,
             graph_scroll: 0,
             graph_search: String::new(),
@@ -9324,6 +9655,7 @@ pub fn run() {
                 }
             }
             app.refresh_index();
+            app.poll_ai_session();
             app.update_background();
             app.draw();
             let written = export_frame(&app, &path);
