@@ -284,8 +284,62 @@ pub(super) fn handle_key_down(window: Hwnd, w_param: Wparam) -> Lresult {
                 }
                 return;
             }
+            // Tab walks the controls the keyboard can actually use, Enter uses
+            // the one it is on, and Esc leaves the controls before it closes the
+            // panel; the shared rule decides what is reachable.
+            let controls = background_core::background_controls(
+                app.background_path.is_some(),
+                app.background_opacity,
+                app.background_zoom as f64,
+            );
+            let reachable = background_core::SettingsRow::focusable(controls);
+            if w_param as u32 == VK_TAB {
+                let forward = !platform::shift_pressed();
+                app.settings_focus =
+                    theme_core::step_focus(&reachable, app.settings_focus, forward);
+                if let Some(row) = app.settings_focus {
+                    app.status = format!("Settings control: {row:?}");
+                }
+                return;
+            }
+            if matches!(w_param as u32, 0x0d | 0x20) && app.settings_focus.is_some() {
+                let row = app.settings_focus;
+                app.settings_focus = None;
+                match row {
+                    Some(background_core::SettingsRow::Close) => app.settings_open = false,
+                    Some(background_core::SettingsRow::ChooseBackground) => {
+                        if let Some(path) = platform::choose_background(window) {
+                            app.background_path = Some(path);
+                            app.status = "Background image loaded with Windows WIC".into();
+                        }
+                    }
+                    Some(background_core::SettingsRow::AdjustBackground) => {
+                        // Enter on the adjustment row steps the zoom, which is
+                        // the one value with a natural next state.
+                        app.background_zoom =
+                            background_core::zoomed(app.background_zoom as f64, 1) as f32;
+                        app.status = format!("Zoom {:.1}x", app.background_zoom);
+                    }
+                    Some(background_core::SettingsRow::ClearBackground) => {
+                        app.background_path = None;
+                        app.status = "Background cleared".into();
+                    }
+                    Some(_) => {}
+                    None => {}
+                }
+                app.save_preferences();
+                return;
+            }
+            if w_param as u32 == 0x1b && app.settings_focus.is_some() {
+                app.settings_focus = None;
+                app.status = "Left the settings controls".into();
+                return;
+            }
             match w_param as u32 {
-                0x1b => app.settings_open = false,
+                0x1b => {
+                    app.settings_open = false;
+                    app.settings_focus = None;
+                }
                 0x4c => app.ui_chinese = !app.ui_chinese,
                 0x54 => app.light_theme = !app.light_theme,
                 0x42 => {

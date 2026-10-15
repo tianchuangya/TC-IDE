@@ -292,6 +292,8 @@ struct WindowsAppState {
     font_search: String,
     font_search_focused: bool,
     settings_open: bool,
+    /// Row the keyboard is on in the settings panel, when it is on one.
+    settings_focus: Option<background_core::SettingsRow>,
     settings_motion: f32,
     settings_velocity: f32,
     extensions_open: bool,
@@ -432,6 +434,32 @@ impl WindowsAppState {
         "Noto Sans Mono CJK SC",
         "DejaVu Sans Mono",
     ];
+
+    /// Put the keyboard on the settings row a click landed on.
+    ///
+    /// The rows are drawn as a list of fixed heights, so a click has to land on
+    /// the same row the keyboard walks to; both read the shared row list.
+    fn focus_settings_row_at(&mut self, local_y: f32) {
+        let index = match local_y {
+            value if (62.0..116.0).contains(&value) => 1,
+            value if (116.0..170.0).contains(&value) => 2,
+            value if (170.0..224.0).contains(&value) => 3,
+            value if (224.0..380.0).contains(&value) => 4,
+            value if (380.0..434.0).contains(&value) => 5,
+            value if (434.0..680.0).contains(&value) => 6,
+            value if value >= 680.0 => 8,
+            _ => return,
+        };
+        let row = background_core::SettingsRow::all()[index];
+        let controls = background_core::background_controls(
+            self.background_path.is_some(),
+            self.background_opacity,
+            self.background_zoom as f64,
+        );
+        if row.is_enabled(controls) {
+            self.settings_focus = Some(row);
+        }
+    }
 
     fn filtered_font_indices(&self) -> Vec<usize> {
         let needle = self.font_search.trim().to_ascii_lowercase();
@@ -589,6 +617,7 @@ impl WindowsAppState {
             font_search: String::new(),
             font_search_focused: false,
             settings_open: false,
+            settings_focus: None,
             settings_motion: 0.0,
             settings_velocity: 0.0,
             extensions_open: false,

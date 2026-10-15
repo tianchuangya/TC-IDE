@@ -218,6 +218,7 @@ pub(super) fn handle_left_button_down(window: Hwnd, l_param: Lparam) -> Lresult 
             APP.with(|cell| {
                 let mut app = cell.borrow_mut();
                 let local_y = (y as f32 - top) / scale;
+                app.focus_settings_row_at(local_y);
                 if (62.0..116.0).contains(&local_y) {
                     app.ui_chinese = !app.ui_chinese;
                 } else if (116.0..170.0).contains(&local_y) {

@@ -488,3 +488,57 @@ mod tests {
         }
     }
 }
+
+/// Walks the focus through a list of controls the keyboard can reach.
+///
+/// The panels differ in what they contain, but the rule is the same
+/// everywhere: Tab moves to the next control that can actually be used, shift
+/// Tab moves back, the ends wrap, and a control that is disabled is skipped
+/// rather than focused and then refused. Keeping it here means Windows, Linux
+/// and macOS walk their panels the same way, and it can be tested without a
+/// window.
+pub fn step_focus<T: Copy + PartialEq>(
+    order: &[T],
+    current: Option<T>,
+    forward: bool,
+) -> Option<T> {
+    if order.is_empty() {
+        return None;
+    }
+    let position = current.and_then(|focused| order.iter().position(|entry| *entry == focused));
+    let next = match position {
+        Some(index) if forward => (index + 1) % order.len(),
+        Some(index) => (index + order.len() - 1) % order.len(),
+        None if forward => 0,
+        None => order.len() - 1,
+    };
+    Some(order[next])
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+
+    #[test]
+    fn the_focus_walks_forward_backward_and_wraps() {
+        let order = ['a', 'b', 'c'];
+        // From nothing, Tab starts at the first and shift Tab at the last.
+        assert_eq!(step_focus(&order, None, true), Some('a'));
+        assert_eq!(step_focus(&order, None, false), Some('c'));
+        // Forward walks and then wraps.
+        assert_eq!(step_focus(&order, Some('a'), true), Some('b'));
+        assert_eq!(step_focus(&order, Some('b'), true), Some('c'));
+        assert_eq!(step_focus(&order, Some('c'), true), Some('a'));
+        // Backward walks and then wraps the other way.
+        assert_eq!(step_focus(&order, Some('a'), false), Some('c'));
+        assert_eq!(step_focus(&order, Some('c'), false), Some('b'));
+        // A single control stays on itself in both directions.
+        assert_eq!(step_focus(&['x'], Some('x'), true), Some('x'));
+        assert_eq!(step_focus(&['x'], None, false), Some('x'));
+        // An empty panel has nowhere to go.
+        assert_eq!(step_focus::<char>(&[], Some('a'), true), None);
+        // A focus that is no longer in the list restarts from the beginning.
+        assert_eq!(step_focus(&order, Some('z'), true), Some('a'));
+        assert_eq!(step_focus(&order, Some('z'), false), Some('c'));
+    }
+}

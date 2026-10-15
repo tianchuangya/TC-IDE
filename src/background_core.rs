@@ -593,3 +593,105 @@ mod background_control_tests {
         assert!(!broken.has_image && !broken.clearable);
     }
 }
+
+/// Rows of a settings panel that the background controls own.
+///
+/// The panel is drawn as a list and the keyboard walks the same list, so both
+/// read one place to decide what a row is for. Only the rows that depend on a
+/// picture can be refused; the rest are always usable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsRow {
+    /// The header, which is never a control.
+    Heading,
+    /// Language, theme, font size, font search.
+    Plain,
+    /// Choosing the picture.
+    ChooseBackground,
+    /// Opacity and zoom.
+    AdjustBackground,
+    /// Clearing the picture.
+    ClearBackground,
+    /// Closing the panel.
+    Close,
+}
+
+impl SettingsRow {
+    /// The rows a settings panel lists, in drawing order.
+    pub fn all() -> [SettingsRow; 9] {
+        [
+            SettingsRow::Heading,
+            SettingsRow::Plain,
+            SettingsRow::Plain,
+            SettingsRow::Plain,
+            SettingsRow::Plain,
+            SettingsRow::ChooseBackground,
+            SettingsRow::AdjustBackground,
+            SettingsRow::ClearBackground,
+            SettingsRow::Close,
+        ]
+    }
+
+    /// Whether the row can be used with the given background state.
+    pub fn is_enabled(self, controls: BackgroundControls) -> bool {
+        match self {
+            SettingsRow::Heading => false,
+            SettingsRow::ChooseBackground | SettingsRow::Close | SettingsRow::Plain => true,
+            SettingsRow::AdjustBackground => controls.has_image,
+            SettingsRow::ClearBackground => controls.clearable,
+        }
+    }
+
+    /// The rows the keyboard can reach, heading excluded.
+    pub fn focusable(controls: BackgroundControls) -> Vec<SettingsRow> {
+        Self::all()
+            .into_iter()
+            .filter(|row| *row != SettingsRow::Heading && row.is_enabled(controls))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod settings_row_tests {
+    use super::*;
+
+    #[test]
+    fn the_settings_rows_say_which_ones_can_be_used() {
+        // Without a picture only the picture dependent rows are refused.
+        let none = background_controls(false, 0.5, 1.0);
+        let rows = SettingsRow::all();
+        assert_eq!(rows.len(), 9);
+        assert!(!SettingsRow::Heading.is_enabled(none));
+        for row in rows {
+            match row {
+                SettingsRow::Heading => assert!(!row.is_enabled(none)),
+                SettingsRow::ChooseBackground | SettingsRow::Close | SettingsRow::Plain => {
+                    assert!(row.is_enabled(none), "{row:?} is always usable")
+                }
+                SettingsRow::AdjustBackground | SettingsRow::ClearBackground => {
+                    assert!(!row.is_enabled(none), "{row:?} needs a picture")
+                }
+            }
+        }
+
+        // With one they can all be used.
+        let some = background_controls(true, 0.5, 1.5);
+        assert!(SettingsRow::AdjustBackground.is_enabled(some));
+        assert!(SettingsRow::ClearBackground.is_enabled(some));
+
+        // The keyboard never lands on the heading, and it skips what is refused.
+        let reachable = SettingsRow::focusable(none);
+        assert!(!reachable.contains(&SettingsRow::Heading));
+        assert!(!reachable.contains(&SettingsRow::AdjustBackground));
+        assert!(!reachable.contains(&SettingsRow::ClearBackground));
+        assert!(reachable.contains(&SettingsRow::ChooseBackground));
+        // Nine rows, minus the heading and the two that need a picture.
+        assert_eq!(reachable.len(), 6);
+        let with_picture = SettingsRow::focusable(some);
+        assert_eq!(
+            with_picture.len(),
+            8,
+            "the heading is the only one left out"
+        );
+        assert!(with_picture.contains(&SettingsRow::ClearBackground));
+    }
+}

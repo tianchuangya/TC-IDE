@@ -69,6 +69,8 @@ pub struct WindowsScene<'a> {
     pub font_search_focused: bool,
     pub font_options: &'a [&'a str],
     pub settings_motion: f32,
+    /// Row the keyboard is on in the settings panel, when it is on one.
+    pub settings_focus: Option<background_core::SettingsRow>,
     pub extensions_motion: f32,
     pub extension_category: usize,
     pub selected_language: usize,
@@ -882,7 +884,13 @@ impl ScenePaint<'_, '_> {
                         DirectEditorRenderer::brush(self.target, visual.text, 1.0).ok(),
                     )
                 };
-                if clickable && state != theme_core::ControlState::Normal {
+                let focused = clickable
+                    && self
+                        .scene
+                        .settings_focus
+                        .map(|row| row == background_core::SettingsRow::all()[index])
+                        .unwrap_or(false);
+                if clickable && (state != theme_core::ControlState::Normal || focused) {
                     if let Some(fill) = fill.as_ref() {
                         unsafe {
                             DirectEditorRenderer::rounded(
@@ -893,6 +901,19 @@ impl ScenePaint<'_, '_> {
                             )
                         };
                     }
+                }
+                // The row the keyboard is on wears an accent ring, so Tab is
+                // visible instead of silent.
+                if focused {
+                    unsafe {
+                        DirectEditorRenderer::outline(
+                            self.target,
+                            &self.accent,
+                            row_rect,
+                            6.0 * self.scale,
+                            2.0 * self.scale,
+                        )
+                    };
                 }
                 let row_enabled = clickable && state != theme_core::ControlState::Disabled;
                 let _ = row_enabled;

@@ -211,6 +211,7 @@ pub(super) fn render_window(window: Hwnd) {
                 code_font_family: app.code_font_family,
                 font_search: &app.font_search,
                 font_search_focused: app.font_search_focused,
+                settings_focus: app.settings_focus,
                 font_options: &WindowsAppState::CODE_FONTS,
                 settings_motion: app.settings_motion,
                 extensions_motion: app.extensions_motion,
