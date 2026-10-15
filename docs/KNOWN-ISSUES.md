@@ -39,7 +39,13 @@ TC-IDE 尚未发布正式版本，也尚未完成 Windows 实机验收。
 - 发布工作流只能手动触发；在项目所有者说"正式开始"之前不会创建标签或 Release。
 - AppImage 步骤依赖联网下载 appimagetool，失败时不会阻断发布，但产物会缺失（文件清单会说明）。
 
-## 已在本地复现 Windows 测试（重要方法）
+## 已在本地与 CI 复现 Windows 测试（重要方法）
+
+**CI 里已经在跑了**：Linux job 的第 7、8 步会安装 mingw 交叉工具链与 Wine，并用
+`bash tools/windows_selfcheck_wine.sh` 编译**真正的 Windows 后端**（含 `windows` crate 与 Direct2D）
+然后运行它的 40 项 `--self-check` 断言。**这一步的输出是普通 job 日志，本机可读**，
+所以 Windows 侧的失败不再只能靠 job 结论猜。
+
 
 本项目此前无法在本机验证 Windows 行为，只能靠 CI 猜。现在可以了：
 
