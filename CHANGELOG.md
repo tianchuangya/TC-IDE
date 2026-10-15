@@ -76,6 +76,9 @@
 
 ### macOS 后端
 
+- 剪贴板、打开面板与菜单栏：`NSPasteboard` 复制/剪切/粘贴、`NSOpenPanel` 打开文件（新标签）与打开文件夹、
+  `NSWorkspace` 在访达中显示，`NSMenu` 的应用/文件/编辑菜单与快捷键共用同一张命令表；
+  字宽改为 AppKit 实测（按字号缓存），光标与选区与字形对齐；撤销/重做按编辑分组。
 - `macos_app.rs` 不再是占位：直接通过 Objective-C 运行时创建 Cocoa 窗口与 `NSView` 子类，标题栏、行号栏、
   代码列、选区、呼吸光标与状态栏都会绘制，输入/换行/退格/Delete/方向键/Home/End/全选/保存都可用，
   编辑状态来自共享的 piece table、视口、会话、调色板与弹簧模型。CI 的 macOS runner 会运行

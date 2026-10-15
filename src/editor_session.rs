@@ -236,7 +236,9 @@ impl EditorSession {
             self.document_mut().selection_anchor = None;
             return false;
         }
+        self.document_mut().buffer.begin_group();
         self.document_mut().buffer.delete(start, end);
+        self.document_mut().buffer.end_group();
         let document = self.document_mut();
         document.caret_line = start.0;
         document.caret_column = start.1;
@@ -262,6 +264,8 @@ impl EditorSession {
             (document.caret_line, document.caret_column)
         };
         let start = (line, column);
+        // A typed run undoes as one step instead of one character at a time.
+        self.document_mut().buffer.begin_group();
         for character in value.chars() {
             if character == '\n' {
                 self.document_mut().buffer.insert(line, column, "\n");
@@ -274,6 +278,7 @@ impl EditorSession {
                 column += 1;
             }
         }
+        self.document_mut().buffer.end_group();
         let document = self.document_mut();
         document.caret_line = line;
         document.caret_column = column;
@@ -398,6 +403,113 @@ impl EditorSession {
         document.caret_column = last_column;
     }
 
+    /// The selected text, with newlines between the lines it covers.
+    pub fn selected_text(&self) -> String {
+        let Some((start, end)) = self.document().selection() else {
+            return String::new();
+        };
+        if start == end {
+            return String::new();
+        }
+        let document = self.document();
+        if start.0 == end.0 {
+            let line: Vec<char> = document.lines[start.0].chars().collect();
+            let from = start.1.min(line.len());
+            let to = end.1.min(line.len()).max(from);
+            return line[from..to].iter().collect();
+        }
+        let mut parts = Vec::new();
+        for (index, line) in document
+            .lines
+            .iter()
+            .enumerate()
+            .skip(start.0)
+            .take(end.0 - start.0 + 1)
+        {
+            let characters: Vec<char> = line.chars().collect();
+            if index == start.0 {
+                parts.push(characters[start.1.min(characters.len())..].iter().collect());
+            } else if index == end.0 {
+                parts.push(characters[..end.1.min(characters.len())].iter().collect());
+            } else {
+                parts.push(line.clone());
+            }
+        }
+        parts.join("\n")
+    }
+
+    /// Copy the selection out, which is what a clipboard write needs.
+    pub fn copy(&mut self) -> String {
+        self.selected_text()
+    }
+
+    /// Cut the selection out: the text goes to the caller and leaves the buffer.
+    pub fn cut(&mut self) -> String {
+        let text = self.selected_text();
+        if !text.is_empty() {
+            self.delete_selection();
+            self.mark_edited();
+        }
+        text
+    }
+
+    /// Paste text at the caret, which replaces a selection.
+    pub fn paste(&mut self, text: &str) {
+        self.insert_text(text);
+    }
+
+    /// Undo the last edit in the active document.
+    pub fn undo(&mut self) -> bool {
+        let caret = self.snapshot();
+        if !self.document_mut().buffer.undo() {
+            return false;
+        }
+        self.after_history_change(caret);
+        true
+    }
+
+    /// Redo the last undone edit.
+    pub fn redo(&mut self) -> bool {
+        let caret = self.snapshot();
+        if !self.document_mut().buffer.redo() {
+            return false;
+        }
+        self.after_history_change(caret);
+        true
+    }
+
+    /// How many edits can be undone.
+    pub fn undo_depth(&self) -> usize {
+        self.document().buffer.undo_depth()
+    }
+
+    /// How many edits can be redone.
+    pub fn redo_depth(&self) -> usize {
+        self.document().buffer.redo_depth()
+    }
+
+    /// Open a file into a new tab, and return its index.
+    pub fn open_file(&mut self, path: PathBuf) -> Result<usize, String> {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+        let name = path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let lines = text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .split('\n')
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        Ok(self.add_document(Document::from_lines(&name, Some(path), lines)))
+    }
+
+    /// Close the active document, unless it is the last one.
+    pub fn close_active(&mut self) -> bool {
+        self.close_document(self.active)
+    }
+
     /// Write the active document back to its path.
     pub fn save(&mut self) -> Result<PathBuf, String> {
         let Some(path) = self.document().path.clone() else {
@@ -489,6 +601,24 @@ impl EditorSession {
     pub fn caret(&self) -> (usize, usize) {
         let document = self.document();
         (document.caret_line, document.caret_column)
+    }
+
+    /// The caret as a plain pair, for the history steps.
+    fn snapshot(&self) -> (usize, usize) {
+        let document = self.document();
+        (document.caret_line, document.caret_column)
+    }
+
+    /// Put the document back in step after an undo or a redo.
+    fn after_history_change(&mut self, caret: (usize, usize)) {
+        let document = self.document_mut();
+        document.sync();
+        document.dirty = true;
+        document.caret_line = caret.0.min(document.lines.len().saturating_sub(1));
+        document.caret_column = caret.1;
+        document.selection_anchor = None;
+        self.clamp_caret();
+        self.reveal_caret();
     }
 
     fn selection_anchor_is_set(&self) -> bool {
@@ -887,5 +1017,101 @@ mod tests {
             header: 46.0,
         });
         assert!(failures.is_empty(), "{failures:?}");
+    }
+    #[test]
+    fn the_selection_can_be_copied_cut_and_pasted() {
+        let mut session = scratch("first line\nsecond line\nthird");
+        session.select_all();
+        assert_eq!(
+            session.selected_text(),
+            "first line\nsecond line\nthird",
+            "select all copies the whole document"
+        );
+        assert!(session.copy().starts_with("first line"));
+
+        // A selection inside one line.
+        session.set_caret(0, 5);
+        session.document_mut().selection_anchor = Some((0, 0));
+        assert_eq!(session.selected_text(), "first");
+
+        // Cutting takes it out and leaves the caret where the selection started.
+        let cut = session.cut();
+        assert_eq!(cut, "first");
+        assert_eq!(session.document().lines[0], " line");
+        assert_eq!(session.caret(), (0, 0));
+        assert!(session.dirty());
+
+        // Pasting puts it back.
+        session.paste(&cut);
+        assert_eq!(session.document().lines[0], "first line");
+        assert_eq!(session.caret(), (0, 5));
+
+        // An empty selection copies nothing.
+        session.set_caret(0, 2);
+        assert_eq!(session.selected_text(), "");
+        assert_eq!(session.cut(), "");
+
+        // A selection that spans lines keeps the newlines between them. The
+        // caret is placed first because setting it clears the anchor.
+        session.set_caret(1, 6);
+        session.document_mut().selection_anchor = Some((0, 6));
+        assert_eq!(session.selected_text(), "line\nsecond");
+        assert_eq!(session.cut(), "line\nsecond");
+        // What is left of the first line joins what followed the selection.
+        assert_eq!(session.document().lines, ["first  line", "third"]);
+    }
+
+    #[test]
+    fn edits_can_be_undone_and_redone() {
+        let mut session = scratch("start");
+        assert_eq!(session.undo_depth(), 0);
+        assert!(!session.undo(), "nothing to undo on a fresh document");
+
+        session.move_to_line_end(true);
+        session.insert_text(" one");
+        session.insert_text(" two");
+        assert_eq!(session.document().lines[0], "start one two");
+        assert!(session.undo_depth() >= 2);
+
+        assert!(session.undo());
+        assert_eq!(session.document().lines[0], "start one");
+        assert!(session.undo());
+        assert_eq!(session.document().lines[0], "start");
+
+        assert!(session.redo());
+        assert_eq!(session.document().lines[0], "start one");
+        assert!(session.redo());
+        assert_eq!(session.document().lines[0], "start one two");
+        assert!(!session.redo(), "the history is empty again");
+
+        // An undo after a cut brings the text back.
+        session.select_all();
+        let cut = session.cut();
+        assert_eq!(session.document().lines, [""]);
+        assert!(session.undo());
+        assert_eq!(session.document().lines[0], cut);
+    }
+
+    #[test]
+    fn a_file_opens_into_its_own_tab() {
+        let directory = std::env::temp_dir().join("tc-ide-open-test");
+        let _ = std::fs::create_dir_all(&directory);
+        let path = directory.join("opened.txt");
+        std::fs::write(&path, "one\ntwo\n").expect("write the fixture");
+        let mut session = scratch("start");
+        let index = session.open_file(path.clone()).expect("open");
+        assert_eq!(index, 1);
+        assert_eq!(session.active(), 1);
+        assert_eq!(session.document().name, "opened.txt");
+        assert_eq!(session.document().path.as_deref(), Some(path.as_path()));
+        assert_eq!(session.document().lines, ["one", "two", ""]);
+        assert!(!session.dirty(), "an opened file starts clean");
+        assert!(session.close_active());
+        assert_eq!(session.documents().len(), 1);
+
+        let missing = session.open_file(directory.join("missing.txt"));
+        assert!(missing.is_err());
+        assert_eq!(session.documents().len(), 1, "a failed open adds no tab");
+        let _ = std::fs::remove_file(&path);
     }
 }

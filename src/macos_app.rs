@@ -43,6 +43,7 @@ extern "C" {
     fn objc_registerClassPair(class: Id);
     fn class_addMethod(class: Id, selector: Sel, implementation: Imp, types: *const c_char)
         -> bool;
+    fn sel_getName(selector: Sel) -> *const c_char;
 }
 
 #[link(name = "AppKit", kind = "framework")]
@@ -78,6 +79,14 @@ struct CGRect {
 struct CGPoint {
     x: c_double,
     y: c_double,
+}
+
+/// A size in view coordinates.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct CGSize {
+    width: c_double,
+    height: c_double,
 }
 
 impl CGRect {
@@ -295,6 +304,214 @@ const COMMAND_MASK: u64 = 1 << 20;
 /// `⇧` in the modifier flags of an event.
 const SHIFT_MASK: u64 = 1 << 17;
 
+/// The general pasteboard, as the object AppKit hands out.
+///
+/// # Safety
+/// Requires a running pasteboard server; call on the main thread.
+unsafe fn general_pasteboard() -> Id {
+    msg_id(class("NSPasteboard"), "generalPasteboard")
+}
+
+/// Write text to the system pasteboard.
+///
+/// # Safety
+/// Call on the main thread.
+unsafe fn pasteboard_write(value: &str) {
+    let pasteboard = general_pasteboard();
+    if pasteboard.is_null() {
+        return;
+    }
+    // The type is the AppKit constant `NSStringPboardType`.
+    msg_long(pasteboard, "clearContents", 0);
+    msg_bool(pasteboard, "setString:forType:", false);
+    let send: extern "C" fn(Id, Sel, Id, Id) -> bool =
+        std::mem::transmute(objc_msgSend as *const c_void);
+    send(
+        pasteboard,
+        selector_name("setString:forType:"),
+        nsstring(value),
+        nsstring("public.utf8-plain-text"),
+    );
+}
+
+/// Read text from the system pasteboard.
+///
+/// # Safety
+/// Call on the main thread.
+unsafe fn pasteboard_read() -> Option<String> {
+    let pasteboard = general_pasteboard();
+    if pasteboard.is_null() {
+        return None;
+    }
+    let string = msg_id_id(
+        pasteboard,
+        "stringForType:",
+        nsstring("public.utf8-plain-text"),
+    );
+    if string.is_null() {
+        return None;
+    }
+    let bytes = msg_utf8(string);
+    if bytes.is_null() {
+        return None;
+    }
+    Some(
+        std::ffi::CStr::from_ptr(bytes)
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// `UTF8String` of an `NSString`.
+///
+/// # Safety
+/// The receiver has to be an `NSString`.
+unsafe fn msg_utf8(receiver: Id) -> *const c_char {
+    let send: extern "C" fn(Id, Sel) -> *const c_char =
+        std::mem::transmute(objc_msgSend as *const c_void);
+    send(receiver, selector_name("UTF8String"))
+}
+
+/// Path of an `NSURL`.
+///
+/// # Safety
+/// The receiver has to be an `NSURL`.
+unsafe fn url_path(url: Id) -> Option<PathBuf> {
+    let path = msg_id(url, "path");
+    if path.is_null() {
+        return None;
+    }
+    let bytes = msg_utf8(path);
+    if bytes.is_null() {
+        return None;
+    }
+    Some(PathBuf::from(
+        std::ffi::CStr::from_ptr(bytes)
+            .to_string_lossy()
+            .into_owned(),
+    ))
+}
+
+/// Run an `NSOpenPanel` and return the chosen path.
+///
+/// # Safety
+/// Call on the main thread with a running application.
+unsafe fn run_open_panel(directories: bool) -> Option<PathBuf> {
+    let panel = msg_id(class("NSOpenPanel"), "openPanel");
+    if panel.is_null() {
+        return None;
+    }
+    msg_bool(panel, "setCanChooseFiles:", !directories);
+    msg_bool(panel, "setCanChooseDirectories:", directories);
+    msg_bool(panel, "setAllowsMultipleSelection:", false);
+    // A modal loop is what a panel needs when the app has no sheets yet.
+    let response = msg_send_long(panel, "runModal");
+    if response != 1 {
+        // 1 is NSModalResponseOK.
+        return None;
+    }
+    let urls = msg_id(panel, "URLs");
+    if urls.is_null() {
+        return None;
+    }
+    let count = msg_usize(urls, "count");
+    if count == 0 {
+        return None;
+    }
+    let first = msg_usize_index(urls, "objectAtIndex:", 0);
+    url_path(first)
+}
+
+/// Ask for a file to open.
+///
+/// # Safety
+/// Call on the main thread.
+unsafe fn choose_file() -> Option<PathBuf> {
+    run_open_panel(false)
+}
+
+/// Ask for a folder to open as a project.
+///
+/// # Safety
+/// Call on the main thread.
+unsafe fn choose_directory() -> Option<PathBuf> {
+    run_open_panel(true)
+}
+
+/// Show a file in the Finder.
+///
+/// # Safety
+/// Call on the main thread.
+unsafe fn reveal_path(path: &std::path::Path) {
+    let workspace = msg_id(class("NSWorkspace"), "sharedWorkspace");
+    if workspace.is_null() {
+        return;
+    }
+    let directory = path
+        .parent()
+        .map(|value| value.display().to_string())
+        .unwrap_or_default();
+    let send: extern "C" fn(Id, Sel, Id, Id) -> bool =
+        std::mem::transmute(objc_msgSend as *const c_void);
+    send(
+        workspace,
+        selector_name("selectFile:inFileViewerRootedAtPath:"),
+        nsstring(&path.display().to_string()),
+        nsstring(&directory),
+    );
+}
+
+/// Width of one character of the code font, measured through AppKit.
+///
+/// # Safety
+/// Call on the main thread.
+unsafe fn measure_cell(size: f64) -> Option<f64> {
+    let font = msg_id_double(class("NSFont"), "monospacedSystemFontOfSize:weight:", size);
+    if font.is_null() {
+        return None;
+    }
+    let attributes = msg_id(class("NSMutableDictionary"), "dictionary");
+    msg_void_id_id(attributes, "setObject:forKey:", font, nsstring("NSFont"));
+    let sample = nsstring("0123456789");
+    let send: extern "C" fn(Id, Sel, Id) -> CGSize =
+        std::mem::transmute(objc_msgSend as *const c_void);
+    let measured = send(sample, selector_name("sizeWithAttributes:"), attributes);
+    if measured.width <= 0.0 {
+        return None;
+    }
+    Some(measured.width / 10.0)
+}
+
+/// Quit the application, after the window is gone.
+///
+/// # Safety
+/// Call on the main thread.
+unsafe fn quit_application() {
+    let application = msg_id(class("NSApplication"), "sharedApplication");
+    if !application.is_null() {
+        msg_void_id(application, "terminate:", ptr::null_mut());
+    }
+}
+
+/// Call a method that returns a modal response.
+///
+/// # Safety
+/// The selector has to exist on the receiver.
+unsafe fn msg_send_long(receiver: Id, selector: &str) -> c_long {
+    let send: extern "C" fn(Id, Sel) -> c_long = std::mem::transmute(objc_msgSend as *const c_void);
+    send(receiver, selector_name(selector))
+}
+
+/// Call `objectAtIndex:`.
+///
+/// # Safety
+/// The receiver has to be an array.
+unsafe fn msg_usize_index(receiver: Id, selector: &str, index: usize) -> Id {
+    let send: extern "C" fn(Id, Sel, usize) -> Id =
+        std::mem::transmute(objc_msgSend as *const c_void);
+    send(receiver, selector_name(selector), index)
+}
+
 /// A key the editor understands, with the macOS key code it comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MacCommand {
@@ -310,13 +527,23 @@ enum MacCommand {
     SelectAll,
     Save,
     Tab,
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    OpenFile,
+    OpenFolder,
+    Reveal,
+    Quit,
 }
 
 /// Map a key code and modifiers to an editor command.
 ///
 /// Virtual key codes are layout independent on macOS, which is why the mapping
-/// is a table instead of a character comparison. `command` is the `⌘` key.
-fn key_command(key_code: u16, command: bool, _shift: bool) -> Option<MacCommand> {
+/// is a table instead of a character comparison. `command` is the `⌘` key and
+/// `shift` picks the second meaning of a shortcut.
+fn key_command(key_code: u16, command: bool, shift: bool) -> Option<MacCommand> {
     match key_code {
         // 36 return, 76 keypad enter, 51 delete, 117 forward delete.
         36 | 76 => Some(MacCommand::InsertNewline),
@@ -329,9 +556,37 @@ fn key_command(key_code: u16, command: bool, _shift: bool) -> Option<MacCommand>
         115 => Some(MacCommand::MoveLineStart),
         119 => Some(MacCommand::MoveLineEnd),
         48 => Some(MacCommand::Tab),
-        // ⌘A selects everything and ⌘S saves.
+        // ⌘ shortcuts, by key code: a s z x c v o r q.
         0 if command => Some(MacCommand::SelectAll),
         1 if command => Some(MacCommand::Save),
+        6 if command && shift => Some(MacCommand::Redo),
+        6 if command => Some(MacCommand::Undo),
+        7 if command => Some(MacCommand::Cut),
+        8 if command => Some(MacCommand::Copy),
+        9 if command => Some(MacCommand::Paste),
+        31 if command && shift => Some(MacCommand::OpenFolder),
+        31 if command => Some(MacCommand::OpenFile),
+        15 if command && shift => Some(MacCommand::Reveal),
+        _ => None,
+    }
+}
+
+/// The command a menu item stands for.
+///
+/// The menu and the key table share this mapping, so a menu item and its
+/// shortcut can never do two different things.
+fn command_for_menu_action(action: &str) -> Option<MacCommand> {
+    match action {
+        "tcUndo:" => Some(MacCommand::Undo),
+        "tcRedo:" => Some(MacCommand::Redo),
+        "tcCut:" => Some(MacCommand::Cut),
+        "tcCopy:" => Some(MacCommand::Copy),
+        "tcPaste:" => Some(MacCommand::Paste),
+        "tcOpen:" => Some(MacCommand::OpenFile),
+        "tcOpenFolder:" => Some(MacCommand::OpenFolder),
+        "tcSave:" => Some(MacCommand::Save),
+        "tcReveal:" => Some(MacCommand::Reveal),
+        "tcQuit:" => Some(MacCommand::Quit),
         _ => None,
     }
 }
@@ -352,6 +607,9 @@ struct MacShell {
     palette: theme_core::Palette,
     status: String,
     started: Instant,
+    /// Cell width AppKit measured for the current font size.
+    measured_cell: Option<f64>,
+    measured_cell_size: f64,
     window: Id,
     view: Id,
 }
@@ -375,6 +633,8 @@ impl MacShell {
             preferences,
             status: "Ready".into(),
             started: Instant::now(),
+            measured_cell: None,
+            measured_cell_size: 0.0,
             window: ptr::null_mut(),
             view: ptr::null_mut(),
         }
@@ -447,26 +707,147 @@ impl MacShell {
 
     /// Apply a command through the shared session.
     fn apply(&mut self, command: MacCommand) {
-        let session = &mut self.session;
         match command {
-            MacCommand::InsertNewline => session.insert_text("\n"),
-            MacCommand::Backspace => session.backspace(),
-            MacCommand::DeleteForward => session.delete_forward(),
-            MacCommand::MoveLeft => session.move_caret(0, -1),
-            MacCommand::MoveRight => session.move_caret(0, 1),
-            MacCommand::MoveUp => session.move_caret(-1, 0),
-            MacCommand::MoveDown => session.move_caret(1, 0),
-            MacCommand::MoveLineStart => session.move_to_line_end(false),
-            MacCommand::MoveLineEnd => session.move_to_line_end(true),
-            MacCommand::SelectAll => session.select_all(),
-            MacCommand::Tab => session.insert_text("    "),
+            MacCommand::InsertNewline => self.session.insert_text("\n"),
+            MacCommand::Backspace => self.session.backspace(),
+            MacCommand::DeleteForward => self.session.delete_forward(),
+            MacCommand::MoveLeft => self.session.move_caret(0, -1),
+            MacCommand::MoveRight => self.session.move_caret(0, 1),
+            MacCommand::MoveUp => self.session.move_caret(-1, 0),
+            MacCommand::MoveDown => self.session.move_caret(1, 0),
+            MacCommand::MoveLineStart => self.session.move_to_line_end(false),
+            MacCommand::MoveLineEnd => self.session.move_to_line_end(true),
+            MacCommand::SelectAll => self.session.select_all(),
+            MacCommand::Tab => self.session.insert_text("    "),
             MacCommand::Save => {
-                self.status = match session.save() {
+                self.status = match self.session.save() {
                     Ok(path) => format!("Saved {}", path.display()),
                     Err(message) => message,
                 }
             }
+            MacCommand::Undo => {
+                self.status = if self.session.undo() {
+                    "Undone".into()
+                } else {
+                    "Nothing left to undo".into()
+                };
+            }
+            MacCommand::Redo => {
+                self.status = if self.session.redo() {
+                    "Redone".into()
+                } else {
+                    "Nothing left to redo".into()
+                };
+            }
+            MacCommand::Copy => self.copy_selection(),
+            MacCommand::Cut => self.cut_selection(),
+            MacCommand::Paste => self.paste_clipboard(),
+            MacCommand::OpenFile => self.open_file_panel(),
+            MacCommand::OpenFolder => self.open_project_panel(),
+            MacCommand::Reveal => self.reveal_in_finder(),
+            MacCommand::Quit => unsafe { quit_application() },
         }
+    }
+
+    /// Copy the selection to the system pasteboard.
+    fn copy_selection(&mut self) {
+        let text = self.session.copy();
+        if text.is_empty() {
+            self.status = "Nothing selected to copy".into();
+            return;
+        }
+        unsafe { pasteboard_write(&text) };
+        self.status = format!("Copied {} character(s)", text.chars().count());
+    }
+
+    /// Cut the selection to the system pasteboard.
+    fn cut_selection(&mut self) {
+        let text = self.session.cut();
+        if text.is_empty() {
+            self.status = "Nothing selected to cut".into();
+            return;
+        }
+        unsafe { pasteboard_write(&text) };
+        self.status = format!("Cut {} character(s)", text.chars().count());
+    }
+
+    /// Paste the pasteboard into the document, replacing a selection.
+    fn paste_clipboard(&mut self) {
+        let read = unsafe { pasteboard_read() };
+        let Some(text) = read else {
+            self.status = "The pasteboard holds no text".into();
+            return;
+        };
+        let characters = text.chars().count();
+        self.session.paste(&text);
+        self.status = format!("Pasted {characters} character(s)");
+    }
+
+    /// Ask the user for a file and open it in a tab.
+    fn open_file_panel(&mut self) {
+        let chosen = unsafe { choose_file() };
+        let Some(path) = chosen else {
+            self.status = "No file chosen".into();
+            return;
+        };
+        self.status = match self.session.open_file(path.clone()) {
+            Ok(_) => format!("Opened {}", path.display()),
+            Err(message) => message,
+        };
+    }
+
+    /// Ask the user for a folder and remember it as the project.
+    fn open_project_panel(&mut self) {
+        let chosen = unsafe { choose_directory() };
+        let Some(path) = chosen else {
+            self.status = "No folder chosen".into();
+            return;
+        };
+        self.open_project(path);
+    }
+
+    /// Show the active file in the Finder.
+    fn reveal_in_finder(&mut self) {
+        let Some(path) = self.session.document().path.clone() else {
+            self.status = "Save the file before revealing it".into();
+            return;
+        };
+        unsafe { reveal_path(&path) };
+        self.status = format!("Revealed {}", path.display());
+    }
+
+    /// The width of one character of the code font, measured through AppKit.
+    ///
+    /// The caret and the selection are placed by this number, so a fallback is
+    /// only used when AppKit cannot measure at all.
+    fn cell_width(&mut self) -> f64 {
+        let size = self.code_font_size();
+        if let Some(measured) = self.measured_cell {
+            if (self.measured_cell_size - size).abs() < 0.01 {
+                return measured;
+            }
+        }
+        let measured = unsafe { measure_cell(size) }.unwrap_or(TEXT_CELL);
+        self.measured_cell = Some(measured);
+        self.measured_cell_size = size;
+        measured
+    }
+
+    /// Where a column of the code column starts, in points.
+    fn column_x(&mut self, column: usize) -> f64 {
+        let cell = self.cell_width();
+        Self::column_x_with(column, cell)
+    }
+
+    /// Where a column starts, with a cell width the caller already has.
+    fn column_x_with(column: usize, cell: f64) -> f64 {
+        GUTTER_WIDTH + column as f64 * cell
+    }
+
+    /// The column under a point, with the measured cell width.
+    fn column_at_point(&mut self, x: f64, line: usize) -> usize {
+        let cell = self.cell_width();
+        self.session.column_at(x, GUTTER_WIDTH, cell, line)
     }
 
     /// Place the caret at a point of the view.
@@ -476,7 +857,7 @@ impl MacShell {
             return;
         }
         let line = self.session.line_at(y, area.y, self.line_step());
-        let column = self.session.column_at(x, area.x, TEXT_CELL, line);
+        let column = self.column_at_point(x, line);
         self.session.set_caret(line, column);
     }
 
@@ -576,6 +957,9 @@ unsafe fn draw_frame(shell: &mut MacShell) {
     let step = shell.line_step();
     let font = shell.code_font_size();
     let palette = shell.palette;
+    // The caret and the selection are placed with the width AppKit measures for
+    // this font size, so they line up with the glyphs.
+    let cell = shell.cell_width();
     fill_rect(
         CGRect::new(0.0, 0.0, width, height),
         palette.background,
@@ -616,8 +1000,8 @@ unsafe fn draw_frame(shell: &mut MacShell) {
                 } else {
                     line.chars().count()
                 };
-                let left = GUTTER_WIDTH + (from.saturating_sub(scroll_columns)) as f64 * TEXT_CELL;
-                let right = GUTTER_WIDTH + (to.saturating_sub(scroll_columns)) as f64 * TEXT_CELL;
+                let left = MacShell::column_x_with(from.saturating_sub(scroll_columns), cell);
+                let right = MacShell::column_x_with(to.saturating_sub(scroll_columns), cell);
                 fill_rect(
                     CGRect::new(left, y, (right - left).max(2.0), step - 2.0),
                     palette.selection,
@@ -641,8 +1025,7 @@ unsafe fn draw_frame(shell: &mut MacShell) {
     if caret_line >= scroll_lines {
         let row = caret_line - scroll_lines;
         if row <= rows {
-            let column = caret_column.saturating_sub(scroll_columns) as f64;
-            let x = GUTTER_WIDTH + column * TEXT_CELL;
+            let x = MacShell::column_x_with(caret_column.saturating_sub(scroll_columns), cell);
             let y = area.y + row as f64 * step;
             let pulse = shell.session.caret_spring.progress(1.0).clamp(0.0, 1.0);
             fill_rect(
@@ -720,6 +1103,133 @@ unsafe extern "C" fn editor_mouse_down(view: Id, _selector: Sel, event: Id) {
     let height = msg_rect_out(view, "bounds").height;
     let y = height - point.y;
     with_shell(|shell| shell.click_at(point.x, y));
+}
+
+/// `menu_action:` of the menu target: dispatch a menu item to its command.
+unsafe extern "C" fn menu_action(_target: Id, selector: Sel) {
+    let name = selector_name_text(selector);
+    if let Some(command) = command_for_menu_action(&name) {
+        with_shell(|shell| shell.apply(command));
+    }
+}
+
+/// Name of a selector, as the runtime knows it.
+///
+/// # Safety
+/// The selector has to be a registered selector.
+unsafe fn selector_name_text(selector: Sel) -> String {
+    let text = sel_getName(selector);
+    if text.is_null() {
+        return String::new();
+    }
+    std::ffi::CStr::from_ptr(text)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Build one menu item with its action, target and key equivalent.
+///
+/// # Safety
+/// Call on the main thread.
+unsafe fn menu_item(title: &str, action: &str, key: &str, target: Id) -> Id {
+    let send: extern "C" fn(Id, Sel, Id, Sel, Id) -> Id =
+        std::mem::transmute(objc_msgSend as *const c_void);
+    let item = send(
+        msg_id(class("NSMenuItem"), "alloc"),
+        selector_name("initWithTitle:action:keyEquivalent:"),
+        nsstring(title),
+        selector_name(action),
+        nsstring(key),
+    );
+    msg_void_id(item, "setTarget:", target);
+    item
+}
+
+/// Build the application menu bar and install it.
+///
+/// # Safety
+/// Call on the main thread after the application object exists.
+unsafe fn install_menu_bar() {
+    let target_class_name = CString::new("TcIdeMenuTarget").unwrap_or_default();
+    if class("TcIdeMenuTarget").is_null() {
+        let subclass = objc_allocateClassPair(class("NSObject"), target_class_name.as_ptr(), 0);
+        if !subclass.is_null() {
+            let void = CString::new("v@:@").unwrap_or_default();
+            for action in [
+                "tcUndo:",
+                "tcRedo:",
+                "tcCut:",
+                "tcCopy:",
+                "tcPaste:",
+                "tcOpen:",
+                "tcOpenFolder:",
+                "tcSave:",
+                "tcReveal:",
+                "tcQuit:",
+            ] {
+                class_addMethod(
+                    subclass,
+                    selector_name(action),
+                    std::mem::transmute::<unsafe extern "C" fn(Id, Sel), Imp>(menu_action),
+                    void.as_ptr(),
+                );
+            }
+            objc_registerClassPair(subclass);
+        }
+    }
+    let target = msg_id(class("TcIdeMenuTarget"), "new");
+    let main_menu = msg_init_string(class("NSMenu"), "initWithTitle:", "TC-IDE");
+
+    // Application menu: the first item is the app name, as AppKit expects.
+    let app_menu = msg_init_string(class("NSMenu"), "initWithTitle:", "TC-IDE");
+    let quit = menu_item("Quit TC-IDE", "tcQuit:", "q", target);
+    msg_void_id(app_menu, "addItem:", quit);
+    let app_item = msg_init_string(class("NSMenuItem"), "initWithTitle:", "TC-IDE");
+    msg_void_id(app_item, "setSubmenu:", app_menu);
+    msg_void_id(main_menu, "addItem:", app_item);
+
+    // File menu.
+    let file_menu = msg_init_string(class("NSMenu"), "initWithTitle:", "File");
+    for (title, action, key) in [
+        ("Open File…", "tcOpen:", "o"),
+        ("Open Folder…", "tcOpenFolder:", "O"),
+        ("Save", "tcSave:", "s"),
+        ("Reveal in Finder", "tcReveal:", "R"),
+    ] {
+        let item = menu_item(title, action, key, target);
+        msg_void_id(file_menu, "addItem:", item);
+    }
+    let file_item = msg_init_string(class("NSMenuItem"), "initWithTitle:", "File");
+    msg_void_id(file_item, "setSubmenu:", file_menu);
+    msg_void_id(main_menu, "addItem:", file_item);
+
+    // Edit menu.
+    let edit_menu = msg_init_string(class("NSMenu"), "initWithTitle:", "Edit");
+    for (title, action, key) in [
+        ("Undo", "tcUndo:", "z"),
+        ("Redo", "tcRedo:", "Z"),
+        ("Cut", "tcCut:", "x"),
+        ("Copy", "tcCopy:", "c"),
+        ("Paste", "tcPaste:", "v"),
+    ] {
+        let item = menu_item(title, action, key, target);
+        msg_void_id(edit_menu, "addItem:", item);
+    }
+    let edit_item = msg_init_string(class("NSMenuItem"), "initWithTitle:", "Edit");
+    msg_void_id(edit_item, "setSubmenu:", edit_menu);
+    msg_void_id(main_menu, "addItem:", edit_item);
+
+    let application = msg_id(class("NSApplication"), "sharedApplication");
+    msg_void_id(application, "setMainMenu:", main_menu);
+}
+
+/// `initWithTitle:` of an `NSMenu` or an `NSMenuItem`.
+///
+/// # Safety
+/// The receiver has to answer that selector.
+unsafe fn msg_init_string(receiver: Id, selector: &str, title: &str) -> Id {
+    let send: extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(objc_msgSend as *const c_void);
+    send(receiver, selector_name(selector), nsstring(title))
 }
 
 /// Register the editor view class.
@@ -849,6 +1359,7 @@ unsafe fn build_window(width: f64, height: f64) {
     msg_void_id(window, "setContentView:", view);
     msg_bool(window, "makeFirstResponder:", true);
     msg_bool(window, "makeKeyAndOrderFront:", true);
+    install_menu_bar();
     with_shell(|shell| {
         shell.window = window;
         shell.view = view;
@@ -977,6 +1488,50 @@ fn self_check() -> i32 {
         is_printable_key(8, false) && !is_printable_key(51, false) && !is_printable_key(0, true),
         &mut failures,
     );
+    report(
+        "the clipboard and file shortcuts are mapped",
+        key_command(8, true, false) == Some(MacCommand::Copy)
+            && key_command(9, true, false) == Some(MacCommand::Paste)
+            && key_command(7, true, false) == Some(MacCommand::Cut)
+            && key_command(31, true, false) == Some(MacCommand::OpenFile)
+            && key_command(31, true, true) == Some(MacCommand::OpenFolder)
+            && key_command(6, true, false) == Some(MacCommand::Undo)
+            && key_command(6, true, true) == Some(MacCommand::Redo)
+            && key_command(15, true, true) == Some(MacCommand::Reveal),
+        &mut failures,
+    );
+    report(
+        "the menu items use the same commands as the keys",
+        command_for_menu_action("tcCopy:") == Some(MacCommand::Copy)
+            && command_for_menu_action("tcPaste:") == Some(MacCommand::Paste)
+            && command_for_menu_action("tcUndo:") == Some(MacCommand::Undo)
+            && command_for_menu_action("tcRedo:") == Some(MacCommand::Redo)
+            && command_for_menu_action("tcOpen:") == Some(MacCommand::OpenFile)
+            && command_for_menu_action("tcOpenFolder:") == Some(MacCommand::OpenFolder)
+            && command_for_menu_action("tcSave:") == Some(MacCommand::Save)
+            && command_for_menu_action("tcReveal:") == Some(MacCommand::Reveal)
+            && command_for_menu_action("tcQuit:") == Some(MacCommand::Quit)
+            && command_for_menu_action("somethingElse:").is_none(),
+        &mut failures,
+    );
+    // Undo and undo-again through the session, which is what the menu calls.
+    shell.session.replace_all("start");
+    shell.session.move_to_line_end(true);
+    shell.session.insert_text(" one");
+    let undone = shell.session.undo();
+    report(
+        "an edit can be undone and redone",
+        undone
+            && shell.session.document().lines == ["start"]
+            && shell.session.redo()
+            && shell.session.document().lines == ["start one"],
+        &mut failures,
+    );
+    report(
+        "a column is placed with the measured cell width",
+        (MacShell::column_x_with(4, 8.0) - (GUTTER_WIDTH + 32.0)).abs() < 1.0e-9,
+        &mut failures,
+    );
 
     // The editing itself is checked once, in the shared session, where the same
     // assertions run on every platform instead of only on the macOS runner.
@@ -1070,5 +1625,51 @@ mod tests {
         );
         assert_eq!(shell.text_area().y, shell.header_height());
         assert_eq!(shell.text_area().x, GUTTER_WIDTH);
+    }
+
+    #[test]
+    fn the_clipboard_and_file_shortcuts_are_mapped() {
+        assert_eq!(key_command(8, true, false), Some(MacCommand::Copy));
+        assert_eq!(key_command(9, true, false), Some(MacCommand::Paste));
+        assert_eq!(key_command(7, true, false), Some(MacCommand::Cut));
+        assert_eq!(key_command(31, true, false), Some(MacCommand::OpenFile));
+        assert_eq!(key_command(31, true, true), Some(MacCommand::OpenFolder));
+        assert_eq!(key_command(6, true, false), Some(MacCommand::Undo));
+        assert_eq!(key_command(6, true, true), Some(MacCommand::Redo));
+        assert_eq!(key_command(15, true, true), Some(MacCommand::Reveal));
+        // Without the command key the same keys are text, not shortcuts.
+        assert_eq!(key_command(8, false, false), None);
+        assert_eq!(key_command(6, false, false), None);
+        assert_eq!(key_command(15, false, true), None);
+    }
+
+    #[test]
+    fn every_menu_item_maps_to_one_command() {
+        for (action, command) in [
+            ("tcUndo:", MacCommand::Undo),
+            ("tcRedo:", MacCommand::Redo),
+            ("tcCut:", MacCommand::Cut),
+            ("tcCopy:", MacCommand::Copy),
+            ("tcPaste:", MacCommand::Paste),
+            ("tcOpen:", MacCommand::OpenFile),
+            ("tcOpenFolder:", MacCommand::OpenFolder),
+            ("tcSave:", MacCommand::Save),
+            ("tcReveal:", MacCommand::Reveal),
+            ("tcQuit:", MacCommand::Quit),
+        ] {
+            assert_eq!(command_for_menu_action(action), Some(command), "{action}");
+        }
+        assert_eq!(command_for_menu_action("tcMissing:"), None);
+        assert_eq!(command_for_menu_action(""), None);
+    }
+
+    #[test]
+    fn the_measured_cell_places_the_columns() {
+        assert!((MacShell::column_x_with(0, 8.0) - GUTTER_WIDTH).abs() < 1.0e-9);
+        assert!((MacShell::column_x_with(4, 8.0) - (GUTTER_WIDTH + 32.0)).abs() < 1.0e-9);
+        // A measured cell that AppKit could not produce falls back to one that
+        // still lines the caret up with the digits.
+        let fallback = TEXT_CELL;
+        assert!(fallback > 0.0 && fallback < 20.0);
     }
 }
