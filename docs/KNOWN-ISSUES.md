@@ -38,3 +38,27 @@ TC-IDE 尚未发布正式版本，也尚未完成 Windows 实机验收。
   与 Clippy，不能替代真机行为验证。
 - 发布工作流只能手动触发；在项目所有者说"正式开始"之前不会创建标签或 Release。
 - AppImage 步骤依赖联网下载 appimagetool，失败时不会阻断发布，但产物会缺失（文件清单会说明）。
+
+## 待办：返回类型推断在 Windows 上导致测试失败（已回滚，待重新落地）
+
+第 21 轮曾实现"函数声明的返回类型"推断（`let engine = build(); engine.run()` 解析到 `Engine::run`，关系图画出真实 Callee 边），
+本地全绿（245 项测试 + 三目标 clippy + fmt），但 **Windows job 的第 4 步 `cargo test --all-targets` 变红**。
+
+已确认与运行器无关：在该提交之上再推一个**空提交**同样失败，而它之前/之后的提交都绿；`046c194` 与失败树只差这两个文件。
+
+已经排除的：
+- Windows 目标编译（`cargo check --all-targets --target x86_64-pc-windows-msvc`）干净；`--tests`/`--profile test` 也干净。
+- 新增解析对畸形输入不 panic（做过一轮 fuzz）。
+- `TokenKind` 新增变体后三端 match 均完整；Windows 只有 5 个测试且都是 UI 状态，不涉及分词。
+- 缩小规则（只认 `name(...)` 这一种形状）后仍然失败。
+
+因此**嫌疑集中在 `scan()` 的行为改动**：它在每一行上调用新的 `declared_return_type`，而 `scan` 被关系图、各面板与两个原生后端读取。
+本机无法读取 GitHub 的 job 日志（API 返回 403），也没有 Windows 实机，所以不能在本地复现。
+
+**重新落地的建议**：拆成可二分的小步——
+1. 先只加 `declared_return_type` 纯函数与它的单元测试（不改 `scan`），推一次确认绿；
+2. 再让 `scan` 记录返回类型但不产生绑定，推一次；
+3. 最后才让 `local_binding` 使用它。
+每一步都能定位到具体是哪一处触发 Windows 失败。
+
+实现与测试都在 git 历史里（`82b2b93`、`703f76b`，回滚见 `ab0e979`）。
