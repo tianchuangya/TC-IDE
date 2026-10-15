@@ -532,3 +532,227 @@ mod tests {
         assert_eq!(found[1].start, 7, "the second one is after the space");
     }
 }
+
+/// One file's worth of matches, which is what a project search returns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileMatches {
+    /// Path of the file the matches are in.
+    pub path: String,
+    /// Matches in reading order.
+    pub matches: Vec<Match>,
+    /// The line each match is on, as it was searched.
+    ///
+    /// Carried with the matches so a caller can show the text that matched
+    /// without reading the file again, and so a result list stays truthful
+    /// about what was found even if the file changes underneath it.
+    pub lines: Vec<String>,
+}
+
+impl FileMatches {
+    /// How many matches the file holds.
+    pub fn count(&self) -> usize {
+        self.matches.len()
+    }
+
+    /// The text of a match, for a result list.
+    pub fn matched_text(&self, index: usize) -> Option<&str> {
+        let found = self.matches.get(index)?;
+        let line = self.lines.get(found.line)?;
+        line.get(found.start..found.end)
+    }
+
+    /// The whole line a match sits on, trimmed for display.
+    pub fn line_text(&self, index: usize) -> Option<&str> {
+        let found = self.matches.get(index)?;
+        self.lines.get(found.line).map(|line| line.trim())
+    }
+}
+
+/// Search one file's worth of text.
+///
+/// A file with no matches is not returned at all, so a caller never has to
+/// filter empty results out of a list.
+pub fn search_file(path: &str, lines: &[String], query: &Query) -> Option<FileMatches> {
+    let matches = find_in_lines(lines, query);
+    if matches.is_empty() {
+        return None;
+    }
+    Some(FileMatches {
+        path: path.to_string(),
+        matches,
+        lines: lines.to_vec(),
+    })
+}
+
+/// Search many files, ordered by path so the result list is stable.
+///
+/// Ordering matters for a result list a person steps through: the same search
+/// twice should list the same files in the same order, or the cursor moves
+/// under them between runs.
+pub fn search_files(files: &[(String, Vec<String>)], query: &Query) -> Vec<FileMatches> {
+    let mut found = files
+        .iter()
+        .filter_map(|(path, lines)| search_file(path, lines, query))
+        .collect::<Vec<_>>();
+    found.sort_by(|left, right| left.path.cmp(&right.path));
+    found
+}
+
+/// How many matches a project search found, across every file.
+pub fn total_matches(files: &[FileMatches]) -> usize {
+    files.iter().map(|file| file.count()).sum()
+}
+
+/// A flat list of every match in a project search, in file then reading order.
+///
+/// A result list is stepped through one match at a time, so the files are
+/// flattened into the order they are shown in.
+pub fn flatten_matches(files: &[FileMatches]) -> Vec<(String, Match)> {
+    let mut out = Vec::new();
+    for file in files {
+        for found in &file.matches {
+            out.push((file.path.clone(), *found));
+        }
+    }
+    out
+}
+
+/// A short description of a match for a result list.
+///
+/// The line is trimmed and cut to a readable width, with the match kept inside
+/// the cut when it can be, because a result that hides the text that matched
+/// is not worth showing.
+pub fn match_summary(file: &FileMatches, index: usize, width: usize) -> String {
+    let Some(found) = file.matches.get(index) else {
+        return String::new();
+    };
+    let Some(line) = file.lines.get(found.line) else {
+        return String::new();
+    };
+    let characters = line.chars().collect::<Vec<_>>();
+    let start = line[..found.start.min(line.len())].chars().count();
+    let end = line[..found.end.min(line.len())].chars().count();
+    if characters.len() <= width {
+        return line.trim().to_string();
+    }
+    // Centre the window on the match so the matched text is visible.
+    let matched = end.saturating_sub(start).max(1);
+    let half = width.saturating_sub(matched) / 2;
+    let from = start.saturating_sub(half).min(characters.len() - width);
+    let text = characters[from..from + width].iter().collect::<String>();
+    let trimmed = text.trim();
+    if from > 0 {
+        format!("…{trimmed}")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod project_tests {
+    use super::*;
+
+    fn project() -> Vec<(String, Vec<String>)> {
+        vec![
+            (
+                "src/b.rs".to_string(),
+                vec!["fn other() {".to_string(), "    build();".to_string()],
+            ),
+            (
+                "src/a.rs".to_string(),
+                vec![
+                    "fn build() {}".to_string(),
+                    "".to_string(),
+                    "fn main() {".to_string(),
+                    "    build();".to_string(),
+                    "    build();".to_string(),
+                    "}".to_string(),
+                ],
+            ),
+            ("src/c.rs".to_string(), vec!["// nothing here".to_string()]),
+        ]
+    }
+
+    #[test]
+    fn a_project_search_reports_the_files_that_hold_matches() {
+        let files = search_files(&project(), &Query::new("build"));
+        assert_eq!(files.len(), 2, "c.rs has none and is left out");
+        // The files come back in path order, so the same search lists them the
+        // same way twice.
+        assert_eq!(files[0].path, "src/a.rs");
+        assert_eq!(files[1].path, "src/b.rs");
+        assert_eq!(files[0].count(), 3);
+        assert_eq!(files[1].count(), 1);
+        assert_eq!(total_matches(&files), 4);
+        // A file with no matches is not returned at all rather than returned
+        // empty, so a caller never has to filter.
+        assert!(!files.iter().any(|file| file.path == "src/c.rs"));
+    }
+
+    #[test]
+    fn a_match_can_be_shown_without_reading_the_file_again() {
+        let files = search_files(&project(), &Query::new("build"));
+        let a = &files[0];
+        // The matched text and the line it sits on are both available, which
+        // is what a result list draws.
+        assert_eq!(a.matched_text(0), Some("build"));
+        assert_eq!(a.line_text(0), Some("fn build() {}"));
+        assert_eq!(a.line_text(1), Some("build();"));
+        // An index past the end gives nothing rather than panicking.
+        assert_eq!(a.matched_text(9), None);
+        assert_eq!(a.line_text(9), None);
+    }
+
+    #[test]
+    fn every_match_in_a_project_can_be_stepped_through() {
+        let files = search_files(&project(), &Query::new("build"));
+        let flat = flatten_matches(&files);
+        assert_eq!(flat.len(), 4);
+        // The order is file then reading order, which is the order a list
+        // shows them in and the order stepping through them follows.
+        assert_eq!(flat[0].0, "src/a.rs");
+        assert_eq!(flat[0].1.line, 0);
+        assert_eq!(flat[1].1.line, 3);
+        assert_eq!(flat[2].1.line, 4);
+        assert_eq!(flat[3].0, "src/b.rs");
+        // Stepping from one to the next visits each once, in that order.
+        let mut seen = Vec::new();
+        for (path, found) in &flat {
+            seen.push((path.clone(), found.line));
+        }
+        assert_eq!(seen.len(), 4);
+        assert!(seen.windows(2).all(|pair| pair[0] != pair[1]));
+    }
+
+    #[test]
+    fn a_long_line_is_cut_around_the_match() {
+        // A result line is cut to a readable width, and the cut keeps the text
+        // that matched visible: a result that hides it is not worth showing.
+        let lines = vec![format!("    let x = {} + 1;", "a".repeat(200))];
+        let file = search_file("src/a.rs", &lines, &Query::new("aaaa")).expect("a match");
+        let summary = match_summary(&file, 0, 40);
+        assert!(summary.contains("aaaa"), "{summary}");
+        assert!(
+            summary.chars().count() <= 42,
+            "{} chars",
+            summary.chars().count()
+        );
+        // A short line is shown as it is, trimmed.
+        let short = vec!["    build();    ".to_string()];
+        let file = search_file("src/a.rs", &short, &Query::new("build")).expect("a match");
+        assert_eq!(match_summary(&file, 0, 40), "build();");
+        // An index past the end gives nothing.
+        assert_eq!(match_summary(&file, 9, 40), "");
+    }
+
+    #[test]
+    fn a_project_search_over_nothing_finds_nothing() {
+        // No files, and a query that matches nowhere, both give an empty list
+        // rather than a file with no matches in it.
+        assert!(search_files(&[], &Query::new("build")).is_empty());
+        assert!(search_files(&project(), &Query::new("absent")).is_empty());
+        assert!(search_files(&project(), &Query::new("")).is_empty());
+        assert_eq!(total_matches(&[]), 0);
+        assert!(flatten_matches(&[]).is_empty());
+    }
+}

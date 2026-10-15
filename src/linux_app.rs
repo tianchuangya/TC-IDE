@@ -791,6 +791,9 @@ struct App {
     find_whole_word: bool,
     /// Which match the search is on, out of the matches in the file.
     find_index: usize,
+    /// Matches of the same search across the whole project.
+    project_matches: Vec<search_core::FileMatches>,
+    project_match_index: usize,
     /// Which field has the keyboard.
     find_focused: bool,
     find_replace_focused: bool,
@@ -3577,6 +3580,7 @@ impl App {
         self.draw_language_overlays();
         self.draw_goto_prompt();
         self.draw_find_bar();
+        self.draw_project_results();
         self.draw_condition_prompt();
         if self.create_kind.is_some() && self.create_motion.value > 0.01 {
             self.draw_create_dialog();
@@ -5997,6 +6001,58 @@ impl App {
                 ));
                 true
             }
+            "project-find" => {
+                // A search across several files, so the result list, the file
+                // each match is in and the highlighted row can all be seen.
+                self.files = vec![FileBuffer::new(
+                    "main.rs".into(),
+                    PathBuf::from("/tmp/tc-ide-preview/src/main.rs"),
+                    vec![
+                        "use crate::engine::Engine;".into(),
+                        "".into(),
+                        "fn main() {".into(),
+                        "    let engine = Engine::new();".into(),
+                        "    engine.start();".into(),
+                        "}".into(),
+                    ],
+                )];
+                self.selected_file = 0;
+                self.caret_line = 3;
+                self.caret_column = 8;
+                self.find_open = true;
+                self.find_focused = true;
+                self.find_text = "engine".into();
+                self.replace_text = String::new();
+                self.project_matches = search_core::search_files(
+                    &[
+                        (
+                            "src/engine.rs".to_string(),
+                            vec![
+                                "pub struct Engine {".to_string(),
+                                "    power: u32,".to_string(),
+                                "}".to_string(),
+                                "impl Engine {".to_string(),
+                                "    pub fn start(&self) {}".to_string(),
+                                "}".to_string(),
+                            ],
+                        ),
+                        (
+                            "src/main.rs".to_string(),
+                            vec![
+                                "use crate::engine::Engine;".to_string(),
+                                "".to_string(),
+                                "fn main() {".to_string(),
+                                "    let engine = Engine::new();".to_string(),
+                                "    engine.start();".to_string(),
+                                "}".to_string(),
+                            ],
+                        ),
+                    ],
+                    &search_core::Query::new("engine"),
+                );
+                self.project_match_index = 1;
+                true
+            }
             "find" => {
                 // A search with several matches and a replacement typed in, so
                 // the count, the highlight and the button can all be seen.
@@ -7270,6 +7326,73 @@ impl App {
             .find(|diagnostic| diagnostic.line as usize == self.caret_line)
     }
 
+    /// Sources of the whole project, for a search across files.
+    fn project_sources(&self) -> Vec<(String, Vec<String>)> {
+        let mut sources = Vec::new();
+        if let Some(root) = self.project_path.clone() {
+            collect_project_sources(&root, &mut sources);
+        }
+        if sources.is_empty() {
+            for file in &self.files {
+                sources.push((file.name.clone(), file.lines.clone()));
+            }
+        }
+        sources
+    }
+
+    /// Search the whole project for the text in the find bar.
+    fn search_project(&mut self) {
+        if self.find_text.is_empty() {
+            self.project_matches.clear();
+            return;
+        }
+        self.project_matches =
+            search_core::search_files(&self.project_sources(), &self.search_query());
+        self.project_match_index = 0;
+        let total = search_core::total_matches(&self.project_matches);
+        let files = self.project_matches.len();
+        self.status_message = format!(
+            "{} {total} {} {files} {}",
+            self.tr("Project search:", "项目搜索："),
+            self.tr("match(es) in", "处匹配，分布于"),
+            self.tr("file(s)", "个文件")
+        );
+    }
+
+    /// Open the file and line the project search is on.
+    fn jump_to_project_match(&mut self) {
+        let flat = search_core::flatten_matches(&self.project_matches);
+        if flat.is_empty() {
+            return;
+        }
+        self.project_match_index = self.project_match_index.min(flat.len() - 1);
+        let (path, found) = flat[self.project_match_index].clone();
+        self.open_path(PathBuf::from(&path));
+        // The file was opened, so the caret lands on the match itself.
+        let last = self.files[self.selected_file].lines.len().saturating_sub(1);
+        self.caret_line = found.line.min(last);
+        self.caret_column = found.start;
+        self.selection_anchor = Some((self.caret_line, found.start));
+        self.selection_head = Some((self.caret_line, found.end));
+        let position = self.project_match_index + 1;
+        self.status_message = format!(
+            "{} {position}/{} {}",
+            self.tr("Match", "匹配"),
+            flat.len(),
+            path
+        );
+    }
+
+    /// Step to the next match in the project.
+    fn next_project_match(&mut self) {
+        let total = search_core::total_matches(&self.project_matches);
+        if total == 0 {
+            return;
+        }
+        self.project_match_index = (self.project_match_index + 1) % total;
+        self.jump_to_project_match();
+    }
+
     /// The query the search bar currently describes.
     fn search_query(&self) -> search_core::Query {
         search_core::Query {
@@ -7708,6 +7831,75 @@ impl App {
                 button + s(12),
                 top + s(59),
                 self.tr("REPLACE ALL", "全部替换"),
+            );
+        }
+    }
+
+    /// The project search results, under the find bar.
+    ///
+    /// # Safety
+    /// Requires a live Cairo context.
+    unsafe fn draw_project_results(&self) {
+        if self.project_matches.is_empty() {
+            return;
+        }
+        let s = |v| self.s(v);
+        let x = (self.width as f32 * 0.17) as i32 + s(20);
+        let width = (self.width - x - s(40)).min(s(620));
+        let top = s(78) + s(84);
+        let rows = self
+            .project_matches
+            .iter()
+            .map(|file| file.count())
+            .sum::<usize>()
+            .min(8);
+        let height = rows as i32 * s(20) + s(30);
+        self.rect(self.colors.panel_2, x, top, width, height);
+        self.outline(self.colors.line, x, top, width, height);
+        let total = search_core::total_matches(&self.project_matches);
+        self.text(
+            self.colors.muted,
+            x + s(10),
+            top + s(18),
+            &format!(
+                "{} {total} {} {} {}",
+                self.tr("Project", "项目"),
+                self.tr("match(es) in", "处匹配，分布于"),
+                self.project_matches.len(),
+                self.tr("file(s)", "个文件")
+            ),
+        );
+        // The rows are the matches in the order they are stepped through, so
+        // the list and the jump always agree.
+        let flat = search_core::flatten_matches(&self.project_matches);
+        for (index, (path, found)) in flat.iter().take(8).enumerate() {
+            let row = top + s(38 + index as i32 * 20);
+            if index == self.project_match_index {
+                self.rect(
+                    self.colors.project,
+                    x + s(2),
+                    row - s(13),
+                    width - s(4),
+                    s(19),
+                );
+            }
+            let summary = self
+                .project_matches
+                .iter()
+                .find(|file| file.path == *path)
+                .map(|file| {
+                    file.matches
+                        .iter()
+                        .position(|entry| entry == found)
+                        .map(|at| search_core::match_summary(file, at, 46))
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            self.text(
+                self.colors.text,
+                x + s(10),
+                row,
+                &format!("{path}:{}  {summary}", found.line + 1),
             );
         }
     }
@@ -9351,6 +9543,26 @@ impl App {
             self.toggle_find();
             return true;
         }
+        // Ctrl+Shift+F searches the whole project; pressed again it steps to
+        // the next match, the way a find bar does.
+        if control && event.state & SHIFT_MASK != 0 && keysym == ('F' as c_ulong | 0x20) {
+            if self.project_matches.is_empty() && !self.find_text.is_empty() {
+                self.search_project();
+                self.jump_to_project_match();
+            } else if !self.project_matches.is_empty() {
+                self.next_project_match();
+            } else {
+                self.find_open = true;
+                self.find_focused = true;
+                self.status_message = self
+                    .tr(
+                        "Type what to search for, then Ctrl+Shift+F again",
+                        "先输入要搜索的内容，再按一次 Ctrl+Shift+F",
+                    )
+                    .into();
+            }
+            return true;
+        }
         if control && keysym == ('H' as c_ulong | 0x20) {
             if !self.find_open {
                 self.toggle_find();
@@ -9536,6 +9748,11 @@ impl App {
                 self.find_index = 0;
                 if !replace {
                     self.select_match_at_index();
+                    // A project search that is already showing follows the
+                    // typing, so the list is never stale.
+                    if !self.project_matches.is_empty() {
+                        self.search_project();
+                    }
                 }
             }
             return true;
@@ -11429,6 +11646,8 @@ pub fn run() {
             find_case: search_core::CaseMode::Insensitive,
             find_whole_word: false,
             find_index: 0,
+            project_matches: Vec::new(),
+            project_match_index: 0,
             find_focused: false,
             find_replace_focused: false,
             folded: Vec::new(),
