@@ -429,6 +429,8 @@ const UP_KEYSYM: c_ulong = 0xff52;
 const RIGHT_KEYSYM: c_ulong = 0xff53;
 const DOWN_KEYSYM: c_ulong = 0xff54;
 const F5_KEYSYM: c_ulong = 0xffc2;
+/// F12, which asks the language server for the definition.
+const F12_KEYSYM: c_ulong = 0xffc9;
 const F9_KEYSYM: c_ulong = 0xffc6;
 const F10_KEYSYM: c_ulong = 0xffc7;
 const LC_ALL: c_int = 6;
@@ -608,6 +610,17 @@ struct Palette {
     shadow: c_ulong,
 }
 
+/// A question the editor asks the language server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LspRequest {
+    /// What the symbol under the caret is.
+    Hover,
+    /// Where the symbol under the caret is defined.
+    Definition,
+    /// Where the symbol under the caret is used.
+    References,
+}
+
 /// Buttons of the settings panel that answer to the pointer and the keyboard.
 ///
 /// The rectangle of a control is computed in one place, so drawing, hit testing
@@ -770,6 +783,13 @@ struct App {
     lsp_severity: lsp_core::SeverityFilter,
     /// When the document last changed, so the server is not told every key.
     lsp_last_change: Option<Instant>,
+    /// Questions asked and not yet answered, with what they were for.
+    lsp_pending: Vec<(u64, LspRequest)>,
+    /// What the server said about the symbol under the caret, when shown.
+    lsp_hover: Option<String>,
+    /// References the server listed, and which one we are on.
+    lsp_locations: Vec<(String, u32, u32)>,
+    lsp_reference_index: usize,
     /// Whether the AI panel is open, and whether it has the keyboard.
     ai_open: bool,
     ai_focused: bool,
@@ -3520,6 +3540,7 @@ impl App {
             self.draw_extensions();
         }
         self.draw_ai_panel();
+        self.draw_hover();
         self.draw_condition_prompt();
         if self.create_kind.is_some() && self.create_motion.value > 0.01 {
             self.draw_create_dialog();
@@ -5908,6 +5929,8 @@ impl App {
                 self.selected_file = 0;
                 self.caret_line = 3;
                 self.lsp_diagnostic_file = self.active_breakpoint_path();
+                self.lsp_hover =
+                    Some("fn build(&self) -> Engine\n  builds the engine used by the graph".into());
                 self.lsp_diagnostics = vec![
                     lsp_core::Diagnostic {
                         path: self.lsp_diagnostic_file.clone(),
@@ -6578,6 +6601,163 @@ impl App {
         parts.join("\n")
     }
 
+    /// Ask the server something about the symbol at the caret.
+    fn request_language_feature(&mut self, request: LspRequest) {
+        // Where the caret is comes from the editor, so it is read before the
+        // server is borrowed to ask the question.
+        let path = self.active_breakpoint_path();
+        let line = self.caret_line as u32;
+        // The protocol counts characters, the editor counts bytes.
+        let character = self.files[self.selected_file]
+            .lines
+            .get(self.caret_line)
+            .map(|text| text[..self.caret_column.min(text.len())].chars().count() as u32)
+            .unwrap_or(0);
+        let Some(server) = self.language_server.as_mut() else {
+            self.status_message = self
+                .tr(
+                    "No language server is running for this file",
+                    "此文件没有正在运行的语言服务器",
+                )
+                .into();
+            return;
+        };
+        let method = match request {
+            LspRequest::Hover => "textDocument/hover",
+            LspRequest::Definition => "textDocument/definition",
+            LspRequest::References => "textDocument/references",
+        };
+        match server.position_request(method, &path, line, character) {
+            Ok(id) => self.lsp_pending.push((id, request)),
+            Err(error) => self.status_message = error,
+        }
+    }
+
+    /// Show what the server said about the symbol at the caret.
+    fn show_hover(&mut self) {
+        if self.lsp_hover.is_some() {
+            // A second press puts it away rather than asking again.
+            self.lsp_hover = None;
+            return;
+        }
+        self.request_language_feature(LspRequest::Hover);
+    }
+
+    /// Jump to the definition of the symbol at the caret.
+    fn go_to_definition(&mut self) {
+        self.request_language_feature(LspRequest::Definition);
+    }
+
+    /// Jump to where the symbol at the caret is used.
+    fn go_to_references(&mut self) {
+        self.request_language_feature(LspRequest::References);
+    }
+
+    /// Move the caret to a location the server named.
+    ///
+    /// A location in another file is opened as a document first, because the
+    /// editor can only show what it has.
+    fn jump_to_location(&mut self, file: String, line: u32, column: u32) {
+        let name = PathBuf::from(&file)
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file.clone());
+        let open = self.files.iter().position(|document| document.name == name);
+        if let Some(index) = open {
+            self.selected_file = index;
+        } else {
+            let path = PathBuf::from(&file);
+            match fs::read_to_string(&path) {
+                Ok(content) => {
+                    let mut lines = content.lines().map(str::to_string).collect::<Vec<_>>();
+                    if lines.is_empty() {
+                        lines.push(String::new());
+                    }
+                    self.files.push(FileBuffer::new(name.clone(), path, lines));
+                    self.selected_file = self.files.len() - 1;
+                }
+                Err(error) => {
+                    self.status_message = format!("{file}: {error}");
+                    return;
+                }
+            }
+        }
+        let last = self.files[self.selected_file].lines.len().saturating_sub(1);
+        self.caret_line = (line as usize).min(last);
+        // The server counts characters, the editor counts bytes.
+        let text = self.files[self.selected_file].lines[self.caret_line].clone();
+        self.caret_column = text
+            .char_indices()
+            .nth(column as usize)
+            .map(|(index, _)| index)
+            .unwrap_or(text.len());
+        self.selection_anchor = None;
+        self.selection_head = None;
+        self.status_message = format!("{} {name}:{}", self.tr("Jumped to", "已跳转到"), line + 1);
+    }
+
+    /// Answer what the server sent back for a request we made.
+    fn handle_language_reply(&mut self, id: u64, message: &str) {
+        let Some(position) = self.lsp_pending.iter().position(|(known, _)| *known == id) else {
+            return;
+        };
+        let (_, request) = self.lsp_pending.remove(position);
+        match request {
+            LspRequest::Hover => {
+                self.lsp_hover = lsp_core::parse_hover(message);
+                if self.lsp_hover.is_none() {
+                    self.status_message = self
+                        .tr("The server had nothing to say", "服务器没有给出信息")
+                        .into();
+                }
+            }
+            LspRequest::Definition => {
+                let locations = lsp_core::parse_locations(message);
+                match locations.first() {
+                    Some((file, line, column)) => {
+                        self.jump_to_location(file.clone(), *line, *column)
+                    }
+                    None => {
+                        self.status_message = self
+                            .tr("No definition from the server", "服务器未给出定义位置")
+                            .into()
+                    }
+                }
+            }
+            LspRequest::References => {
+                let locations = lsp_core::parse_locations(message);
+                self.lsp_locations = locations;
+                self.lsp_reference_index = 0;
+                if self.lsp_locations.is_empty() {
+                    self.status_message = self
+                        .tr("No references from the server", "服务器未给出引用位置")
+                        .into();
+                } else {
+                    let (file, line, column) = self.lsp_locations[0].clone();
+                    self.jump_to_location(file, line, column);
+                    self.status_message = format!(
+                        "{} 1/{}",
+                        self.tr("Reference", "引用"),
+                        self.lsp_locations.len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Walk to the next reference the server listed.
+    fn next_reference(&mut self) {
+        if self.lsp_locations.is_empty() {
+            return;
+        }
+        self.lsp_reference_index = (self.lsp_reference_index + 1) % self.lsp_locations.len();
+        let (file, line, column) = self.lsp_locations[self.lsp_reference_index].clone();
+        let position = self.lsp_reference_index + 1;
+        let total = self.lsp_locations.len();
+        self.jump_to_location(file, line, column);
+        self.status_message = format!("{} {position}/{total}", self.tr("Reference", "引用"));
+    }
+
     /// Start the language server for the active file, when one is installed.
     ///
     /// The server is started lazily: opening a project should not spawn a rust
@@ -6644,6 +6824,7 @@ impl App {
             return;
         };
         let mut published = None;
+        let mut replies = Vec::new();
         while let Some(message) = server.try_message() {
             // A server asks questions of its own; answering keeps it working.
             if server.answer_automatically(&message) {
@@ -6653,11 +6834,17 @@ impl App {
                 == Some("textDocument/publishDiagnostics")
             {
                 published = Some(lsp_core::parse_diagnostics(&message));
+            } else if let Some(id) = lsp_core::message_id(&message) {
+                replies.push((id, message.clone()));
             }
         }
         if let Some(diagnostics) = published {
             self.lsp_diagnostics = diagnostics;
             self.lsp_diagnostic_file = path;
+        }
+        // A reply to something we asked is handed to the feature that asked.
+        for (id, message) in replies {
+            self.handle_language_reply(id, &message);
         }
     }
 
@@ -6758,6 +6945,28 @@ impl App {
         );
         let short: String = label.chars().take(120).collect();
         self.text(colour, s(420), self.height - s(10), &short);
+    }
+
+    /// Show what the server said about the symbol under the caret.
+    ///
+    /// # Safety
+    /// Requires a live Cairo context.
+    unsafe fn draw_hover(&self) {
+        let Some(text) = self.lsp_hover.as_ref() else {
+            return;
+        };
+        let s = |v| self.s(v);
+        // The panel sits under the caret's line, kept inside the editor.
+        let left = (self.width as f32 * 0.17) as i32 + s(60);
+        let y = s(119) + self.caret_line as i32 * self.code_line_step() + s(24);
+        let width = (text.chars().count() as i32 * s(8) + s(24)).min(self.width - left - s(24));
+        let lines = ((width - s(20)) / s(8).max(1)).max(1) as usize;
+        let wrapped = text.chars().count().div_ceil(lines).max(1) as i32;
+        let height = wrapped * s(20) + s(12);
+        self.rect(self.colors.panel_2, left, y, width, height);
+        self.outline(self.colors.accent, left, y, width, height);
+        let short: String = text.chars().take(lines * wrapped as usize).collect();
+        self.text(self.colors.text, left + s(12), y + s(20), &short);
     }
 
     /// Undo the last edit of the active document.
@@ -8048,6 +8257,26 @@ impl App {
         {
             return true;
         }
+        // F12 goes to the definition, Ctrl+I shows what the symbol is and
+        // Ctrl+R walks the places that use it, the keys Windows uses.
+        if self.editor_focused {
+            if keysym == F12_KEYSYM {
+                self.go_to_definition();
+                return true;
+            }
+            if control && keysym == ('I' as c_ulong | 0x20) {
+                self.show_hover();
+                return true;
+            }
+            if control && keysym == ('R' as c_ulong | 0x20) {
+                if self.lsp_locations.is_empty() {
+                    self.go_to_references();
+                } else {
+                    self.next_reference();
+                }
+                return true;
+            }
+        }
         // Ctrl+Z undoes and Ctrl+Y redoes, the keys the other backends use.
         if control && self.editor_focused {
             if keysym == ('Z' as c_ulong | 0x20) {
@@ -8347,6 +8576,10 @@ impl App {
                     .into();
                 return true;
             }
+        }
+        if keysym == ESCAPE_KEYSYM && self.lsp_hover.is_some() {
+            self.lsp_hover = None;
+            return true;
         }
         if keysym == ESCAPE_KEYSYM {
             if self.extensions_open
@@ -9943,6 +10176,10 @@ pub fn run() {
             lsp_diagnostic_file: String::new(),
             lsp_severity: lsp_core::SeverityFilter::All,
             lsp_last_change: None,
+            lsp_pending: Vec::new(),
+            lsp_hover: None,
+            lsp_locations: Vec::new(),
+            lsp_reference_index: 0,
             ai_open: false,
             ai_focused: false,
             ai_prompt: String::new(),

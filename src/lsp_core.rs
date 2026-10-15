@@ -1623,4 +1623,66 @@ while True:
             );
         }
     }
+
+    #[test]
+    fn a_definition_reply_names_a_file_and_a_position() {
+        // What the editor jumps to. The protocol answers with zero based line
+        // and character, and the editor has to land on the symbol.
+        let reply = r#"{"jsonrpc":"2.0","id":7,"result":[
+            {"uri":"file:///home/me/src/engine.rs","range":{
+                "start":{"line":41,"character":8},"end":{"line":41,"character":14}}}]}"#;
+        let locations = parse_locations(reply);
+        assert_eq!(locations.len(), 1);
+        let (file, line, column) = locations[0].clone();
+        assert!(file.ends_with("engine.rs"), "{file}");
+        assert_eq!(line, 41);
+        assert_eq!(column, 8);
+
+        // A single location, which some servers send instead of a list.
+        let single = r#"{"jsonrpc":"2.0","id":7,"result":{
+            "uri":"file:///tmp/a.rs","range":{"start":{"line":3,"character":0},
+            "end":{"line":3,"character":1}}}}"#;
+        let locations = parse_locations(single);
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].1, 3);
+
+        // No definition is an empty list rather than a wrong jump.
+        assert!(parse_locations(r#"{"jsonrpc":"2.0","id":7,"result":null}"#).is_empty());
+        assert!(parse_locations(r#"{"jsonrpc":"2.0","id":7}"#).is_empty());
+        assert!(parse_locations("").is_empty());
+    }
+
+    #[test]
+    fn a_hover_reply_carries_the_documentation() {
+        let reply = r#"{"jsonrpc":"2.0","id":3,"result":{
+            "contents":{"kind":"markdown","value":"```rust\nfn build() -> Engine\n```"}}}"#;
+        let hover = parse_hover(reply).expect("a hover");
+        assert!(hover.contains("fn build()"), "{hover}");
+        // A server with nothing to say gives nothing, so the editor does not
+        // draw an empty panel.
+        assert_eq!(
+            parse_hover(r#"{"jsonrpc":"2.0","id":3,"result":null}"#),
+            None
+        );
+        assert_eq!(parse_hover(""), None);
+    }
+
+    #[test]
+    fn a_reply_is_matched_to_the_question_that_asked_it() {
+        // Requests are answered out of order, so the reply carries the id of
+        // the request it belongs to.
+        let request = position_request(7, "textDocument/definition", "/tmp/a.rs", 41, 8);
+        assert!(request.contains("\"id\":7"), "{request}");
+        assert!(request.contains("textDocument/definition"));
+        assert!(request.contains("\"line\":41"));
+        assert!(request.contains("\"character\":8"));
+        let reply = r#"{"jsonrpc":"2.0","id":7,"result":null}"#;
+        assert_eq!(message_id(reply), Some(7));
+        // A notification carries no id, so it is never taken for a reply.
+        assert_eq!(
+            message_id(r#"{"jsonrpc":"2.0","method":"window/logMessage"}"#),
+            None
+        );
+        assert_eq!(message_id(""), None);
+    }
 }
