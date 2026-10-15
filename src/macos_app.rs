@@ -1386,6 +1386,98 @@ const EXTENSIONS_ROW_HEIGHT: f64 = 32.0;
 /// Width of the extensions panel.
 const EXTENSIONS_WIDTH: f64 = 420.0;
 
+// ---------------------------------------------------------------------------
+// Packaging panel
+// ---------------------------------------------------------------------------
+
+/// The packaging panel: the steps a run will take and where it got to.
+struct PackagePanel {
+    open: bool,
+    focused: bool,
+    /// Step the keyboard is on.
+    focus: usize,
+    /// Steps of the current request, in order.
+    steps: Vec<workspace_core::MacPackageStep>,
+    /// Step the run has reached, when one is running.
+    running: Option<usize>,
+    /// Signing identity, when the user has one.
+    identity: Option<String>,
+    /// Archive the last run produced.
+    artifact: Option<String>,
+}
+
+impl PackagePanel {
+    fn new() -> Self {
+        let mut panel = Self {
+            open: false,
+            focused: false,
+            focus: 0,
+            steps: Vec::new(),
+            running: None,
+            identity: None,
+            artifact: None,
+        };
+        panel.refresh();
+        panel
+    }
+
+    /// Rebuild the step list from the current request.
+    fn refresh(&mut self) {
+        let request = self.request();
+        self.steps = request.steps();
+        self.focus = self.focus.min(self.steps.len().saturating_sub(1));
+    }
+
+    /// What the panel would run right now.
+    fn request(&self) -> workspace_core::MacPackageRequest {
+        workspace_core::MacPackageRequest {
+            root: String::new(),
+            binary: "tc-ide".to_string(),
+            product: "TC-IDE".to_string(),
+            identity: self.identity.clone(),
+        }
+    }
+
+    /// The step the keyboard is on.
+    fn selected(&self) -> Option<workspace_core::MacPackageStep> {
+        self.steps.get(self.focus).copied()
+    }
+
+    /// Move the selection inside the step list.
+    fn move_focus(&mut self, delta: i64) {
+        let count = self.steps.len() as i64;
+        if count == 0 {
+            return;
+        }
+        self.focus = (self.focus as i64 + delta).clamp(0, count - 1) as usize;
+    }
+
+    /// The row a point of the panel is over.
+    fn row_at(y: f64, top: f64, rows: usize) -> Option<usize> {
+        let header = top + PACKAGE_HEADER_HEIGHT;
+        if y < header {
+            return None;
+        }
+        let row = ((y - header) / PACKAGE_ROW_HEIGHT).floor();
+        if row < 0.0 {
+            return None;
+        }
+        let row = row as usize;
+        if row < rows {
+            Some(row)
+        } else {
+            None
+        }
+    }
+}
+
+/// Height of the packaging panel header.
+const PACKAGE_HEADER_HEIGHT: f64 = 56.0;
+/// Height of one packaging row.
+const PACKAGE_ROW_HEIGHT: f64 = 30.0;
+/// Width of the packaging panel.
+const PACKAGE_WIDTH: f64 = 460.0;
+
 /// Index of the tab a point of the header is over.
 ///
 /// The tabs are a fixed width strip starting at the left margin, which keeps the
@@ -1446,6 +1538,10 @@ enum MacCommand {
     ExtensionPrevious,
     ExtensionProbe,
     FormatFile,
+    TogglePackaging,
+    PackageNext,
+    PackagePrevious,
+    PackageRun,
 }
 
 /// Map a key code and modifiers to an editor command.
@@ -1490,6 +1586,8 @@ fn key_command(key_code: u16, command: bool, shift: bool) -> Option<MacCommand> 
         // ⌘E opens the tooling panel, ⌘⇧F formats the current file.
         14 if command => Some(MacCommand::ToggleExtensions),
         3 if command && shift => Some(MacCommand::FormatFile),
+        // ⌘⇧P opens the packaging panel.
+        35 if command && shift => Some(MacCommand::TogglePackaging),
         // The panel owns these while it has the keyboard.
         _ => None,
     }
@@ -1521,6 +1619,8 @@ fn command_for_menu_action(action: &str) -> Option<MacCommand> {
         "tcSettings:" => Some(MacCommand::ToggleSettings),
         "tcExtensions:" => Some(MacCommand::ToggleExtensions),
         "tcFormat:" => Some(MacCommand::FormatFile),
+        "tcPackage:" => Some(MacCommand::TogglePackaging),
+        "tcPackageRun:" => Some(MacCommand::PackageRun),
         _ => None,
     }
 }
@@ -1547,6 +1647,8 @@ struct MacShell {
     settings: SettingsPanel,
     /// The extensions and tooling panel.
     extensions: ExtensionsPanel,
+    /// The packaging panel.
+    package: PackagePanel,
     /// The pointer, for hover and pressed states.
     mouse: (f64, f64),
     mouse_pressed: bool,
@@ -1585,6 +1687,7 @@ impl MacShell {
             graph: GraphPanel::new(),
             settings: SettingsPanel::new(),
             extensions: ExtensionsPanel::new(),
+            package: PackagePanel::new(),
             mouse: (0.0, 0.0),
             mouse_pressed: false,
             project: None,
@@ -1737,6 +1840,10 @@ impl MacShell {
             MacCommand::ExtensionPrevious => self.extensions.move_focus(-1),
             MacCommand::ExtensionProbe => self.probe_selected_language(),
             MacCommand::FormatFile => self.format_current_file(),
+            MacCommand::TogglePackaging => self.toggle_packaging(),
+            MacCommand::PackageNext => self.package.move_focus(1),
+            MacCommand::PackagePrevious => self.package.move_focus(-1),
+            MacCommand::PackageRun => self.run_packaging(),
             MacCommand::SettingUse => {
                 if let Some(control) = self.settings.focus {
                     self.activate_setting(control);
@@ -2133,6 +2240,81 @@ impl MacShell {
         ExtensionsPanel::row_at(y, panel.y, self.extensions.rows.len())
     }
 
+    /// Show or hide the packaging panel.
+    fn toggle_packaging(&mut self) {
+        self.package.open = !self.package.open;
+        self.package.focused = self.package.open;
+        if self.package.open {
+            self.package.refresh();
+            self.status = format!(
+                "Packaging: {} step(s), Enter runs them",
+                self.package.steps.len()
+            );
+        } else {
+            self.status = "Packaging closed".into();
+        }
+    }
+
+    /// Run the packaging steps in the terminal.
+    ///
+    /// The steps are typed into the shell rather than run behind its back, so
+    /// the user sees the compiler, the signer and the archiver work and any
+    /// error they print.
+    fn run_packaging(&mut self) {
+        let root = self
+            .project
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        let request = workspace_core::MacPackageRequest {
+            root,
+            binary: "tc-ide".to_string(),
+            product: "TC-IDE".to_string(),
+            identity: self.package.identity.clone(),
+        };
+        let line = request.command_line();
+        if line.is_empty() {
+            self.status = "There is nothing to package".into();
+            return;
+        }
+        if self.terminal.is_none() {
+            self.toggle_terminal();
+        }
+        let Some(terminal) = self.terminal.as_mut() else {
+            self.status = "The terminal could not be started".into();
+            return;
+        };
+        terminal.open = true;
+        terminal.pty.send(&format!("{line}\n"));
+        terminal.scroll_to_bottom();
+        self.terminal_focused = true;
+        self.package.running = Some(0);
+        self.package.artifact = Some(request.artifact());
+        self.status = format!("Packaging into {}", request.artifact());
+    }
+
+    /// Rectangle of the packaging panel in view coordinates.
+    fn packaging_rect(&self) -> CGRect {
+        CGRect::new(
+            (self.view_width() - PACKAGE_WIDTH).max(0.0) * 0.5,
+            12.0,
+            PACKAGE_WIDTH,
+            PACKAGE_HEADER_HEIGHT + PACKAGE_ROW_HEIGHT * self.package.steps.len() as f64 + 12.0,
+        )
+    }
+
+    /// The step row under a point of the view.
+    fn packaging_row_at(&self, x: f64, y: f64) -> Option<usize> {
+        if !self.package.open {
+            return None;
+        }
+        let panel = self.packaging_rect();
+        if !panel.contains(CGPoint { x, y }) {
+            return None;
+        }
+        PackagePanel::row_at(y, panel.y, self.package.steps.len())
+    }
+
     /// Step everything that moves in one frame and collect what the shell wrote.
     fn tick(&mut self) {
         self.session.tick();
@@ -2366,6 +2548,14 @@ impl MacShell {
             return;
         }
         self.mouse = (x, y);
+        if let Some(row) = self.packaging_row_at(x, y) {
+            self.package.focused = true;
+            self.package.focus = row;
+            if let Some(step) = self.package.selected() {
+                self.status = format!("Packaging step: {}", step.label());
+            }
+            return;
+        }
         if let Some(row) = self.extensions_row_at(x, y) {
             self.extensions.focused = true;
             self.extensions.focus = row;
@@ -2615,6 +2805,82 @@ unsafe fn draw_frame(shell: &mut MacShell) {
                 CGRect::new(x, y, 2.0, (step - 4.0).max(1.0)),
                 palette.bright,
                 0.35 + 0.65 * pulse as f64,
+            );
+        }
+    }
+
+    // The packaging panel, in front of the editor.
+    if shell.package.open {
+        let panel = shell.packaging_rect();
+        fill_rect(panel, palette.background, 0.96);
+        fill_rect(
+            CGRect::new(panel.x, panel.y, panel.width, 1.0),
+            palette.border,
+            1.0,
+        );
+        draw_text(
+            "PACKAGE",
+            panel.x + 16.0,
+            panel.y + 16.0,
+            14.0,
+            palette.bright,
+            false,
+        );
+        let signing = match shell.package.identity.as_deref() {
+            Some(identity) => format!("signing as {identity}"),
+            None => "unsigned (no identity set)".to_string(),
+        };
+        draw_text(
+            &format!("{}  ·  {signing}", shell.package.request().artifact()),
+            panel.x + 16.0,
+            panel.y + 36.0,
+            11.0,
+            palette.muted,
+            false,
+        );
+        for (index, step) in shell.package.steps.iter().enumerate() {
+            let y = panel.y + PACKAGE_HEADER_HEIGHT + index as f64 * PACKAGE_ROW_HEIGHT;
+            let selected = shell.package.focused && index == shell.package.focus;
+            if selected {
+                fill_rect(
+                    CGRect::new(
+                        panel.x + 8.0,
+                        y,
+                        panel.width - 16.0,
+                        PACKAGE_ROW_HEIGHT - 4.0,
+                    ),
+                    palette.selection,
+                    1.0,
+                );
+            }
+            let reached = shell
+                .package
+                .running
+                .map(|running| index <= running)
+                .unwrap_or(false);
+            draw_text(
+                if reached { "●" } else { "○" },
+                panel.x + 16.0,
+                y + 6.0,
+                12.0,
+                if reached {
+                    palette.accent
+                } else {
+                    palette.muted
+                },
+                false,
+            );
+            draw_text(
+                step.label(),
+                panel.x + 38.0,
+                y + 6.0,
+                12.0,
+                if selected {
+                    palette.bright
+                } else {
+                    palette.text
+                },
+                false,
             );
         }
     }
@@ -3014,6 +3280,29 @@ unsafe extern "C" fn editor_key_down(_view: Id, _selector: Sel, event: Id) {
         }
         // While the graph has the keyboard it takes the keys the editor would
         // otherwise use, so a fold never turns into a line break.
+        if shell.package.open && shell.package.focused {
+            match key_code {
+                125 => {
+                    shell.apply(MacCommand::PackageNext);
+                    return;
+                }
+                126 => {
+                    shell.apply(MacCommand::PackagePrevious);
+                    return;
+                }
+                36 | 76 => {
+                    shell.apply(MacCommand::PackageRun);
+                    return;
+                }
+                53 => {
+                    shell.package.open = false;
+                    shell.package.focused = false;
+                    shell.status = "Packaging closed".into();
+                    return;
+                }
+                _ => {}
+            }
+        }
         if shell.extensions.open && shell.extensions.focused {
             match key_code {
                 125 => {
@@ -3250,6 +3539,8 @@ unsafe fn install_menu_bar() {
         ("Settings…", "tcSettings:", ","),
         ("Extensions & Tooling…", "tcExtensions:", "e"),
         ("Format File", "tcFormat:", "F"),
+        ("Package…", "tcPackage:", "P"),
+        ("Run Packaging", "tcPackageRun:", ""),
     ] {
         let item = menu_item(title, action, key, target);
         msg_void_id(edit_menu, "addItem:", item);
@@ -3642,6 +3933,85 @@ fn self_check() -> i32 {
         shell.session.documents().len() == 1 && shell.session.active() == 0,
         &mut failures,
     );
+    // The packaging panel drives the shared macOS packaging flow.
+    shell.apply(MacCommand::TogglePackaging);
+    report(
+        "the packaging panel lists its steps",
+        shell.package.open
+            && shell.package.steps
+                == vec![
+                    workspace_core::MacPackageStep::Build,
+                    workspace_core::MacPackageStep::Stage,
+                    workspace_core::MacPackageStep::Archive,
+                ],
+        &mut failures,
+    );
+    report(
+        "an unsigned run leaves signing out",
+        shell
+            .package
+            .request()
+            .command_line()
+            .contains("cargo build --release")
+            && !shell.package.request().command_line().contains("codesign")
+            && shell.package.request().artifact() == "dist/TC-IDE.tar.gz",
+        &mut failures,
+    );
+    shell.package.identity = Some("Developer ID Application: Test".into());
+    shell.package.refresh();
+    report(
+        "an identity adds the signing step",
+        shell.package.steps.len() == 4
+            && shell
+                .package
+                .request()
+                .command_line()
+                .contains("codesign --force --options runtime"),
+        &mut failures,
+    );
+    shell.package.identity = None;
+    shell.package.refresh();
+    shell.package.move_focus(1);
+    let moved = shell.package.focus;
+    shell.package.move_focus(-9);
+    report(
+        "the packaging selection moves and clamps",
+        moved == 1
+            && shell.package.focus == 0
+            && shell.package.selected() == Some(workspace_core::MacPackageStep::Build)
+            && PackagePanel::row_at(PACKAGE_HEADER_HEIGHT + 4.0, 0.0, 3) == Some(0)
+            && PackagePanel::row_at(PACKAGE_HEADER_HEIGHT - 1.0, 0.0, 3).is_none()
+            && PackagePanel::row_at(PACKAGE_HEADER_HEIGHT + PACKAGE_ROW_HEIGHT * 3.0, 0.0, 3)
+                .is_none(),
+        &mut failures,
+    );
+    report(
+        "the packaging panel has a shortcut and menu items",
+        key_command(35, true, true) == Some(MacCommand::TogglePackaging)
+            && command_for_menu_action("tcPackage:") == Some(MacCommand::TogglePackaging)
+            && command_for_menu_action("tcPackageRun:") == Some(MacCommand::PackageRun),
+        &mut failures,
+    );
+    // The run is typed into a real shell, so it has to be a command the shell
+    // will accept: quoted, chained, and ending in something to report.
+    shell.project = Some(PathBuf::from("/tmp/tc ide"));
+    let line = workspace_core::MacPackageRequest {
+        root: "/tmp/tc ide".into(),
+        binary: "tc-ide".into(),
+        product: "TC-IDE".into(),
+        identity: None,
+    }
+    .command_line();
+    report(
+        "the packaging command quotes its paths",
+        line.contains("'/tmp/tc ide'")
+            && line.contains(" && ")
+            && line.ends_with("&& echo 'packaged dist/TC-IDE.tar.gz'"),
+        &mut failures,
+    );
+    shell.package.open = false;
+    shell.package.focused = false;
+
     // The tooling panel probes the real executables through the shared table.
     shell.apply(MacCommand::ToggleExtensions);
     report(
