@@ -780,6 +780,11 @@ struct App {
     /// pointer was when it was grabbed.
     background_drag: Option<(background_core::Handle, i32, i32)>,
     graph_relation: graph_core::GraphRelation,
+    /// Fold points that are closed, by the line each region starts on.
+    folded: Vec<usize>,
+    /// Line the user asked to jump to, and whether the prompt has the keyboard.
+    goto_prompt: Option<String>,
+    goto_focused: bool,
     /// The brackets the caret is between, refreshed once a frame.
     matched_brackets: Option<editor_core::BracketPair>,
     /// Language server for the active file, when one is installed.
@@ -3556,6 +3561,7 @@ impl App {
         self.draw_ai_panel();
         self.draw_hover();
         self.draw_language_overlays();
+        self.draw_goto_prompt();
         self.draw_condition_prompt();
         if self.create_kind.is_some() && self.create_motion.value > 0.01 {
             self.draw_create_dialog();
@@ -4300,12 +4306,32 @@ impl App {
         let base_y = s(119);
         let step = self.code_line_step();
         let show_bubbles = !(self.mouse_x >= 0 && self.mouse_x < left);
+        // A folded block takes one row on screen, so the row is counted
+        // separately from the line in the file.
+        let hidden = self.folded_lines();
+        let fold_starts = self
+            .fold_regions()
+            .into_iter()
+            .map(|region| region.start_line)
+            .collect::<Vec<_>>();
+        let mut row = 0i32;
         for (index, line) in self.files[self.selected_file].lines.iter().enumerate() {
-            let y = base_y + index as i32 * step;
+            if hidden.contains(&index) {
+                continue;
+            }
+            let y = base_y + row * step;
+            row += 1;
             if y > self.height - s(65) {
                 break;
             }
             self.text(self.colors.line, left + s(15), y, &(index + 1).to_string());
+            // A block that can be folded says so beside its number, and a
+            // closed one shows the arrow pointing the other way.
+            if fold_starts.contains(&index) {
+                let closed = self.folded.contains(&index);
+                let marker = if closed { ">" } else { "v" };
+                self.text(self.colors.muted, left + s(4), y, marker);
+            }
             // A marker in the gutter for a line the server complained about,
             // in the colour of the worst severity on it.
             if self.diagnostics_on_line(index) > 0 {
@@ -5956,6 +5982,38 @@ impl App {
                 ));
                 true
             }
+            "folding" => {
+                // A file with a folded block, so the marker, the arrow and the
+                // missing lines can all be seen at once.
+                self.files = vec![FileBuffer::new(
+                    "main.rs".into(),
+                    PathBuf::from("/tmp/tc-ide-preview/main.rs"),
+                    vec![
+                        "struct Engine {".into(),
+                        "    name: String,".into(),
+                        "    power: u32,".into(),
+                        "}".into(),
+                        "".into(),
+                        "impl Engine {".into(),
+                        "    fn run(&self) {".into(),
+                        "        let a = 1;".into(),
+                        "        let b = 2;".into(),
+                        "    }".into(),
+                        "}".into(),
+                        "".into(),
+                        "fn main() {".into(),
+                        "    println!(\"hi\");".into(),
+                        "}".into(),
+                    ],
+                )];
+                self.selected_file = 0;
+                self.caret_line = 5;
+                self.caret_column = 0;
+                self.folded = vec![0, 5];
+                self.goto_prompt = Some("42".into());
+                self.goto_focused = true;
+                true
+            }
             "brackets" => {
                 // The caret sits inside a nested block, so the pair it is
                 // between is drawn and the mismatch is visible if it is wrong.
@@ -7164,6 +7222,168 @@ impl App {
         self.visible_diagnostics()
             .into_iter()
             .find(|diagnostic| diagnostic.line as usize == self.caret_line)
+    }
+
+    /// Regions of the active file that can be folded.
+    fn fold_regions(&self) -> Vec<syntax_core::FoldRegion> {
+        let file = &self.files[self.selected_file];
+        let scan = syntax_core::scan(&file.lines, &file.name);
+        syntax_core::fold_regions(&scan)
+    }
+
+    /// Lines hidden by the folds that are closed.
+    fn folded_lines(&self) -> Vec<usize> {
+        syntax_core::folded_lines(&self.fold_regions(), &self.folded)
+    }
+
+    /// Open or close the fold that starts on a line.
+    fn toggle_fold(&mut self, line: usize) -> bool {
+        let Some(region) = syntax_core::fold_region_at(
+            &syntax_core::scan(
+                &self.files[self.selected_file].lines,
+                &self.files[self.selected_file].name,
+            ),
+            line,
+        ) else {
+            return false;
+        };
+        if let Some(index) = self.folded.iter().position(|known| *known == line) {
+            self.folded.remove(index);
+            self.status_message = format!(
+                "{} {}",
+                self.tr("Expanded the block at line", "已展开第"),
+                line + 1
+            );
+        } else {
+            self.folded.push(line);
+            self.folded.sort_unstable();
+            // The caret cannot sit inside a block that is folded away.
+            let hidden = self.folded_lines();
+            if hidden.contains(&self.caret_line) {
+                self.caret_line = region.start_line;
+                self.caret_column = 0;
+            }
+            self.status_message = format!(
+                "{} {} {}",
+                self.tr("Folded", "已折叠"),
+                region.hidden_lines(),
+                self.tr("line(s)", "行")
+            );
+        }
+        true
+    }
+
+    /// Fold or unfold every region of the file at once.
+    fn toggle_fold_all(&mut self) {
+        let regions = self.fold_regions();
+        if regions.is_empty() {
+            self.status_message = self
+                .tr("This file has nothing to fold", "此文件没有可折叠的区块")
+                .into();
+            return;
+        }
+        if self.folded.is_empty() {
+            // Only the outermost regions: folding a nested one as well would
+            // hide lines that are already hidden.
+            self.folded = {
+                let mut lines = regions
+                    .iter()
+                    .filter(|region| region.depth == 0)
+                    .map(|region| region.start_line)
+                    .collect::<Vec<_>>();
+                lines.sort_unstable();
+                lines
+            };
+            self.status_message = format!(
+                "{} {}",
+                self.tr("Folded every block;", "已折叠全部区块，共"),
+                self.folded.len()
+            );
+        } else {
+            self.folded.clear();
+            self.status_message = self.tr("Expanded every block", "已展开全部区块").into();
+        }
+    }
+
+    /// Open the prompt that asks which line to go to.
+    fn begin_goto_line(&mut self) {
+        self.goto_prompt = Some(String::new());
+        self.goto_focused = true;
+        self.status_message = self
+            .tr(
+                "Line number: type it, Enter jumps, Esc cancels",
+                "行号：输入后回车跳转，Esc 取消",
+            )
+            .into();
+    }
+
+    /// Jump to the line the prompt names.
+    fn apply_goto_line(&mut self) {
+        let input = self.goto_prompt.take().unwrap_or_default();
+        self.goto_focused = false;
+        let count = self.files[self.selected_file].lines.len();
+        let Some(target) = editor_core::parse_line_target(&input, count) else {
+            self.status_message = format!(
+                "{} {input}",
+                self.tr("Not a line in this file:", "不是本文件中的行：")
+            );
+            return;
+        };
+        let lines = self.files[self.selected_file].lines.clone();
+        let Some((line, column)) = editor_core::line_target_position(&lines, target) else {
+            self.status_message = self
+                .tr("That line is not in this file", "该行不在本文件中")
+                .into();
+            return;
+        };
+        self.caret_line = line;
+        self.caret_column = column;
+        self.selection_anchor = None;
+        self.selection_head = None;
+        // A line inside a closed fold is opened, so the jump is visible.
+        let regions = self.fold_regions();
+        self.folded.retain(|start| {
+            !regions
+                .iter()
+                .any(|region| region.start_line == *start && region.hides(line))
+        });
+        self.status_message = format!("{} {}", self.tr("Line", "第"), target.line);
+    }
+
+    /// The line prompt, over the editor.
+    ///
+    /// # Safety
+    /// Requires a live Cairo context.
+    unsafe fn draw_goto_prompt(&self) {
+        let Some(prompt) = self.goto_prompt.as_ref() else {
+            return;
+        };
+        let s = |v| self.s(v);
+        let width = (self.width as f32 * 0.3) as i32;
+        let left = (self.width - width) / 2;
+        let top = s(96);
+        self.rect(self.colors.panel_2, left, top, width, s(46));
+        self.outline(self.colors.accent, left, top, width, s(46));
+        self.text(
+            self.colors.muted,
+            left + s(12),
+            top + s(19),
+            self.tr("Go to line", "跳转到行"),
+        );
+        self.text(
+            if prompt.is_empty() {
+                self.colors.muted
+            } else {
+                self.colors.bright
+            },
+            left + s(12),
+            top + s(40),
+            if prompt.is_empty() {
+                self.tr("line or line:column", "行号或 行号:列号")
+            } else {
+                prompt.as_str()
+            },
+        );
     }
 
     /// Recompute which brackets the caret is between.
@@ -8749,6 +8969,24 @@ impl App {
         {
             return true;
         }
+        // Ctrl+G asks for a line, Ctrl+Shift+[ folds the block at the caret
+        // and Ctrl+Shift+] opens every block, the keys the editor has room for.
+        if control && keysym == ('G' as c_ulong | 0x20) {
+            self.begin_goto_line();
+            return true;
+        }
+        if control && keysym == ('[' as c_ulong) {
+            if !self.toggle_fold(self.caret_line) {
+                self.status_message = self
+                    .tr("Nothing to fold on this line", "此行没有可折叠的区块")
+                    .into();
+            }
+            return true;
+        }
+        if control && keysym == (']' as c_ulong) {
+            self.toggle_fold_all();
+            return true;
+        }
         // F12 goes to the definition, Ctrl+I shows what the symbol is and
         // Ctrl+R walks the places that use it, the keys Windows uses.
         if self.editor_focused {
@@ -8843,6 +9081,29 @@ impl App {
             }
             if count > 0 && !input.chars().any(char::is_control) {
                 self.terminals[self.terminal_active].input.push_str(input);
+            }
+            return true;
+        }
+        if self.goto_focused {
+            if keysym == RETURN_KEYSYM {
+                self.apply_goto_line();
+                return true;
+            }
+            if keysym == ESCAPE_KEYSYM {
+                self.goto_prompt = None;
+                self.goto_focused = false;
+                return true;
+            }
+            if keysym == BACKSPACE_KEYSYM {
+                if let Some(prompt) = self.goto_prompt.as_mut() {
+                    prompt.pop();
+                }
+                return true;
+            }
+            if count > 0 && !input.chars().any(|character| character.is_control()) {
+                if let Some(prompt) = self.goto_prompt.as_mut() {
+                    prompt.push_str(input);
+                }
             }
             return true;
         }
@@ -10706,6 +10967,9 @@ pub fn run() {
             extension_upgrades: 0,
             background_drag: None,
             graph_relation: graph_core::GraphRelation::Follow,
+            folded: Vec::new(),
+            goto_prompt: None,
+            goto_focused: false,
             matched_brackets: None,
             language_server: None,
             lsp_diagnostics: Vec::new(),

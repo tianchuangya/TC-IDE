@@ -1778,3 +1778,260 @@ mod tests {
         assert_eq!(local_binding("let e = unknown();", &returns), None);
     }
 }
+
+/// A region of the file that can be collapsed to its first line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FoldRegion {
+    /// First line of the region, which stays visible when it is folded.
+    pub start_line: usize,
+    /// Last line of the region, which is hidden when it is folded.
+    pub end_line: usize,
+    /// How deeply the region is nested, counted from the outside.
+    pub depth: usize,
+}
+
+impl FoldRegion {
+    /// How many lines folding this region would hide.
+    pub fn hidden_lines(&self) -> usize {
+        self.end_line.saturating_sub(self.start_line)
+    }
+
+    /// Whether a line is hidden while this region is folded.
+    pub fn hides(&self, line: usize) -> bool {
+        line > self.start_line && line <= self.end_line
+    }
+}
+
+/// Regions of a file that can be folded, outermost first.
+///
+/// A region is a scope that spans more than one line: a one line function has
+/// nothing to hide, and offering to fold it would be a control that does
+/// nothing. The depth is counted from the outside so a caller can indent the
+/// affordance or fold a whole level at once.
+pub fn fold_regions(scan: &FileScan) -> Vec<FoldRegion> {
+    let mut regions = scan
+        .scopes
+        .iter()
+        .filter(|scope| scope.end_line > scope.start_line)
+        .map(|scope| FoldRegion {
+            start_line: scope.start_line,
+            end_line: scope.end_line,
+            depth: 0,
+        })
+        .collect::<Vec<_>>();
+    regions.sort_by_key(|region| (region.start_line, std::cmp::Reverse(region.end_line)));
+    // Nesting is the number of regions that start before this one and end
+    // after it, which is what makes a nested block sit one level in.
+    let spans = regions
+        .iter()
+        .map(|region| (region.start_line, region.end_line))
+        .collect::<Vec<_>>();
+    for (index, region) in regions.iter_mut().enumerate() {
+        let (start, end) = spans[index];
+        region.depth = spans
+            .iter()
+            .enumerate()
+            .filter(|(other, (other_start, other_end))| {
+                *other != index && *other_start <= start && *other_end >= end
+            })
+            .count();
+    }
+    regions
+}
+
+/// The fold region that starts on a line, if one does.
+pub fn fold_region_at(scan: &FileScan, line: usize) -> Option<FoldRegion> {
+    fold_regions(scan)
+        .into_iter()
+        .find(|region| region.start_line == line)
+}
+
+/// Lines hidden by the regions that are folded.
+///
+/// A line inside a folded region is hidden even when a region nested inside it
+/// is not folded, which is what makes folding a function hide everything in it
+/// rather than only its own body.
+pub fn folded_lines(regions: &[FoldRegion], folded: &[usize]) -> Vec<usize> {
+    let mut hidden = Vec::new();
+    for region in regions {
+        if !folded.contains(&region.start_line) {
+            continue;
+        }
+        for line in region.start_line + 1..=region.end_line {
+            if !hidden.contains(&line) {
+                hidden.push(line);
+            }
+        }
+    }
+    hidden.sort_unstable();
+    hidden
+}
+
+/// The visible line after a number of hidden lines, walking forwards.
+///
+/// The editor counts rows on screen, not lines in the file, so a caret that
+/// moves down by one row has to skip whatever is folded away.
+pub fn next_visible_line(line: usize, hidden: &[usize]) -> usize {
+    let mut next = line + 1;
+    while hidden.contains(&next) {
+        next += 1;
+    }
+    next
+}
+
+/// The visible line before a number of hidden lines, walking backwards.
+pub fn previous_visible_line(line: usize, hidden: &[usize]) -> usize {
+    let mut previous = line.saturating_sub(1);
+    while previous > 0 && hidden.contains(&previous) {
+        previous -= 1;
+    }
+    previous
+}
+
+/// How many rows are visible between two lines.
+pub fn visible_row_count(first: usize, last: usize, hidden: &[usize]) -> usize {
+    if last < first {
+        return 0;
+    }
+    (first..=last).filter(|line| !hidden.contains(line)).count()
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+
+    fn scan_of(source: &[&str]) -> FileScan {
+        let lines = source
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+        scan(&lines, "main.rs")
+    }
+
+    const NESTED: &[&str] = &[
+        "struct Engine {",     // 0
+        "    name: String,",   // 1
+        "}",                   // 2
+        "",                    // 3
+        "impl Engine {",       // 4
+        "    fn run(&self) {", // 5
+        "        let a = 1;",  // 6
+        "        let b = 2;",  // 7
+        "    }",               // 8
+        "}",                   // 9
+        "fn standalone() {}",  // 10
+    ];
+
+    #[test]
+    fn a_region_spans_more_than_one_line() {
+        let scan = scan_of(NESTED);
+        let regions = fold_regions(&scan);
+        assert!(!regions.is_empty(), "the file has foldable regions");
+        // A one line function has nothing to hide, so it is not offered.
+        assert!(
+            !regions.iter().any(|region| region.start_line == 10),
+            "a one line function is not foldable: {regions:?}"
+        );
+        // Every region hides at least one line, which is what makes the
+        // affordance worth showing.
+        for region in &regions {
+            assert!(region.hidden_lines() >= 1, "{region:?}");
+            assert!(region.end_line > region.start_line);
+        }
+        // The struct and the impl both start at column zero.
+        assert!(regions.iter().any(|region| region.start_line == 0));
+        assert!(regions.iter().any(|region| region.start_line == 4));
+    }
+
+    #[test]
+    fn a_nested_region_sits_deeper_than_the_one_around_it() {
+        let scan = scan_of(NESTED);
+        let regions = fold_regions(&scan);
+        let outer = regions
+            .iter()
+            .find(|region| region.start_line == 4)
+            .expect("the impl");
+        let inner = regions
+            .iter()
+            .find(|region| region.start_line == 5)
+            .expect("the method");
+        assert!(
+            inner.depth > outer.depth,
+            "the method is inside the impl: {inner:?} {outer:?}"
+        );
+        // A region at the top level has nothing around it.
+        let top = regions
+            .iter()
+            .find(|region| region.start_line == 0)
+            .expect("the struct");
+        assert_eq!(top.depth, 0, "{top:?}");
+    }
+
+    #[test]
+    fn folding_hides_the_whole_region_including_nested_ones() {
+        let scan = scan_of(NESTED);
+        let regions = fold_regions(&scan);
+        // Folding the impl hides everything inside it, the nested method
+        // included, even though the method is not folded itself.
+        let hidden = folded_lines(&regions, &[4]);
+        assert!(hidden.contains(&5), "the method line is hidden");
+        assert!(hidden.contains(&8), "the method's closing brace is hidden");
+        assert!(hidden.contains(&9), "the impl's closing brace is hidden");
+        assert!(!hidden.contains(&4), "the first line stays visible");
+        assert!(!hidden.contains(&0), "a region before it is untouched");
+        assert!(!hidden.contains(&10), "and so is a line after it");
+
+        // Folding nothing hides nothing, and the lines come back sorted.
+        assert!(folded_lines(&regions, &[]).is_empty());
+        let both = folded_lines(&regions, &[0, 4]);
+        assert_eq!(both, {
+            let mut sorted = both.clone();
+            sorted.sort_unstable();
+            sorted
+        });
+        assert!(both.contains(&1), "the struct's body is hidden");
+        assert!(both.contains(&5), "the impl's body is hidden");
+    }
+
+    #[test]
+    fn a_region_knows_what_it_hides() {
+        let region = FoldRegion {
+            start_line: 6,
+            end_line: 10,
+            depth: 1,
+        };
+        assert_eq!(region.hidden_lines(), 4);
+        assert!(!region.hides(6), "the first line stays visible");
+        assert!(region.hides(7));
+        assert!(region.hides(10));
+        assert!(!region.hides(11), "past the end nothing is hidden");
+        // An empty region hides nothing, so it is never offered.
+        let empty = FoldRegion {
+            start_line: 3,
+            end_line: 3,
+            depth: 0,
+        };
+        assert_eq!(empty.hidden_lines(), 0);
+        assert!(!empty.hides(3));
+    }
+
+    #[test]
+    fn walking_rows_skips_what_is_folded_away() {
+        let hidden = [3usize, 5, 6, 7];
+        // Moving down from line 2 lands on 4, not on the hidden 3.
+        assert_eq!(next_visible_line(2, &hidden), 4);
+        // Moving down from 4 lands on 8, past the whole folded body.
+        assert_eq!(next_visible_line(4, &hidden), 8);
+        // Moving up from 8 lands on 4, not on the hidden 7.
+        assert_eq!(previous_visible_line(8, &hidden), 4);
+        // Nothing hidden means the next line is simply the next line.
+        assert_eq!(next_visible_line(2, &[]), 3);
+        assert_eq!(previous_visible_line(3, &[]), 2);
+        // The first line does not walk off the top.
+        assert_eq!(previous_visible_line(0, &hidden), 0);
+        // Rows between two lines are the lines that are not hidden.
+        assert_eq!(visible_row_count(0, 7, &hidden), 4, "0,1,2,4");
+        assert_eq!(visible_row_count(0, 7, &[]), 8);
+        assert_eq!(visible_row_count(5, 4, &[]), 0, "an empty range");
+    }
+}

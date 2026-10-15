@@ -1405,3 +1405,211 @@ mod bracket_tests {
         assert_eq!(bracket_pair_at(&[], &[], 0, 0), None);
     }
 }
+
+/// A line the user asked to jump to.
+///
+/// The prompt accepts what people actually type: `42`, `:42`, `42:7` for a
+/// column, and a trailing `:` or spaces, so the same field works whether the
+/// habit came from vim, an editor's quick open or a Go-to dialog. A number
+/// that cannot be a line is rejected rather than clamped, because silently
+/// going somewhere else is worse than saying the input was not understood.
+#[allow(dead_code)] // Used by the Linux editor; the others adopt it next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineTarget {
+    /// Line the user asked for, counted from one as it is shown in the gutter.
+    pub line: usize,
+    /// Column, counted from one, when one was given.
+    pub column: usize,
+}
+
+/// Read a jump target from what the user typed.
+#[allow(dead_code)] // Used by the Linux editor; the others adopt it next.
+pub fn parse_line_target(input: &str, line_count: usize) -> Option<LineTarget> {
+    let text = input.trim().trim_start_matches(':').trim();
+    if text.is_empty() || line_count == 0 {
+        return None;
+    }
+    let (line_text, column_text) = match text.split_once(':') {
+        Some((line, column)) => (line.trim(), Some(column.trim())),
+        None => (text, None),
+    };
+    let line = line_text.parse::<usize>().ok()?;
+    if line == 0 || line > line_count {
+        return None;
+    }
+    let column = match column_text {
+        Some(column) if !column.is_empty() => {
+            let column = column.parse::<usize>().ok()?;
+            if column == 0 {
+                return None;
+            }
+            column
+        }
+        _ => 1,
+    };
+    Some(LineTarget { line, column })
+}
+
+/// Where a jump target lands in a document.
+///
+/// The result is a zero based line and a byte column, which is what the editor
+/// moves the caret to. A column past the end of the line lands at its end,
+/// because a line can be shorter than the column asked for.
+#[allow(dead_code)] // Used by the Linux editor; the others adopt it next.
+pub fn line_target_position(lines: &[String], target: LineTarget) -> Option<(usize, usize)> {
+    let line = target.line.checked_sub(1)?;
+    let text = lines.get(line)?;
+    let column = text
+        .char_indices()
+        .nth(target.column - 1)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+    Some((line, column))
+}
+
+#[cfg(test)]
+mod line_target_tests {
+    use super::*;
+
+    #[test]
+    fn a_jump_target_accepts_what_people_actually_type() {
+        // A plain number, the vim style with a colon, and a column.
+        assert_eq!(
+            parse_line_target("42", 100),
+            Some(LineTarget {
+                line: 42,
+                column: 1
+            })
+        );
+        assert_eq!(
+            parse_line_target(":42", 100),
+            Some(LineTarget {
+                line: 42,
+                column: 1
+            })
+        );
+        assert_eq!(
+            parse_line_target("42:7", 100),
+            Some(LineTarget {
+                line: 42,
+                column: 7
+            })
+        );
+        // Surrounding spaces and a trailing colon are what a hurried typist
+        // leaves behind, so they are accepted.
+        assert_eq!(
+            parse_line_target("  42  ", 100),
+            Some(LineTarget {
+                line: 42,
+                column: 1
+            })
+        );
+        assert_eq!(
+            parse_line_target("42:", 100),
+            Some(LineTarget {
+                line: 42,
+                column: 1
+            })
+        );
+        // The first and the last line are both valid.
+        assert_eq!(
+            parse_line_target("1", 100),
+            Some(LineTarget { line: 1, column: 1 })
+        );
+        assert_eq!(
+            parse_line_target("100", 100),
+            Some(LineTarget {
+                line: 100,
+                column: 1
+            })
+        );
+    }
+
+    #[test]
+    fn a_target_that_cannot_be_a_line_is_refused() {
+        // Going somewhere other than where the user asked is worse than
+        // saying the input was not understood, so nothing is clamped.
+        assert_eq!(
+            parse_line_target("0", 100),
+            None,
+            "lines are counted from one"
+        );
+        assert_eq!(parse_line_target("101", 100), None, "past the last line");
+        assert_eq!(parse_line_target("", 100), None);
+        assert_eq!(parse_line_target("   ", 100), None);
+        assert_eq!(parse_line_target(":", 100), None);
+        assert_eq!(parse_line_target("abc", 100), None);
+        assert_eq!(parse_line_target("4.5", 100), None);
+        assert_eq!(parse_line_target("-3", 100), None);
+        assert_eq!(parse_line_target("42:0", 100), None, "columns are from one");
+        assert_eq!(parse_line_target("42:x", 100), None);
+        // A document with no lines has nowhere to go.
+        assert_eq!(parse_line_target("1", 0), None);
+    }
+
+    #[test]
+    fn a_target_lands_on_the_line_and_column_it_names() {
+        let lines = vec![
+            "fn main() {".to_string(),
+            "    let value = 3;".to_string(),
+            "}".to_string(),
+        ];
+        // The line is counted from one, the column from one, and the result is
+        // what the editor moves the caret to: zero based, in bytes.
+        let at = line_target_position(&lines, LineTarget { line: 2, column: 1 }).expect("a spot");
+        assert_eq!(at, (1, 0), "the start of the second line");
+        let at = line_target_position(&lines, LineTarget { line: 2, column: 5 }).expect("a spot");
+        assert_eq!(at, (1, 4), "the fifth character of the second line");
+        let at = line_target_position(&lines, LineTarget { line: 3, column: 2 }).expect("a spot");
+        assert_eq!(at, (2, 1));
+        // A line shorter than the column asked for lands at its end rather
+        // than failing, because the column may have come from another file.
+        let at = line_target_position(
+            &lines,
+            LineTarget {
+                line: 3,
+                column: 99,
+            },
+        )
+        .expect("a spot");
+        assert_eq!(at, (2, 1), "the end of the one character line");
+        // A line past the end has no position at all.
+        assert_eq!(
+            line_target_position(&lines, LineTarget { line: 9, column: 1 }),
+            None
+        );
+        assert_eq!(
+            line_target_position(&[], LineTarget { line: 1, column: 1 }),
+            None
+        );
+    }
+
+    #[test]
+    fn a_column_counts_characters_not_bytes() {
+        // The gutter counts characters, so a line with wide characters has to
+        // land where the reader expects rather than in the middle of one.
+        let lines = vec!["中文注释 abc".to_string()];
+        let at = line_target_position(&lines, LineTarget { line: 1, column: 1 }).expect("a spot");
+        assert_eq!(at, (0, 0));
+        let at = line_target_position(&lines, LineTarget { line: 1, column: 2 }).expect("a spot");
+        assert_eq!(at, (0, 3), "the second character is three bytes in");
+        let at = line_target_position(&lines, LineTarget { line: 1, column: 5 }).expect("a spot");
+        assert_eq!(at, (0, 12), "after the fourth character");
+        // A column in the middle of a wide character is not a byte offset
+        // that splits it.
+        let at = line_target_position(&lines, LineTarget { line: 1, column: 4 }).expect("a spot");
+        assert_eq!(at, (0, 9));
+        assert!(
+            lines[0][at.1..].starts_with('释'),
+            "the column lands on a character boundary, not inside one"
+        );
+        // Every column lands on a boundary the string can be sliced at.
+        for column in 1..=8 {
+            let at = line_target_position(&lines, LineTarget { line: 1, column }).expect("a spot");
+            assert!(
+                lines[0].is_char_boundary(at.1),
+                "column {column} landed inside a character"
+            );
+        }
+    }
+}
