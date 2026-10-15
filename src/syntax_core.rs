@@ -116,8 +116,6 @@ pub struct FileScan {
     pub calls: Vec<Call>,
     /// Local variables whose value is a constructor call of a known class.
     pub bindings: Vec<LocalBinding>,
-    /// Return type each function declares, by name.
-    pub returns: Vec<(String, String)>,
 }
 
 /// A local variable that holds an instance of a class.
@@ -350,8 +348,6 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
     let mut declarations = Vec::new();
     let mut calls = Vec::new();
     let mut bindings = Vec::new();
-    let mut returns: Vec<(String, String)> = Vec::new();
-    let language = editor_core::language_for_file(file);
     let mut stack: Vec<usize> = vec![0];
     let mut pending_braces: Vec<usize> = Vec::new();
     let mut indent_stack: Vec<(usize, usize)> = Vec::new();
@@ -478,18 +474,9 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
             }
         }
 
-        // A declared return type is remembered, so `let engine = build()` can
-        // follow `build` to the class it hands back.
-        if let Some((function, returned)) = declared_return_type(&masked, language) {
-            if !returns.iter().any(|(known, _)| known == &function) {
-                returns.push((function, returned));
-            }
-        }
-
         // `let engine = Engine::new()` and `const engine = new Engine()`: the
-        // only local type information a line scanner can be sure about, plus
-        // `let engine = build()` once `build`'s return type is known.
-        if let Some((name, class)) = local_binding(&masked, &returns) {
+        // only local type information a line scanner can be sure about.
+        if let Some((name, class)) = local_binding(&masked) {
             bindings.push(LocalBinding {
                 name,
                 class,
@@ -552,7 +539,6 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
         declarations,
         calls,
         bindings,
-        returns,
     }
 }
 
@@ -562,7 +548,7 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
 /// and `const engine = Engine()`, in the languages that spell them that way. A
 /// variable assigned something the scan cannot name (`let engine = build()`) is
 /// left out instead of guessed.
-fn local_binding(masked: &str, returns: &[(String, String)]) -> Option<(String, String)> {
+fn local_binding(masked: &str) -> Option<(String, String)> {
     let trimmed = masked.trim_start();
     // A declaration keyword, or a typed declaration such as
     // `Engine engine = Engine::new()` where only the name before `=` matters.
@@ -604,128 +590,7 @@ fn local_binding(masked: &str, returns: &[(String, String)]) -> Option<(String, 
     {
         return Some((name.to_string(), class));
     }
-    // `let engine = build()`: the value is a plain call whose name matches a
-    // function with a declared return type, so the binding holds that type.
-    // The check is deliberately narrow - the value has to be exactly
-    // `name(...)` and nothing else - so a member call (`a.build()`), a chain or
-    // any other expression is left to the ordinary rules instead of being
-    // guessed at.
-    // A statement ends with `;`, so that is allowed after the closing brace.
-    let call = after.strip_suffix(';').unwrap_or(after).trim_end();
-    if !call.starts_with('(') || !call.ends_with(')') {
-        return None;
-    }
-    let arguments = &call[1..call.len() - 1];
-    if arguments.contains('(') || arguments.contains(')') {
-        return None;
-    }
-    returns
-        .iter()
-        .find(|(known, _)| known == &class)
-        .map(|(_, returned)| (name.to_string(), returned.clone()))
-}
-
-/// The return type a function declaration names, when it names one.
-///
-/// This is what lets `let engine = build(); engine.run()` resolve: the scanner
-/// knows `build` returns an `Engine`, so the binding holds one. Only declared
-/// types are read - a function whose signature says nothing (or says `auto`,
-/// `void`, `var`) is deliberately left alone rather than guessed at.
-fn declared_return_type(line: &str, language: &str) -> Option<(String, String)> {
-    let trimmed = line.trim_start();
-    // Rust and TypeScript: `fn build(&self) -> Engine {`.
-    for keyword in ["fn ", "pub fn ", "async fn ", "function ", "func "] {
-        let Some(rest) = trimmed.strip_prefix(keyword) else {
-            continue;
-        };
-        let rest = rest.trim_start_matches("async ").trim_start();
-        let name = identifier_at(rest)?;
-        let after_name = rest[name.len()..].trim_start();
-        let after_params = after_name.strip_prefix('(')?;
-        let close = after_params.find(')')?;
-        let tail = after_params[close + 1..].trim_start();
-        let returned = tail.strip_prefix("->").or_else(|| tail.strip_prefix(':'))?;
-        return Some((name, return_type_name(returned)?));
-    }
-    // C, C++, Java, C#: `Engine build(int count) {` - the type comes first.
-    let (before, _) = trimmed.split_once('(')?;
-    let head = before.trim_end();
-    let call_name = head.rsplit(|character: char| !character.is_alphanumeric() && character != '_');
-    let function = call_name.clone().next()?.to_string();
-    if function.is_empty() || matches!(function.as_str(), "if" | "for" | "while" | "switch") {
-        return None;
-    }
-    let type_part = head[..head.len() - function.len()].trim();
-    if type_part.is_empty() {
-        return None;
-    }
-    // `static Engine*` keeps its storage modifier in front of the type, and
-    // `virtual`/`const`/`inline` do the same, so they are dropped before the
-    // type is read.
-    let type_part = type_part
-        .split_whitespace()
-        .filter(|word| {
-            !matches!(
-                word.trim_end_matches(['*', '&']),
-                "static"
-                    | "virtual"
-                    | "inline"
-                    | "const"
-                    | "constexpr"
-                    | "extern"
-                    | "public"
-                    | "private"
-                    | "protected"
-                    | "final"
-                    | "abstract"
-                    | "async"
-                    | "unsafe"
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    if type_part.is_empty() {
-        return None;
-    }
-    let returned = return_type_name(&type_part)?;
-    if matches!(returned.as_str(), "return" | "new" | "delete") {
-        return None;
-    }
-    let _ = language;
-    Some((function, returned))
-}
-
-/// The class name inside a written return type, dropping pointers, references
-/// and generics: `Engine*`, `&Engine` and `Vec<Engine>` all name something the
-/// scanner can look up, and `Vec` alone would be the wrong answer.
-fn return_type_name(value: &str) -> Option<String> {
-    let cleaned = value
-        .trim()
-        .trim_start_matches(['&', '*', ' '])
-        .trim_end_matches(['*', '&', ' ', '{', ';'])
-        .trim();
-    // `Vec<Engine>` names the argument, which is what a `.run()` would be on.
-    if let Some(open) = cleaned.find('<') {
-        if let Some(close) = cleaned.rfind('>') {
-            let inner = &cleaned[open + 1..close];
-            if let Some(argument) = inner.split(',').next().map(str::trim) {
-                if !argument.is_empty() {
-                    return return_type_name(argument);
-                }
-            }
-        }
-    }
-    let name = identifier_at(cleaned)?;
-    if matches!(
-        name.as_str(),
-        "void" | "auto" | "var" | "self" | "Self" | "None" | "never"
-    ) {
-        return None;
-    }
-    if !name.chars().next().is_some_and(char::is_uppercase) {
-        return None;
-    }
-    Some(name)
+    None
 }
 
 /// Identifier at the start of a piece of code.
@@ -1575,144 +1440,5 @@ mod tests {
             "no local holds a constructed instance here: {:?}",
             scan.bindings
         );
-    }
-
-    #[test]
-    fn a_declared_return_type_is_read_from_the_signature() {
-        // Rust and TypeScript spell the return type after an arrow or a colon.
-        assert_eq!(
-            declared_return_type("fn build(&self) -> Engine {", "Rust"),
-            Some(("build".into(), "Engine".into()))
-        );
-        assert_eq!(
-            declared_return_type("    pub fn make(count: usize) -> Engine {", "Rust"),
-            Some(("make".into(), "Engine".into()))
-        );
-        assert_eq!(
-            declared_return_type("function make(): Engine {", "TypeScript"),
-            Some(("make".into(), "Engine".into()))
-        );
-        // C style: the type comes first.
-        assert_eq!(
-            declared_return_type("Engine build(int count) {", "C++"),
-            Some(("build".into(), "Engine".into()))
-        );
-        assert_eq!(
-            declared_return_type("static Engine* make() {", "C"),
-            Some(("make".into(), "Engine".into()))
-        );
-
-        // A reference, a pointer and a generic argument all name the class the
-        // call would be made on, not the wrapper.
-        assert_eq!(
-            declared_return_type("fn build(&self) -> &Engine {", "Rust"),
-            Some(("build".into(), "Engine".into()))
-        );
-        assert_eq!(
-            declared_return_type("fn all(&self) -> Vec<Engine> {", "Rust"),
-            Some(("all".into(), "Engine".into()))
-        );
-
-        // A signature that promises nothing is left alone rather than guessed.
-        assert_eq!(declared_return_type("fn run(&self) {", "Rust"), None);
-        assert_eq!(declared_return_type("fn run(&self) -> () {", "Rust"), None);
-        assert_eq!(declared_return_type("void run() {", "C++"), None);
-        assert_eq!(declared_return_type("auto make() {", "C++"), None);
-        assert_eq!(declared_return_type("if (count > 0) {", "C++"), None);
-        assert_eq!(
-            declared_return_type("for (int i = 0; i < 3; i++) {", "C++"),
-            None
-        );
-        assert_eq!(declared_return_type("return engine;", "C++"), None);
-    }
-
-    #[test]
-    fn a_call_result_carries_its_declared_return_type() {
-        let lines = vec![
-            "struct Engine {}".to_string(),
-            "impl Engine {".to_string(),
-            "    fn run(&self) {}".to_string(),
-            "}".to_string(),
-            "fn build() -> Engine {".to_string(),
-            "    Engine {}".to_string(),
-            "}".to_string(),
-            "fn main() {".to_string(),
-            "    let engine = build();".to_string(),
-            "    engine.run();".to_string(),
-            "}".to_string(),
-        ];
-        let scan = scan(&lines, "main.rs");
-        // The return type is recorded from the signature.
-        assert!(scan
-            .returns
-            .iter()
-            .any(|(name, returned)| name == "build" && returned == "Engine"));
-
-        // And the binding holds it, so the call resolves to the member.
-        let binding = scan.binding_of("engine", 8, 6).expect("a binding");
-        assert_eq!(binding.class, "Engine");
-
-        let call = scan
-            .calls
-            .iter()
-            .find(|call| call.name == "run" && call.line == 9)
-            .expect("the run call");
-        let resolved = resolve_call(call, &scan, "main.rs", &[], 4);
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].declaration.name, "run");
-        assert_eq!(resolved[0].declaration.owner.as_deref(), Some("Engine"));
-        assert_eq!(resolved[0].confidence, CallConfidence::Member);
-    }
-
-    #[test]
-    fn an_unknown_return_type_does_not_invent_a_class() {
-        // `make` promises nothing, so the binding stays unknown and the call is
-        // left to the ordinary same-file rule instead of a invented member.
-        let lines = vec![
-            "struct Engine {}".to_string(),
-            "impl Engine {".to_string(),
-            "    fn run(&self) {}".to_string(),
-            "}".to_string(),
-            "fn make() {".to_string(),
-            "}".to_string(),
-            "fn main() {".to_string(),
-            "    let thing = make();".to_string(),
-            "}".to_string(),
-        ];
-        let scan = scan(&lines, "main.rs");
-        assert!(scan.binding_of("thing", 7, 1).is_none());
-        assert!(!scan.returns.iter().any(|(name, _)| name == "make"));
-    }
-
-    #[test]
-    fn only_a_plain_call_takes_its_return_type() {
-        // The rule is deliberately narrow: a member call, a chain or a call
-        // wrapped in anything else is left to the ordinary rules, so the
-        // scanner never invents a type it cannot prove.
-        let returns = vec![("build".to_string(), "Engine".to_string())];
-        assert_eq!(
-            local_binding("let engine = build();", &returns),
-            Some(("engine".to_string(), "Engine".to_string()))
-        );
-        assert_eq!(
-            local_binding("let engine = build()", &returns),
-            Some(("engine".to_string(), "Engine".to_string()))
-        );
-        // A member call names its own receiver, which this rule does not cover.
-        assert_eq!(
-            local_binding("let engine = factory.build();", &returns),
-            None
-        );
-        // A chain is not a constructor either.
-        assert_eq!(
-            local_binding("let engine = build().finish();", &returns),
-            None
-        );
-        // Arguments are fine, and so is a call the table does not know.
-        assert_eq!(
-            local_binding("let engine = build(1, 2);", &returns),
-            Some(("engine".to_string(), "Engine".to_string()))
-        );
-        assert_eq!(local_binding("let other = unknown();", &returns), None);
     }
 }
