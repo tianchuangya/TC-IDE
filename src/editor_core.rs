@@ -1150,3 +1150,258 @@ mod clipping_tests {
         assert!(line_overflows("abcdefghijk", 0, 0));
     }
 }
+
+/// The pair of brackets a position sits on or beside.
+///
+/// An editor that shows the matching bracket has to look past the line the
+/// caret is on: a function's closing brace is often many lines below its
+/// opening one, and matching only within a line would miss exactly the case
+/// people want. Comments and strings are ignored, so a bracket in a comment
+/// never pairs with code.
+#[allow(dead_code)] // The backends adopt the pieces they need as they migrate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BracketPair {
+    /// Position of the bracket the caret is on or beside.
+    pub open: (usize, usize),
+    /// Position of the bracket it pairs with.
+    pub close: (usize, usize),
+    /// Whether the caret was on the opening bracket.
+    pub caret_on_open: bool,
+}
+
+/// Opening bracket a character is, if it is one.
+#[allow(dead_code)] // The backends adopt the pieces they need as they migrate.
+pub fn opening_bracket(character: char) -> bool {
+    matches!(character, '(' | '[' | '{')
+}
+
+/// Closing bracket a character is, if it is one.
+#[allow(dead_code)] // The backends adopt the pieces they need as they migrate.
+pub fn closing_bracket(character: char) -> bool {
+    matches!(character, ')' | ']' | '}')
+}
+
+/// Whether two brackets are the two halves of one pair.
+#[allow(dead_code)]
+fn brackets_match(open: char, close: char) -> bool {
+    matches!((open, close), ('(', ')') | ('[', ']') | ('{', '}'))
+}
+
+/// Position of a bracket, in lines and character columns.
+#[allow(dead_code)]
+fn bracket_positions(masked: &[String]) -> Vec<(usize, usize, char)> {
+    let mut positions = Vec::new();
+    for (index, line) in masked.iter().enumerate() {
+        for (column, character) in line.chars().enumerate() {
+            if opening_bracket(character) || closing_bracket(character) {
+                positions.push((index, column, character));
+            }
+        }
+    }
+    positions
+}
+
+/// The bracket pair at a position, when there is one.
+///
+/// The caret matches the bracket it is on, and also the one just before it,
+/// because an editor puts the caret after a bracket the moment it is typed.
+#[allow(dead_code)] // Used by the Linux editor; the others adopt it next.
+pub fn bracket_pair_at(
+    text: &[String],
+    masked: &[String],
+    line: usize,
+    column: usize,
+) -> Option<BracketPair> {
+    let characters = text.get(line)?.chars().collect::<Vec<_>>();
+    let candidate = if characters.get(column).copied().is_some_and(opening_bracket) {
+        Some((column, true))
+    } else if characters.get(column).copied().is_some_and(closing_bracket) {
+        Some((column, false))
+    } else if column > 0
+        && characters
+            .get(column - 1)
+            .copied()
+            .is_some_and(opening_bracket)
+    {
+        Some((column - 1, true))
+    } else if column > 0
+        && characters
+            .get(column - 1)
+            .copied()
+            .is_some_and(closing_bracket)
+    {
+        Some((column - 1, false))
+    } else {
+        None
+    };
+    let (column, on_open) = candidate?;
+    let positions = bracket_positions(masked);
+    let index = positions
+        .iter()
+        .position(|(at_line, at_column, _)| *at_line == line && *at_column == column)?;
+
+    if on_open {
+        // Walk forward counting this bracket's kind. A bracket of another kind
+        // is stepped over entirely: decrementing on any closer would let a
+        // square bracket inside braces close them, which pairs a brace with a
+        // bracket that is not its partner.
+        let open = positions[index].2;
+        let mut depth = 0usize;
+        for (at_line, at_column, character) in positions.iter().skip(index) {
+            if *character == open {
+                depth += 1;
+            } else if closing_bracket(*character) {
+                // A closer of a different kind belongs to a pair that opened
+                // later and never opened at all here, so it is not ours.
+                if !brackets_match(open, *character) {
+                    continue;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    return Some(BracketPair {
+                        open: (line, column),
+                        close: (*at_line, *at_column),
+                        caret_on_open: true,
+                    });
+                }
+            }
+        }
+        None
+    } else {
+        let close = positions[index].2;
+        let mut depth = 0usize;
+        for (at_line, at_column, character) in positions.iter().take(index + 1).rev() {
+            if *character == close {
+                depth += 1;
+            } else if opening_bracket(*character) {
+                if !brackets_match(*character, close) {
+                    continue;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    return Some(BracketPair {
+                        open: (*at_line, *at_column),
+                        close: (line, column),
+                        caret_on_open: false,
+                    });
+                }
+            }
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod bracket_tests {
+    use super::*;
+
+    fn lines(text: &[&str]) -> Vec<String> {
+        text.iter().map(|line| line.to_string()).collect()
+    }
+
+    #[test]
+    fn a_bracket_pairs_with_its_own_kind_across_lines() {
+        // The case people actually want: a function's closing brace is many
+        // lines below the opening one.
+        let source = lines(&[
+            "fn build() {",       // 0
+            "    let items = [",  // 1
+            "        one,",       // 2
+            "    ];",             // 3
+            "    compute(items)", // 4
+            "}",                  // 5
+        ]);
+        // The opening brace on line 0 pairs with the brace on line 5.
+        let pair = bracket_pair_at(&source, &source, 0, 11).expect("the brace matches");
+        assert_eq!(pair.open, (0, 11));
+        assert_eq!(pair.close, (5, 0));
+        assert!(pair.caret_on_open, "the caret was on the opening one");
+
+        // The closing brace pairs back to the same opening one.
+        let back = bracket_pair_at(&source, &source, 5, 0).expect("the brace matches");
+        assert_eq!(back.open, (0, 11));
+        assert_eq!(back.close, (5, 0));
+        assert!(!back.caret_on_open);
+
+        // The square brackets on lines 1 and 3 pair with each other, not with
+        // the braces around them.
+        let square = bracket_pair_at(&source, &source, 1, 16).expect("the bracket matches");
+        assert_eq!(square.open, (1, 16));
+        assert_eq!(square.close, (3, 4));
+
+        // An editor puts the caret after a bracket the moment it is typed, so
+        // a position just after one counts as being on it.
+        let after = bracket_pair_at(&source, &source, 4, 18).expect("the paren matches");
+        assert_eq!(after.open, (4, 11));
+        assert_eq!(after.close, (4, 17));
+    }
+
+    #[test]
+    fn nested_brackets_do_not_pair_with_each_other() {
+        // A naive scan takes the first closing bracket it meets, which would
+        // pair the outer brace with the inner parenthesis.
+        let source = lines(&["{ a ( b ) c }"]);
+        let outer = bracket_pair_at(&source, &source, 0, 0).expect("the brace matches");
+        assert_eq!(outer.close, (0, 12), "the brace pairs with the last one");
+
+        let inner = bracket_pair_at(&source, &source, 0, 4).expect("the paren matches");
+        assert_eq!(inner.open, (0, 4));
+        assert_eq!(inner.close, (0, 8), "the paren pairs with its own");
+
+        // Deeply nested brackets still resolve to their own partner.
+        let deep = lines(&["(((())))"]);
+        let pair = bracket_pair_at(&deep, &deep, 0, 0).expect("matches");
+        assert_eq!(pair.close, (0, 7));
+        let pair = bracket_pair_at(&deep, &deep, 0, 3).expect("matches");
+        assert_eq!(pair.close, (0, 4));
+    }
+
+    #[test]
+    fn a_bracket_in_a_comment_or_string_is_not_a_bracket() {
+        // Pairing a brace inside a comment with real code would point the
+        // reader at the wrong line, which is worse than showing nothing.
+        let source = lines(&[
+            "fn build() { // note the { here", // 0
+            "    let text = \"a } b\";",       // 1
+            "}",                               // 2
+        ]);
+        // The mask blanks the comment and the string, keeping the columns.
+        let masked = vec![
+            "fn build() {                 ".to_string(),
+            "    let text =      ;".to_string(),
+            "}".to_string(),
+        ];
+        let pair = bracket_pair_at(&source, &masked, 0, 11).expect("the real brace matches");
+        assert_eq!(
+            pair.close,
+            (2, 0),
+            "the brace in the comment must not be taken for the match"
+        );
+
+        // A bracket that only appears inside a comment has no pair at all.
+        let comment_only = lines(&["let a = 1; // ( unmatched"]);
+        let comment_mask = lines(&["let a = 1;                 "]);
+        assert_eq!(bracket_pair_at(&comment_only, &comment_mask, 0, 15), None);
+        // Nor does one only inside a string.
+        let string_only = lines(&["let a = \"(\";"]);
+        let string_mask = lines(&["let a =    ;"]);
+        assert_eq!(bracket_pair_at(&string_only, &string_mask, 0, 9), None);
+    }
+
+    #[test]
+    fn a_mismatched_or_unclosed_bracket_has_no_pair() {
+        // Showing a wrong pair is worse than showing none, so a bracket whose
+        // partner never arrives pairs with nothing.
+        let unclosed = lines(&["fn build() {"]);
+        assert_eq!(bracket_pair_at(&unclosed, &unclosed, 0, 11), None);
+
+        let mismatched = lines(&["( ]"]);
+        assert_eq!(bracket_pair_at(&mismatched, &mismatched, 0, 0), None);
+
+        // A position with no bracket near it has no pair.
+        let plain = lines(&["let a = 1;"]);
+        assert_eq!(bracket_pair_at(&plain, &plain, 0, 5), None);
+        assert_eq!(bracket_pair_at(&plain, &plain, 9, 0), None);
+        assert_eq!(bracket_pair_at(&[], &[], 0, 0), None);
+    }
+}

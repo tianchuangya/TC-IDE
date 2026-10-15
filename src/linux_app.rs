@@ -780,6 +780,8 @@ struct App {
     /// pointer was when it was grabbed.
     background_drag: Option<(background_core::Handle, i32, i32)>,
     graph_relation: graph_core::GraphRelation,
+    /// The brackets the caret is between, refreshed once a frame.
+    matched_brackets: Option<editor_core::BracketPair>,
     /// Language server for the active file, when one is installed.
     language_server: Option<lsp_core::LanguageServer>,
     /// Diagnostics the server last published, and the file they describe.
@@ -4358,6 +4360,37 @@ impl App {
                     self.outline(self.colors.bright, bx, by, bw, bh);
                 }
             }
+            // The bracket under the caret and the one it pairs with, drawn as
+            // an outline so a reader can see where a block ends without
+            // counting braces.
+            if let Some(pair) = self.matched_brackets {
+                for (at_line, at_column, matched) in [
+                    (pair.open.0, pair.open.1, pair.caret_on_open),
+                    (pair.close.0, pair.close.1, !pair.caret_on_open),
+                ] {
+                    if at_line != index {
+                        continue;
+                    }
+                    let text_line = &self.files[self.selected_file].lines[at_line];
+                    let before = char_to_byte_index(text_line, at_column);
+                    let width = text_line[before..]
+                        .chars()
+                        .next()
+                        .map(|character| character.len_utf8())
+                        .unwrap_or(1);
+                    let bx = left + s(52) + self.code_text_width(&text_line[..before]);
+                    let bw = self
+                        .code_text_width(&text_line[before..before + width])
+                        .max(s(4));
+                    // The bracket the caret is on is filled; its partner is
+                    // only outlined, so which is which stays readable.
+                    if matched {
+                        self.rect(self.colors.accent, bx - s(1), y - s(18), bw + s(2), s(22));
+                    } else {
+                        self.outline(self.colors.bright, bx - s(1), y - s(18), bw + s(2), s(22));
+                    }
+                }
+            }
             if let Some(comment) = self.comment_parts(line) {
                 self.highlighted_text(left + s(52), y, comment.code, detected);
                 let raw_anchor = left + s(58) + self.code_text_width(comment.code);
@@ -5923,6 +5956,26 @@ impl App {
                 ));
                 true
             }
+            "brackets" => {
+                // The caret sits inside a nested block, so the pair it is
+                // between is drawn and the mismatch is visible if it is wrong.
+                self.files = vec![FileBuffer::new(
+                    "main.rs".into(),
+                    PathBuf::from("/tmp/tc-ide-preview/main.rs"),
+                    vec![
+                        "fn build() {".into(),
+                        "    let items = [".into(),
+                        "        one,".into(),
+                        "    ];".into(),
+                        "    compute(items)".into(),
+                        "}".into(),
+                    ],
+                )];
+                self.selected_file = 0;
+                self.caret_line = 1;
+                self.caret_column = 16;
+                true
+            }
             "diagnostics" => {
                 // A file with what a server would have said about it, so the
                 // gutter markers and the status line can be inspected without
@@ -7111,6 +7164,24 @@ impl App {
         self.visible_diagnostics()
             .into_iter()
             .find(|diagnostic| diagnostic.line as usize == self.caret_line)
+    }
+
+    /// Recompute which brackets the caret is between.
+    ///
+    /// Named for what it does rather than when it runs: the pair is worked out
+    /// once a frame from the caret, and the shared function does the matching.
+    fn refresh_matched_brackets(&mut self) {
+        let file = &self.files[self.selected_file];
+        let lines = &file.lines;
+        let name = &file.name;
+        // Comments and strings are blanked first, so a bracket inside one is
+        // not matched against code. The mask keeps the same columns.
+        let masked = lines
+            .iter()
+            .map(|line| syntax_core::mask_line(line, name))
+            .collect::<Vec<_>>();
+        self.matched_brackets =
+            editor_core::bracket_pair_at(lines, &masked, self.caret_line, self.caret_column);
     }
 
     /// The active document as one string, which is what a server is told.
@@ -10635,6 +10706,7 @@ pub fn run() {
             extension_upgrades: 0,
             background_drag: None,
             graph_relation: graph_core::GraphRelation::Follow,
+            matched_brackets: None,
             language_server: None,
             lsp_diagnostics: Vec::new(),
             lsp_diagnostic_file: String::new(),
@@ -10705,6 +10777,7 @@ pub fn run() {
             }
             app.refresh_index();
             app.poll_ai_session();
+            app.refresh_matched_brackets();
             app.poll_language_server();
             app.sync_language_server();
             app.update_background();
