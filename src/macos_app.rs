@@ -1017,6 +1017,185 @@ impl GraphPanel {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Settings panel
+// ---------------------------------------------------------------------------
+
+/// One control of the settings panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Setting {
+    ThemeDark,
+    ThemeLight,
+    FontSmaller,
+    FontLarger,
+    LanguageEnglish,
+    LanguageChinese,
+    Close,
+}
+
+impl Setting {
+    /// Every control, in the order `Tab` walks them and the panel draws them.
+    const ALL: [Setting; 7] = [
+        Setting::ThemeDark,
+        Setting::ThemeLight,
+        Setting::FontSmaller,
+        Setting::FontLarger,
+        Setting::LanguageEnglish,
+        Setting::LanguageChinese,
+        Setting::Close,
+    ];
+
+    /// Label drawn on the control.
+    fn label(self) -> &'static str {
+        match self {
+            Setting::ThemeDark => "Dark",
+            Setting::ThemeLight => "Light",
+            Setting::FontSmaller => "−",
+            Setting::FontLarger => "+",
+            Setting::LanguageEnglish => "English",
+            Setting::LanguageChinese => "中文",
+            Setting::Close => "Close",
+        }
+    }
+
+    /// Whether the control is the selected one in a preference.
+    fn is_active(self, preferences: &workspace_core::Preferences) -> bool {
+        match self {
+            Setting::ThemeDark => !preferences.light_theme,
+            Setting::ThemeLight => preferences.light_theme,
+            Setting::LanguageEnglish => !preferences.ui_chinese,
+            Setting::LanguageChinese => preferences.ui_chinese,
+            _ => false,
+        }
+    }
+
+    /// Whether the control can be used right now.
+    fn is_enabled(self, preferences: &workspace_core::Preferences) -> bool {
+        match self {
+            Setting::FontSmaller => preferences.code_zoom > MIN_CODE_ZOOM,
+            Setting::FontLarger => preferences.code_zoom < MAX_CODE_ZOOM,
+            _ => true,
+        }
+    }
+}
+
+/// Smallest editor font step.
+const MIN_CODE_ZOOM: i32 = -4;
+/// Largest editor font step.
+const MAX_CODE_ZOOM: i32 = 12;
+/// Width of the settings panel, in points.
+const SETTINGS_WIDTH: f64 = 360.0;
+/// Height of one settings row, in points.
+const SETTINGS_ROW_HEIGHT: f64 = 40.0;
+/// Top of the first settings row, inside the panel.
+const SETTINGS_FIRST_ROW: f64 = 56.0;
+
+/// The view state of the settings panel.
+struct SettingsPanel {
+    open: bool,
+    /// Control the keyboard is on, when the panel has the keyboard.
+    focus: Option<Setting>,
+    /// Control the pointer went down on.
+    pressed: Option<Setting>,
+}
+
+impl SettingsPanel {
+    fn new() -> Self {
+        Self {
+            open: false,
+            focus: None,
+            pressed: None,
+        }
+    }
+
+    /// Rectangle of a control, in panel coordinates.
+    fn rect(control: Setting) -> CGRect {
+        let row = SETTINGS_ROW_HEIGHT;
+        let height = row - 8.0;
+        match control {
+            Setting::ThemeDark => CGRect::new(16.0, SETTINGS_FIRST_ROW, 140.0, height),
+            Setting::ThemeLight => CGRect::new(164.0, SETTINGS_FIRST_ROW, 140.0, height),
+            Setting::FontSmaller => CGRect::new(16.0, SETTINGS_FIRST_ROW + row, 44.0, height),
+            Setting::FontLarger => CGRect::new(112.0, SETTINGS_FIRST_ROW + row, 44.0, height),
+            Setting::LanguageEnglish => {
+                CGRect::new(16.0, SETTINGS_FIRST_ROW + row * 2.0, 140.0, height)
+            }
+            Setting::LanguageChinese => {
+                CGRect::new(164.0, SETTINGS_FIRST_ROW + row * 2.0, 140.0, height)
+            }
+            Setting::Close => CGRect::new(16.0, SETTINGS_FIRST_ROW + row * 3.0, 140.0, height),
+        }
+    }
+
+    /// Height the panel needs.
+    fn height() -> f64 {
+        SETTINGS_FIRST_ROW + SETTINGS_ROW_HEIGHT * 3.0 + SETTINGS_ROW_HEIGHT + 16.0
+    }
+
+    /// The control a point of the panel is over.
+    fn control_at(x: f64, y: f64) -> Option<Setting> {
+        Setting::ALL.into_iter().find(|control| {
+            let rect = Self::rect(*control);
+            x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height
+        })
+    }
+
+    /// Walk the keyboard focus, skipping the controls that cannot be used.
+    fn step_focus(&mut self, forward: bool, preferences: &workspace_core::Preferences) {
+        let enabled = Setting::ALL
+            .into_iter()
+            .filter(|control| control.is_enabled(preferences))
+            .collect::<Vec<_>>();
+        if enabled.is_empty() {
+            self.focus = None;
+            return;
+        }
+        let position = self
+            .focus
+            .and_then(|focused| enabled.iter().position(|control| *control == focused));
+        let next = match position {
+            Some(index) if forward => (index + 1) % enabled.len(),
+            Some(index) => (index + enabled.len() - 1) % enabled.len(),
+            None => 0,
+        };
+        self.focus = Some(enabled[next]);
+    }
+}
+
+/// Where the macOS preferences live, following the platform convention.
+fn preferences_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("TC-IDE")
+            .join("settings.conf"),
+    )
+}
+
+/// Read the preferences, falling back to the defaults.
+fn load_preferences() -> workspace_core::Preferences {
+    preferences_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| workspace_core::parse_preferences(&text))
+        .unwrap_or_default()
+}
+
+/// Write the preferences, creating the directory when it is missing.
+fn save_preferences(preferences: &workspace_core::Preferences) -> Result<PathBuf, String> {
+    let Some(path) = preferences_path() else {
+        return Err("The home directory is unknown".into());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    }
+    std::fs::write(&path, workspace_core::serialize_preferences(preferences))
+        .map_err(|error| format!("Could not write {}: {error}", path.display()))?;
+    Ok(path)
+}
+
 /// Index of the tab a point of the header is over.
 ///
 /// The tabs are a fixed width strip starting at the left margin, which keeps the
@@ -1068,6 +1247,10 @@ enum MacCommand {
     GraphJump,
     GraphRelation,
     GraphScope,
+    ToggleSettings,
+    SettingNext,
+    SettingPrevious,
+    SettingUse,
 }
 
 /// Map a key code and modifiers to an editor command.
@@ -1107,6 +1290,8 @@ fn key_command(key_code: u16, command: bool, shift: bool) -> Option<MacCommand> 
         38 if command => Some(MacCommand::ToggleTerminal),
         5 if command && shift => Some(MacCommand::GraphScope),
         5 if command => Some(MacCommand::ToggleGraph),
+        // ⌘, opens the settings, as it does in every macOS application.
+        43 if command => Some(MacCommand::ToggleSettings),
         // The panel owns these while it has the keyboard.
         _ => None,
     }
@@ -1135,6 +1320,7 @@ fn command_for_menu_action(action: &str) -> Option<MacCommand> {
         "tcToggleGraph:" => Some(MacCommand::ToggleGraph),
         "tcGraphRelation:" => Some(MacCommand::GraphRelation),
         "tcGraphScope:" => Some(MacCommand::GraphScope),
+        "tcSettings:" => Some(MacCommand::ToggleSettings),
         _ => None,
     }
 }
@@ -1157,6 +1343,11 @@ struct MacShell {
     started: Instant,
     /// The relation graph panel.
     graph: GraphPanel,
+    /// The settings panel.
+    settings: SettingsPanel,
+    /// The pointer, for hover and pressed states.
+    mouse: (f64, f64),
+    mouse_pressed: bool,
     /// Folder the user opened as the project, when there is one.
     project: Option<PathBuf>,
     /// The terminal drawer, once a shell has been started.
@@ -1172,7 +1363,7 @@ struct MacShell {
 
 impl MacShell {
     fn new() -> Self {
-        let preferences = workspace_core::Preferences::default();
+        let preferences = load_preferences();
         let welcome = editor_session::Document::from_lines(
             "main.rs",
             None,
@@ -1190,6 +1381,9 @@ impl MacShell {
             status: "Ready".into(),
             started: Instant::now(),
             graph: GraphPanel::new(),
+            settings: SettingsPanel::new(),
+            mouse: (0.0, 0.0),
+            mouse_pressed: false,
             project: None,
             terminal: None,
             terminal_focused: false,
@@ -1332,6 +1526,14 @@ impl MacShell {
             MacCommand::GraphJump => self.graph_activate(),
             MacCommand::GraphRelation => self.graph_cycle_relation(),
             MacCommand::GraphScope => self.graph_cycle_scope(),
+            MacCommand::ToggleSettings => self.toggle_settings(),
+            MacCommand::SettingNext => self.step_settings_focus(true),
+            MacCommand::SettingPrevious => self.step_settings_focus(false),
+            MacCommand::SettingUse => {
+                if let Some(control) = self.settings.focus {
+                    self.activate_setting(control);
+                }
+            }
         }
     }
 
@@ -1554,6 +1756,104 @@ impl MacShell {
         self.graph.cycle_scope();
         self.refresh_graph();
         self.status = format!("Range: {}", self.graph.graph.scope_label());
+    }
+
+    /// Show or hide the settings panel.
+    fn toggle_settings(&mut self) {
+        self.settings.open = !self.settings.open;
+        self.settings.focus = if self.settings.open {
+            Some(Setting::ThemeDark)
+        } else {
+            None
+        };
+        self.settings.pressed = None;
+        self.status = if self.settings.open {
+            "Settings: Tab walks the controls, Enter uses one, Esc closes".into()
+        } else {
+            "Settings closed".into()
+        };
+    }
+
+    /// Rectangle of the settings panel in view coordinates.
+    fn settings_rect(&self) -> CGRect {
+        CGRect::new(
+            (self.view_width() - SETTINGS_WIDTH) * 0.5,
+            12.0,
+            SETTINGS_WIDTH,
+            SettingsPanel::height(),
+        )
+    }
+
+    /// The control under a point of the view.
+    fn settings_control_at(&self, x: f64, y: f64) -> Option<Setting> {
+        if !self.settings.open {
+            return None;
+        }
+        let panel = self.settings_rect();
+        if !panel.contains(CGPoint { x, y }) {
+            return None;
+        }
+        SettingsPanel::control_at(x - panel.x, y - panel.y)
+    }
+
+    /// Use a control: the one the keyboard is on, or the one clicked.
+    fn activate_setting(&mut self, control: Setting) {
+        if !control.is_enabled(&self.preferences) {
+            self.status = format!("{} is not available right now", control.label());
+            return;
+        }
+        match control {
+            Setting::ThemeDark | Setting::ThemeLight => {
+                self.preferences.light_theme = control == Setting::ThemeLight;
+                self.palette = theme_core::Palette::for_scheme(self.preferences.light_theme);
+                self.status = format!(
+                    "{} theme",
+                    if self.preferences.light_theme {
+                        "Light"
+                    } else {
+                        "Dark"
+                    }
+                );
+            }
+            Setting::FontSmaller | Setting::FontLarger => {
+                let step = if control == Setting::FontSmaller {
+                    -1
+                } else {
+                    1
+                };
+                self.preferences.code_zoom =
+                    (self.preferences.code_zoom + step).clamp(MIN_CODE_ZOOM, MAX_CODE_ZOOM);
+                // The measured cell belongs to the size it was measured for.
+                self.measured_cell = None;
+                self.status = format!("Editor font step {}", self.preferences.code_zoom);
+            }
+            Setting::LanguageEnglish | Setting::LanguageChinese => {
+                self.preferences.ui_chinese = control == Setting::LanguageChinese;
+                self.status = if self.preferences.ui_chinese {
+                    "界面语言已切换为简体中文".into()
+                } else {
+                    "Interface language changed to English".into()
+                };
+            }
+            Setting::Close => {
+                self.settings.open = false;
+                self.settings.focus = None;
+                self.status = "Settings closed".into();
+                return;
+            }
+        }
+        // The panel keeps the keyboard on a control that still exists.
+        if self.settings.focus == Some(control) && !control.is_enabled(&self.preferences) {
+            self.settings.step_focus(true, &self.preferences);
+        }
+    }
+
+    /// Walk the keyboard focus inside the settings panel.
+    fn step_settings_focus(&mut self, forward: bool) {
+        self.settings.step_focus(forward, &self.preferences);
+        if let Some(control) = self.settings.focus {
+            self.status = format!("{}: {}", control.label(), control.label());
+        }
     }
 
     /// Step everything that moves in one frame and collect what the shell wrote.
@@ -1788,6 +2088,16 @@ impl MacShell {
             }
             return;
         }
+        self.mouse = (x, y);
+        if let Some(control) = self.settings_control_at(x, y) {
+            self.settings.pressed = Some(control);
+            self.settings.focus = Some(control);
+            self.activate_setting(control);
+            return;
+        }
+        if self.settings.open && self.settings_rect().contains(CGPoint { x, y }) {
+            return;
+        }
         if let Some(row) = self.graph_row_at(x, y) {
             let rows = self.graph_rows();
             self.graph.focused = true;
@@ -2007,6 +2317,117 @@ unsafe fn draw_frame(shell: &mut MacShell) {
         }
     }
 
+    // The settings panel, centred, in front of the editor and the graph.
+    if shell.settings.open {
+        let panel = shell.settings_rect();
+        let control_visual = |control: Setting| {
+            let enabled = control.is_enabled(&shell.preferences);
+            let rect = SettingsPanel::rect(control);
+            let on_screen =
+                CGRect::new(panel.x + rect.x, panel.y + rect.y, rect.width, rect.height);
+            let state = if !enabled {
+                theme_core::ControlState::Disabled
+            } else if on_screen.contains(CGPoint {
+                x: shell.mouse.0,
+                y: shell.mouse.1,
+            }) {
+                if shell.mouse_pressed {
+                    theme_core::ControlState::Pressed
+                } else {
+                    theme_core::ControlState::Hovered
+                }
+            } else {
+                theme_core::ControlState::Normal
+            };
+            let visual = palette.control(state, control.is_active(&shell.preferences));
+            (on_screen, visual, shell.settings.focus == Some(control))
+        };
+        fill_rect(panel, palette.background, 0.96);
+        fill_rect(
+            CGRect::new(panel.x, panel.y, panel.width, 1.0),
+            palette.border,
+            1.0,
+        );
+        draw_text(
+            "SETTINGS",
+            panel.x + 16.0,
+            panel.y + 18.0,
+            14.0,
+            palette.bright,
+            false,
+        );
+        draw_text(
+            "Theme",
+            panel.x + 16.0,
+            panel.y + SETTINGS_FIRST_ROW - 14.0,
+            11.0,
+            palette.muted,
+            false,
+        );
+        draw_text(
+            "Editor font size",
+            panel.x + 16.0,
+            panel.y + SETTINGS_FIRST_ROW + SETTINGS_ROW_HEIGHT - 14.0,
+            11.0,
+            palette.muted,
+            false,
+        );
+        draw_text(
+            &format!("step {}", shell.preferences.code_zoom),
+            panel.x + 128.0,
+            panel.y + SETTINGS_FIRST_ROW + SETTINGS_ROW_HEIGHT + 8.0,
+            12.0,
+            palette.bright,
+            false,
+        );
+        draw_text(
+            "Interface language",
+            panel.x + 16.0,
+            panel.y + SETTINGS_FIRST_ROW + SETTINGS_ROW_HEIGHT * 2.0 - 14.0,
+            11.0,
+            palette.muted,
+            false,
+        );
+        for control in Setting::ALL {
+            let (rect, visual, focused) = control_visual(control);
+            fill_rect(rect, visual.fill, visual.opacity as f64);
+            fill_rect(
+                CGRect::new(rect.x, rect.y, rect.width, 1.0),
+                visual.border,
+                1.0,
+            );
+            if focused {
+                fill_rect(
+                    CGRect::new(rect.x - 2.0, rect.y - 2.0, rect.width + 4.0, 1.0),
+                    palette.accent,
+                    1.0,
+                );
+                fill_rect(
+                    CGRect::new(
+                        rect.x - 2.0,
+                        rect.y + rect.height + 1.0,
+                        rect.width + 4.0,
+                        1.0,
+                    ),
+                    palette.accent,
+                    1.0,
+                );
+            }
+            draw_text(
+                control.label(),
+                rect.x + 10.0,
+                rect.y + 9.0,
+                12.0,
+                if control.is_active(&shell.preferences) {
+                    palette.accent
+                } else {
+                    visual.text
+                },
+                false,
+            );
+        }
+    }
+
     // The relation graph panel, on the right.
     if shell.graph.open {
         let panel_left = shell.graph_panel_left();
@@ -2205,6 +2626,29 @@ unsafe extern "C" fn editor_key_down(_view: Id, _selector: Sel, event: Id) {
         }
         // While the graph has the keyboard it takes the keys the editor would
         // otherwise use, so a fold never turns into a line break.
+        if shell.settings.open {
+            match key_code {
+                48 => {
+                    shell.apply(if shift {
+                        MacCommand::SettingPrevious
+                    } else {
+                        MacCommand::SettingNext
+                    });
+                    return;
+                }
+                36 | 76 | 49 => {
+                    shell.apply(MacCommand::SettingUse);
+                    return;
+                }
+                53 => {
+                    shell.settings.open = false;
+                    shell.settings.focus = None;
+                    shell.status = "Settings closed".into();
+                    return;
+                }
+                _ => {}
+            }
+        }
         if shell.graph.focused {
             match key_code {
                 125 => {
@@ -2274,7 +2718,11 @@ unsafe extern "C" fn editor_mouse_down(view: Id, _selector: Sel, event: Id) {
     // The window coordinates start at the bottom left; the view is flipped.
     let height = msg_rect_out(view, "bounds").height;
     let y = height - point.y;
-    with_shell(|shell| shell.click_at(point.x, y));
+    with_shell(|shell| {
+        shell.mouse = (point.x, y);
+        shell.mouse_pressed = true;
+        shell.click_at(point.x, y);
+    });
 }
 
 /// `menu_action:` of the menu target: dispatch a menu item to its command.
@@ -2388,6 +2836,7 @@ unsafe fn install_menu_bar() {
         ("Close Tab", "tcCloseTab:", "w"),
         ("Toggle Terminal", "tcToggleTerminal:", "j"),
         ("Relation Graph", "tcToggleGraph:", "g"),
+        ("Settings…", "tcSettings:", ","),
     ] {
         let item = menu_item(title, action, key, target);
         msg_void_id(edit_menu, "addItem:", item);
@@ -2407,6 +2856,24 @@ unsafe fn install_menu_bar() {
 unsafe fn msg_init_string(receiver: Id, selector: &str, title: &str) -> Id {
     let send: extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(objc_msgSend as *const c_void);
     send(receiver, selector_name(selector), nsstring(title))
+}
+
+/// `mouseMoved:` of the editor view: track the pointer for hover states.
+unsafe extern "C" fn editor_mouse_moved(_view: Id, _selector: Sel, event: Id) {
+    let point = msg_point_out(event, "locationInWindow");
+    let height = msg_rect_out(_view, "bounds").height;
+    with_shell(|shell| shell.mouse = (point.x, height - point.y));
+}
+
+/// `mouseUp:` of the editor view: the pressed state ends.
+unsafe extern "C" fn editor_mouse_up(_view: Id, _selector: Sel, event: Id) {
+    let point = msg_point_out(event, "locationInWindow");
+    let height = msg_rect_out(_view, "bounds").height;
+    with_shell(|shell| {
+        shell.mouse = (point.x, height - point.y);
+        shell.mouse_pressed = false;
+        shell.settings.pressed = None;
+    });
 }
 
 /// Register the editor view class.
@@ -2447,6 +2914,18 @@ unsafe fn register_editor_view() {
         subclass,
         selector_name("mouseDown:"),
         std::mem::transmute::<unsafe extern "C" fn(Id, Sel, Id), Imp>(editor_mouse_down),
+        object_argument.as_ptr(),
+    );
+    class_addMethod(
+        subclass,
+        selector_name("mouseMoved:"),
+        std::mem::transmute::<unsafe extern "C" fn(Id, Sel, Id), Imp>(editor_mouse_moved),
+        object_argument.as_ptr(),
+    );
+    class_addMethod(
+        subclass,
+        selector_name("mouseUp:"),
+        std::mem::transmute::<unsafe extern "C" fn(Id, Sel, Id), Imp>(editor_mouse_up),
         object_argument.as_ptr(),
     );
     class_addMethod(
@@ -2534,6 +3013,7 @@ unsafe fn build_window(width: f64, height: f64) {
         bounds,
     );
     msg_void_id(window, "setContentView:", view);
+    msg_bool(window, "setAcceptsMouseMovedEvents:", true);
     msg_bool(window, "makeFirstResponder:", true);
     msg_bool(window, "makeKeyAndOrderFront:", true);
     install_menu_bar();
@@ -2749,6 +3229,86 @@ fn self_check() -> i32 {
         shell.session.documents().len() == 1 && shell.session.active() == 0,
         &mut failures,
     );
+    // The settings panel drives the shared preferences and palette.
+    shell.apply(MacCommand::ToggleSettings);
+    report(
+        "the settings panel opens and focuses a control",
+        shell.settings.open && shell.settings.focus.is_some(),
+        &mut failures,
+    );
+    let dark = shell.preferences.light_theme;
+    shell.activate_setting(Setting::ThemeLight);
+    let light_palette = shell.palette == theme_core::Palette::light();
+    shell.activate_setting(Setting::ThemeDark);
+    let back_to_dark =
+        !shell.preferences.light_theme && shell.palette == theme_core::Palette::dark();
+    report(
+        "the theme control switches the shared palette",
+        !dark && light_palette && back_to_dark,
+        &mut failures,
+    );
+    shell.activate_setting(Setting::LanguageChinese);
+    let chinese = shell.preferences.ui_chinese;
+    shell.activate_setting(Setting::LanguageEnglish);
+    report(
+        "the language control switches the interface language",
+        chinese && !shell.preferences.ui_chinese,
+        &mut failures,
+    );
+    let before = shell.preferences.code_zoom;
+    shell.activate_setting(Setting::FontLarger);
+    let larger = shell.preferences.code_zoom == before + 1;
+    shell.activate_setting(Setting::FontSmaller);
+    report(
+        "the font controls step the editor size",
+        larger && shell.preferences.code_zoom == before,
+        &mut failures,
+    );
+    // Walking the focus skips a control that cannot be used.
+    shell.preferences.code_zoom = MIN_CODE_ZOOM;
+    shell.settings.focus = Some(Setting::FontLarger);
+    shell.step_settings_focus(false);
+    report(
+        "the focused control stays usable",
+        shell.settings.focus != Some(Setting::FontSmaller),
+        &mut failures,
+    );
+    shell.preferences.code_zoom = 0;
+    report(
+        "the panel maps its controls",
+        SettingsPanel::control_at(20.0, SETTINGS_FIRST_ROW + 4.0) == Some(Setting::ThemeDark)
+            && SettingsPanel::control_at(168.0, SETTINGS_FIRST_ROW + 4.0)
+                == Some(Setting::ThemeLight)
+            && SettingsPanel::control_at(20.0, SETTINGS_FIRST_ROW + SETTINGS_ROW_HEIGHT + 4.0)
+                == Some(Setting::FontSmaller)
+            && SettingsPanel::control_at(20.0, 4.0).is_none()
+            && SettingsPanel::height() > SETTINGS_FIRST_ROW,
+        &mut failures,
+    );
+    report(
+        "settings load and save through the shared model",
+        workspace_core::parse_preferences(&workspace_core::serialize_preferences(
+            &workspace_core::Preferences {
+                light_theme: true,
+                code_zoom: 4,
+                ..workspace_core::Preferences::default()
+            },
+        ))
+        .light_theme
+            && preferences_path()
+                .map(|path| path.ends_with("TC-IDE/settings.conf"))
+                .unwrap_or(false),
+        &mut failures,
+    );
+    report(
+        "the settings panel has a shortcut and a menu item",
+        key_command(43, true, false) == Some(MacCommand::ToggleSettings)
+            && command_for_menu_action("tcSettings:") == Some(MacCommand::ToggleSettings),
+        &mut failures,
+    );
+    shell.settings.open = false;
+    shell.settings.focus = None;
+
     // The relation graph is built from the open documents through graph_core.
     shell.session.replace_all(
         "struct Engine {\n}\nimpl Engine {\n    fn build(&self) {\n        self.prepare();\n    }\n    fn prepare(&self) {}\n}\n",
@@ -3267,6 +3827,86 @@ mod tests {
             panel.cycle_relation();
         }
         assert_eq!(panel.relation, GraphRelation::Callers);
+    }
+
+    #[test]
+    fn the_settings_panel_maps_its_controls() {
+        assert_eq!(
+            SettingsPanel::control_at(20.0, SETTINGS_FIRST_ROW + 4.0),
+            Some(Setting::ThemeDark)
+        );
+        assert_eq!(
+            SettingsPanel::control_at(168.0, SETTINGS_FIRST_ROW + 4.0),
+            Some(Setting::ThemeLight)
+        );
+        assert_eq!(
+            SettingsPanel::control_at(20.0, SETTINGS_FIRST_ROW + SETTINGS_ROW_HEIGHT + 4.0),
+            Some(Setting::FontSmaller)
+        );
+        assert_eq!(
+            SettingsPanel::control_at(116.0, SETTINGS_FIRST_ROW + SETTINGS_ROW_HEIGHT + 4.0),
+            Some(Setting::FontLarger)
+        );
+        assert_eq!(
+            SettingsPanel::control_at(20.0, SETTINGS_FIRST_ROW + SETTINGS_ROW_HEIGHT * 2.0 + 4.0),
+            Some(Setting::LanguageEnglish)
+        );
+        assert_eq!(
+            SettingsPanel::control_at(20.0, SETTINGS_FIRST_ROW + SETTINGS_ROW_HEIGHT * 3.0 + 4.0),
+            Some(Setting::Close)
+        );
+        assert_eq!(SettingsPanel::control_at(20.0, 4.0), None);
+        assert_eq!(
+            SettingsPanel::control_at(400.0, SETTINGS_FIRST_ROW + 4.0),
+            None
+        );
+        assert!(SettingsPanel::height() > SETTINGS_FIRST_ROW + SETTINGS_ROW_HEIGHT * 3.0);
+    }
+
+    #[test]
+    fn the_settings_focus_skips_what_cannot_be_used() {
+        let mut preferences = workspace_core::Preferences {
+            code_zoom: MIN_CODE_ZOOM,
+            ..workspace_core::Preferences::default()
+        };
+        let mut panel = SettingsPanel::new();
+        panel.open = true;
+        panel.step_focus(true, &preferences);
+        assert_eq!(panel.focus, Some(Setting::ThemeDark));
+        // Walking forward from the smaller font skips it while it is disabled.
+        panel.focus = Some(Setting::ThemeLight);
+        panel.step_focus(true, &preferences);
+        assert_eq!(panel.focus, Some(Setting::FontLarger));
+        preferences.code_zoom = MAX_CODE_ZOOM;
+        panel.focus = Some(Setting::FontSmaller);
+        panel.step_focus(true, &preferences);
+        assert_eq!(panel.focus, Some(Setting::LanguageEnglish));
+        // The walk wraps around.
+        panel.focus = Some(Setting::Close);
+        panel.step_focus(true, &preferences);
+        assert_eq!(panel.focus, Some(Setting::ThemeDark));
+        panel.focus = Some(Setting::ThemeDark);
+        panel.step_focus(false, &preferences);
+        assert_eq!(panel.focus, Some(Setting::Close));
+    }
+
+    #[test]
+    fn the_settings_controls_report_their_state() {
+        let mut preferences = workspace_core::Preferences {
+            code_zoom: MIN_CODE_ZOOM,
+            ..workspace_core::Preferences::default()
+        };
+        assert!(!Setting::FontSmaller.is_enabled(&preferences));
+        assert!(Setting::FontLarger.is_enabled(&preferences));
+        preferences.code_zoom = MAX_CODE_ZOOM;
+        assert!(!Setting::FontLarger.is_enabled(&preferences));
+        assert!(Setting::FontSmaller.is_enabled(&preferences));
+        assert!(Setting::ThemeDark.is_enabled(&preferences));
+        preferences.light_theme = true;
+        assert!(Setting::ThemeLight.is_active(&preferences));
+        assert!(!Setting::ThemeDark.is_active(&preferences));
+        assert_eq!(Setting::Close.label(), "Close");
+        assert_eq!(Setting::ALL.len(), 7);
     }
 
     #[test]
