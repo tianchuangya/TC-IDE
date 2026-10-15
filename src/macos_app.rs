@@ -290,6 +290,11 @@ fn nsstring(value: &str) -> Id {
     }
 }
 
+/// Width of one document tab in the header, in points.
+const TAB_WIDTH: f64 = 150.0;
+/// Left margin of the first tab.
+const TAB_MARGIN: f64 = 12.0;
+
 /// Width of the line number gutter, in points.
 const GUTTER_WIDTH: f64 = 54.0;
 /// Width of one character of the code font, in points.
@@ -512,6 +517,22 @@ unsafe fn msg_usize_index(receiver: Id, selector: &str, index: usize) -> Id {
     send(receiver, selector_name(selector), index)
 }
 
+/// Index of the tab a point of the header is over.
+///
+/// The tabs are a fixed width strip starting at the left margin, which keeps the
+/// hit testing a two line function that cannot disagree with the drawing.
+fn tab_index_at(x: f64, count: usize, width: f64) -> Option<usize> {
+    if count == 0 || width <= 0.0 || x < TAB_MARGIN {
+        return None;
+    }
+    let index = ((x - TAB_MARGIN) / width).floor() as usize;
+    if index < count {
+        Some(index)
+    } else {
+        None
+    }
+}
+
 /// A key the editor understands, with the macOS key code it comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MacCommand {
@@ -536,6 +557,9 @@ enum MacCommand {
     OpenFolder,
     Reveal,
     Quit,
+    NextTab,
+    PreviousTab,
+    CloseTab,
 }
 
 /// Map a key code and modifiers to an editor command.
@@ -567,6 +591,10 @@ fn key_command(key_code: u16, command: bool, shift: bool) -> Option<MacCommand> 
         31 if command && shift => Some(MacCommand::OpenFolder),
         31 if command => Some(MacCommand::OpenFile),
         15 if command && shift => Some(MacCommand::Reveal),
+        // ⌘⇧] and ⌘⇧[ walk the tabs, ⌘W closes the active one.
+        30 if command && shift => Some(MacCommand::NextTab),
+        33 if command && shift => Some(MacCommand::PreviousTab),
+        13 if command => Some(MacCommand::CloseTab),
         _ => None,
     }
 }
@@ -587,6 +615,9 @@ fn command_for_menu_action(action: &str) -> Option<MacCommand> {
         "tcSave:" => Some(MacCommand::Save),
         "tcReveal:" => Some(MacCommand::Reveal),
         "tcQuit:" => Some(MacCommand::Quit),
+        "tcNextTab:" => Some(MacCommand::NextTab),
+        "tcPreviousTab:" => Some(MacCommand::PreviousTab),
+        "tcCloseTab:" => Some(MacCommand::CloseTab),
         _ => None,
     }
 }
@@ -746,7 +777,48 @@ impl MacShell {
             MacCommand::OpenFolder => self.open_project_panel(),
             MacCommand::Reveal => self.reveal_in_finder(),
             MacCommand::Quit => unsafe { quit_application() },
+            MacCommand::NextTab => self.step_tab(1),
+            MacCommand::PreviousTab => self.step_tab(-1),
+            MacCommand::CloseTab => self.close_tab(),
         }
+    }
+
+    /// Switch to the next or the previous tab.
+    fn step_tab(&mut self, step: i64) {
+        let count = self.session.documents().len();
+        if count <= 1 {
+            self.status = "Only one document is open".into();
+            return;
+        }
+        let active = self.session.active() as i64;
+        let next = (active + step).rem_euclid(count as i64) as usize;
+        if self.session.activate(next) {
+            let name = self.session.document().name.clone();
+            self.status = format!("Switched to {name}");
+        }
+    }
+
+    /// Close the active tab, unless it is the last one.
+    fn close_tab(&mut self) {
+        if !self.session.close_active() {
+            self.status = "The last document stays open".into();
+            return;
+        }
+        let name = self.session.document().name.clone();
+        self.status = format!("Closed a tab; now on {name}");
+    }
+
+    /// Width of one tab in the header.
+    fn tab_width(&self) -> f64 {
+        TAB_WIDTH
+    }
+
+    /// The tab a point of the header is over.
+    fn tab_at(&self, x: f64, y: f64) -> Option<usize> {
+        if y > self.header_height() {
+            return None;
+        }
+        tab_index_at(x, self.session.documents().len(), self.tab_width())
     }
 
     /// Copy the selection to the system pasteboard.
@@ -852,6 +924,13 @@ impl MacShell {
 
     /// Place the caret at a point of the view.
     fn click_at(&mut self, x: f64, y: f64) {
+        if let Some(index) = self.tab_at(x, y) {
+            if self.session.activate(index) {
+                let name = self.session.document().name.clone();
+                self.status = format!("Switched to {name}");
+            }
+            return;
+        }
         let area = self.text_area();
         if !area.contains(CGPoint { x, y }) {
             return;
@@ -973,13 +1052,36 @@ unsafe fn draw_frame(shell: &mut MacShell) {
     );
 
     let document = shell.session.document();
-    let title = format!(
-        "{}  ·  {}  ·  {} symbols",
-        document.name,
-        if document.dirty { "●" } else { "saved" },
-        shell.symbol_count()
-    );
-    draw_text(&title, 16.0, 14.0, 15.0, palette.bright, false);
+    let titles = shell.session.titles();
+    let active = shell.session.active();
+    let tab_width = shell.tab_width();
+    for (index, title) in titles.iter().enumerate() {
+        let left = TAB_MARGIN + index as f64 * tab_width;
+        let selected = index == active;
+        fill_rect(
+            CGRect::new(left, 6.0, tab_width - 6.0, header - 12.0),
+            if selected {
+                palette.raised
+            } else {
+                palette.panel
+            },
+            1.0,
+        );
+        draw_text(
+            title,
+            left + 8.0,
+            16.0,
+            13.0,
+            if selected {
+                palette.bright
+            } else {
+                palette.muted
+            },
+            false,
+        );
+    }
+    let summary = format!("{} symbols", shell.symbol_count());
+    draw_text(&summary, width - 120.0, 16.0, 12.0, palette.muted, false);
 
     let area = shell.text_area();
     let selection = document.selection();
@@ -1211,6 +1313,9 @@ unsafe fn install_menu_bar() {
         ("Cut", "tcCut:", "x"),
         ("Copy", "tcCopy:", "c"),
         ("Paste", "tcPaste:", "v"),
+        ("Next Tab", "tcNextTab:", "}"),
+        ("Previous Tab", "tcPreviousTab:", "{"),
+        ("Close Tab", "tcCloseTab:", "w"),
     ] {
         let item = menu_item(title, action, key, target);
         msg_void_id(edit_menu, "addItem:", item);
@@ -1528,6 +1633,51 @@ fn self_check() -> i32 {
         &mut failures,
     );
     report(
+        "the tab strip maps a point to a tab",
+        tab_index_at(TAB_MARGIN, 3, 150.0) == Some(0)
+            && tab_index_at(TAB_MARGIN + 149.0, 3, 150.0) == Some(0)
+            && tab_index_at(TAB_MARGIN + 150.0, 3, 150.0) == Some(1)
+            && tab_index_at(TAB_MARGIN + 450.0, 3, 150.0).is_none()
+            && tab_index_at(2.0, 3, 150.0).is_none(),
+        &mut failures,
+    );
+    report(
+        "the tab commands are mapped",
+        key_command(30, true, true) == Some(MacCommand::NextTab)
+            && key_command(33, true, true) == Some(MacCommand::PreviousTab)
+            && key_command(13, true, false) == Some(MacCommand::CloseTab)
+            && command_for_menu_action("tcNextTab:") == Some(MacCommand::NextTab)
+            && command_for_menu_action("tcPreviousTab:") == Some(MacCommand::PreviousTab)
+            && command_for_menu_action("tcCloseTab:") == Some(MacCommand::CloseTab),
+        &mut failures,
+    );
+    // Tabs: the second document becomes active, then the first one again.
+    shell.session.activate(0);
+    let opened = shell
+        .session
+        .add_document(editor_session::Document::from_lines(
+            "second.rs",
+            None,
+            vec!["second".into()],
+        ));
+    shell.session.activate(1);
+    let count = shell.session.documents().len();
+    shell.step_tab(1);
+    let wrapped = shell.session.active();
+    shell.step_tab(-1);
+    let back = shell.session.active();
+    report(
+        "walking the tabs wraps around",
+        count == opened + 1 && wrapped == 0 && back == 1,
+        &mut failures,
+    );
+    shell.close_tab();
+    report(
+        "closing a tab leaves the other one open",
+        shell.session.documents().len() == 1 && shell.session.active() == 0,
+        &mut failures,
+    );
+    report(
         "a column is placed with the measured cell width",
         (MacShell::column_x_with(4, 8.0) - (GUTTER_WIDTH + 32.0)).abs() < 1.0e-9,
         &mut failures,
@@ -1661,6 +1811,65 @@ mod tests {
         }
         assert_eq!(command_for_menu_action("tcMissing:"), None);
         assert_eq!(command_for_menu_action(""), None);
+    }
+
+    #[test]
+    fn the_tab_strip_maps_a_point_to_a_tab() {
+        assert_eq!(tab_index_at(TAB_MARGIN, 3, 150.0), Some(0));
+        assert_eq!(tab_index_at(TAB_MARGIN + 149.0, 3, 150.0), Some(0));
+        assert_eq!(tab_index_at(TAB_MARGIN + 150.0, 3, 150.0), Some(1));
+        assert_eq!(tab_index_at(TAB_MARGIN + 300.0, 3, 150.0), Some(2));
+        assert_eq!(tab_index_at(TAB_MARGIN + 450.0, 3, 150.0), None);
+        assert_eq!(tab_index_at(0.0, 3, 150.0), None);
+        assert_eq!(tab_index_at(TAB_MARGIN, 0, 150.0), None);
+        assert_eq!(tab_index_at(TAB_MARGIN, 3, 0.0), None);
+    }
+
+    #[test]
+    fn the_tab_commands_are_mapped() {
+        assert_eq!(key_command(30, true, true), Some(MacCommand::NextTab));
+        assert_eq!(key_command(33, true, true), Some(MacCommand::PreviousTab));
+        assert_eq!(key_command(13, true, false), Some(MacCommand::CloseTab));
+        assert_eq!(key_command(13, false, false), None);
+        assert_eq!(key_command(30, true, false), None);
+        assert_eq!(
+            command_for_menu_action("tcNextTab:"),
+            Some(MacCommand::NextTab)
+        );
+        assert_eq!(
+            command_for_menu_action("tcPreviousTab:"),
+            Some(MacCommand::PreviousTab)
+        );
+        assert_eq!(
+            command_for_menu_action("tcCloseTab:"),
+            Some(MacCommand::CloseTab)
+        );
+    }
+
+    #[test]
+    fn walking_and_closing_tabs_keeps_one_open() {
+        let mut shell = MacShell::new();
+        shell
+            .session
+            .add_document(editor_session::Document::from_lines(
+                "second.rs",
+                None,
+                Vec::new(),
+            ));
+        assert_eq!(shell.session.documents().len(), 2);
+        assert_eq!(shell.session.active(), 1);
+        shell.step_tab(1);
+        assert_eq!(shell.session.active(), 0, "the walk wraps around");
+        shell.step_tab(-1);
+        assert_eq!(shell.session.active(), 1);
+        shell.close_tab();
+        assert_eq!(shell.session.documents().len(), 1);
+        shell.close_tab();
+        assert_eq!(
+            shell.session.documents().len(),
+            1,
+            "the last tab stays open"
+        );
     }
 
     #[test]
