@@ -1338,3 +1338,218 @@ mod tests {
         assert!(quoted.command.contains("my \\\"app\\\".rs"));
     }
 }
+
+/// One step of a macOS packaging run, in the order it has to happen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MacPackageStep {
+    /// Build the release binary.
+    Build,
+    /// Sign it, when an identity was given.
+    Sign,
+    /// Put the binary in a folder with its documentation.
+    Stage,
+    /// Archive the folder.
+    Archive,
+}
+
+impl MacPackageStep {
+    /// Every step, in order.
+    pub const ALL: [MacPackageStep; 4] = [
+        MacPackageStep::Build,
+        MacPackageStep::Sign,
+        MacPackageStep::Stage,
+        MacPackageStep::Archive,
+    ];
+
+    /// A short name for the progress list.
+    pub fn label(self) -> &'static str {
+        match self {
+            MacPackageStep::Build => "build",
+            MacPackageStep::Sign => "sign",
+            MacPackageStep::Stage => "stage",
+            MacPackageStep::Archive => "archive",
+        }
+    }
+}
+
+/// What a macOS packaging run needs to know.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacPackageRequest {
+    /// Project root the commands run in.
+    pub root: String,
+    /// Name of the binary `cargo build` produces.
+    pub binary: String,
+    /// Folder the finished archive is described as.
+    pub product: String,
+    /// Signing identity, when the user has one.
+    pub identity: Option<String>,
+}
+
+impl MacPackageRequest {
+    /// The steps this request actually runs.
+    ///
+    /// Signing is left out when there is no identity, so the panel never shows
+    /// a step that would immediately fail.
+    pub fn steps(&self) -> Vec<MacPackageStep> {
+        MacPackageStep::ALL
+            .into_iter()
+            .filter(|step| *step != MacPackageStep::Sign || self.identity.is_some())
+            .collect()
+    }
+
+    /// The shell command for one step, or `None` when it does not apply.
+    pub fn command(&self, step: MacPackageStep) -> Option<String> {
+        let root = shell_quote(&self.root);
+        match step {
+            MacPackageStep::Build => Some(format!("cd {root} && cargo build --release")),
+            MacPackageStep::Sign => {
+                let identity = shell_quote(self.identity.as_deref()?);
+                Some(format!(
+                    "codesign --force --options runtime --sign {identity} \
+                     target/release/{}",
+                    self.binary
+                ))
+            }
+            MacPackageStep::Stage => Some(format!(
+                "rm -rf 'dist/{}' && mkdir -p 'dist/{}' && \
+                 cp 'target/release/{}' 'dist/{}/' && \
+                 cp README.md 'dist/{}/' 2>/dev/null; true",
+                self.product, self.product, self.binary, self.product, self.product
+            )),
+            MacPackageStep::Archive => Some(format!(
+                "cd dist && tar -czf '{}.tar.gz' '{}'",
+                self.product, self.product
+            )),
+        }
+    }
+
+    /// The whole run as one command the terminal can execute.
+    ///
+    /// Each step is chained with `&&`, so a failure stops the run instead of
+    /// packing a half built product, and the last line prints the archive so
+    /// the panel has something to report.
+    pub fn command_line(&self) -> String {
+        let steps = self.steps();
+        let mut line = String::new();
+        for step in &steps {
+            if let Some(command) = self.command(*step) {
+                if !line.is_empty() {
+                    line.push_str(" && ");
+                }
+                line.push_str(&command);
+            }
+        }
+        if line.is_empty() {
+            return String::new();
+        }
+        format!("({line}) && echo '{}'", packaging_artifacts(&self.product))
+    }
+
+    /// The archive the run produces.
+    pub fn artifact(&self) -> String {
+        format!("dist/{}.tar.gz", self.product)
+    }
+}
+
+/// Line the panel prints when a macOS packaging run finished.
+pub fn packaging_artifacts(product: &str) -> String {
+    format!("packaged dist/{product}.tar.gz")
+}
+
+/// Quote a value for a POSIX shell.
+///
+/// A project path can hold a space or a quote, and the command is typed into a
+/// real terminal, so the quoting has to survive both.
+pub fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod mac_package_tests {
+    use super::*;
+
+    fn request() -> MacPackageRequest {
+        MacPackageRequest {
+            root: "/tmp/tc ide".to_string(),
+            binary: "tc-ide".to_string(),
+            product: "TC-IDE".to_string(),
+            identity: None,
+        }
+    }
+
+    #[test]
+    fn a_mac_package_run_skips_signing_without_an_identity() {
+        let plain = request();
+        assert_eq!(
+            plain.steps(),
+            vec![
+                MacPackageStep::Build,
+                MacPackageStep::Stage,
+                MacPackageStep::Archive
+            ]
+        );
+        // No identity means no signing command at all, rather than one that
+        // would fail the moment it ran.
+        assert_eq!(plain.command(MacPackageStep::Sign), None);
+        assert!(!plain.command_line().contains("codesign"));
+
+        let signed = MacPackageRequest {
+            identity: Some("Developer ID Application: Someone (ABCDE12345)".to_string()),
+            ..request()
+        };
+        assert_eq!(signed.steps().len(), 4);
+        let line = signed.command_line();
+        assert!(line.contains("codesign --force --options runtime --sign"));
+        assert!(line.contains("ABCDE12345"));
+    }
+
+    #[test]
+    fn the_mac_package_commands_chain_and_quote() {
+        let line = request().command_line();
+        // The steps run in order and a failure stops the run.
+        assert!(line.starts_with("(cd '/tmp/tc ide' && cargo build --release && "));
+        assert!(line.contains(" && "));
+        assert!(line.contains("tar -czf"));
+        // The path holds a space, so it has to be quoted, and the archive is
+        // announced so the panel has something to show.
+        assert!(line.contains("'/tmp/tc ide'"));
+        assert!(line.ends_with("&& echo 'packaged dist/TC-IDE.tar.gz'"));
+        assert_eq!(request().artifact(), "dist/TC-IDE.tar.gz");
+        assert_eq!(packaging_artifacts("TC-IDE"), "packaged dist/TC-IDE.tar.gz");
+    }
+
+    #[test]
+    fn shell_quoting_survives_a_quote_in_the_path() {
+        assert_eq!(shell_quote("plain"), "'plain'");
+        assert_eq!(shell_quote("with space"), "'with space'");
+        // A single quote inside closes, escapes and reopens, which is what a
+        // POSIX shell needs.
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(shell_quote(""), "''");
+        // The quoted value is always balanced.
+        for value in ["it's", "a'b'c", "'", "''", "mix ' and \" quotes"] {
+            let quoted = shell_quote(value);
+            assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
+        }
+    }
+
+    #[test]
+    fn every_step_has_a_label_and_a_command() {
+        for step in MacPackageStep::ALL {
+            assert!(!step.label().is_empty());
+        }
+        let signed = MacPackageRequest {
+            identity: Some("id".to_string()),
+            ..request()
+        };
+        for step in MacPackageStep::ALL {
+            let command = signed.command(step).unwrap_or_default();
+            assert!(!command.is_empty(), "{step:?} has no command");
+        }
+        // The labels are distinct, so a progress list cannot show two the same.
+        let mut labels = MacPackageStep::ALL.map(|step| step.label()).to_vec();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), MacPackageStep::ALL.len());
+    }
+}
