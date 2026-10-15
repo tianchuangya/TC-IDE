@@ -76,6 +76,8 @@
 
 ### macOS 后端
 
+- 代码着色：代码列按共享 `editor_core::syntax_tokens` 逐 token 绘制，关键字/字面量/注释取共享调色板颜色
+  （浅色主题用修正过的深色 token 配色），横向滚动按列切片。
 - 设置面板：`⌘,` 打开，控件用共享 `theme_core::control()` 的正常/悬停/按下/禁用状态与焦点环，
   `Tab`/`⇧Tab` 只走可用控件、`Enter` 使用、`Esc` 关闭；深/浅主题、编辑器字号步进、界面语言都写入共享偏好
   （`~/Library/Application Support/TC-IDE/settings.conf`）并在启动时读取。

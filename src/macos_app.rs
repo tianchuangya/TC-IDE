@@ -297,6 +297,35 @@ fn nsstring(value: &str) -> Id {
     }
 }
 
+/// The visible part of a token that starts at `start`, once the view has been
+/// scrolled right by `scroll` columns.
+///
+/// Returns the column the visible part begins at, and the text itself. A token
+/// that is scrolled out entirely returns nothing, which is how the drawing loop
+/// skips it.
+fn visible_token(text: &str, start: usize, scroll: usize) -> Option<(usize, String)> {
+    let end = start + text.chars().count();
+    if end <= scroll {
+        return None;
+    }
+    let first = start.max(scroll);
+    Some((first, text.chars().skip(first - start).collect()))
+}
+
+/// Colour a syntax token uses in the current palette.
+///
+/// The tokens come from the shared tokenizer, and the colours from the shared
+/// palette, so the macOS editor highlights the same code the same way the other
+/// backends do.
+fn token_color(palette: &theme_core::Palette, kind: editor_core::TokenKind) -> u32 {
+    match kind {
+        editor_core::TokenKind::Keyword => palette.keyword,
+        editor_core::TokenKind::Literal => palette.literal,
+        editor_core::TokenKind::Comment => palette.comment,
+        editor_core::TokenKind::Plain => palette.text,
+    }
+}
+
 /// Width of one document tab in the header, in points.
 const TAB_WIDTH: f64 = 150.0;
 /// Left margin of the first tab.
@@ -2269,6 +2298,7 @@ unsafe fn draw_frame(shell: &mut MacShell) {
     let scroll_lines = shell.session.scroll_lines;
     let scroll_columns = shell.session.scroll_columns;
     let rows = shell.visible_rows();
+    let document_name = document.name.clone();
     for (row, line) in lines.iter().skip(scroll_lines).take(rows).enumerate() {
         let index = scroll_lines + row;
         let y = area.y + row as f64 * step;
@@ -2290,8 +2320,24 @@ unsafe fn draw_frame(shell: &mut MacShell) {
                 );
             }
         }
-        let visible: String = line.chars().skip(scroll_columns).collect();
-        draw_text(&visible, GUTTER_WIDTH, y, font, palette.text, true);
+        // The line is drawn token by token, so keywords, literals and comments
+        // come from the shared tokenizer and the shared palette.
+        let mut column = 0usize;
+        for token in editor_core::syntax_tokens(line, &document_name) {
+            let start = column;
+            column += token.text.chars().count();
+            let Some((first, visible)) = visible_token(&token.text, start, scroll_columns) else {
+                continue;
+            };
+            draw_text(
+                &visible,
+                MacShell::column_x_with(first, cell),
+                y,
+                font,
+                token_color(&palette, token.kind),
+                true,
+            );
+        }
         draw_text(
             &format!("{}", index + 1),
             12.0,
@@ -3229,6 +3275,44 @@ fn self_check() -> i32 {
         shell.session.documents().len() == 1 && shell.session.active() == 0,
         &mut failures,
     );
+    // The code column is drawn per syntax token, from the shared tokenizer and
+    // the shared palette.
+    let dark_palette = theme_core::Palette::dark();
+    let light_palette = theme_core::Palette::light();
+    report(
+        "syntax tokens use the palette",
+        token_color(&dark_palette, editor_core::TokenKind::Keyword) == dark_palette.keyword
+            && token_color(&dark_palette, editor_core::TokenKind::Literal) == dark_palette.literal
+            && token_color(&dark_palette, editor_core::TokenKind::Comment) == dark_palette.comment
+            && token_color(&dark_palette, editor_core::TokenKind::Plain) == dark_palette.text
+            && token_color(&light_palette, editor_core::TokenKind::Keyword)
+                == light_palette.keyword
+            && light_palette.keyword != dark_palette.keyword,
+        &mut failures,
+    );
+    let tokens = editor_core::syntax_tokens("let value = 3; // note", "main.rs");
+    report(
+        "the editor highlights a line as tokens",
+        tokens.len() >= 2
+            && tokens
+                .iter()
+                .any(|token| token.kind == editor_core::TokenKind::Comment)
+            && tokens
+                .iter()
+                .any(|token| token.kind == editor_core::TokenKind::Literal),
+        &mut failures,
+    );
+    report(
+        "a scrolled token is sliced at the right column",
+        visible_token("hello", 0, 0) == Some((0, "hello".into()))
+            && visible_token("hello", 0, 2) == Some((2, "llo".into()))
+            && visible_token("hello", 0, 5).is_none()
+            && visible_token("hello", 0, 9).is_none()
+            && visible_token("ab", 4, 4) == Some((4, "ab".into()))
+            && visible_token("ab", 4, 5) == Some((5, "b".into())),
+        &mut failures,
+    );
+
     // The settings panel drives the shared preferences and palette.
     shell.apply(MacCommand::ToggleSettings);
     report(
@@ -3907,6 +3991,61 @@ mod tests {
         assert!(!Setting::ThemeDark.is_active(&preferences));
         assert_eq!(Setting::Close.label(), "Close");
         assert_eq!(Setting::ALL.len(), 7);
+    }
+
+    #[test]
+    fn syntax_tokens_take_the_colours_of_their_kind() {
+        let dark = theme_core::Palette::dark();
+        let light = theme_core::Palette::light();
+        assert_eq!(
+            token_color(&dark, editor_core::TokenKind::Keyword),
+            dark.keyword
+        );
+        assert_eq!(
+            token_color(&dark, editor_core::TokenKind::Literal),
+            dark.literal
+        );
+        assert_eq!(
+            token_color(&dark, editor_core::TokenKind::Comment),
+            dark.comment
+        );
+        assert_eq!(token_color(&dark, editor_core::TokenKind::Plain), dark.text);
+        // The four kinds are told apart in both themes.
+        let kinds = [
+            editor_core::TokenKind::Plain,
+            editor_core::TokenKind::Keyword,
+            editor_core::TokenKind::Literal,
+            editor_core::TokenKind::Comment,
+        ];
+        for palette in [dark, light] {
+            let colours = kinds.map(|kind| token_color(&palette, kind));
+            assert!(
+                colours.iter().all(|colour| *colour != palette.background),
+                "a token colour must not be the background"
+            );
+            assert_ne!(colours[0], colours[1]);
+            assert_ne!(colours[1], colours[3]);
+        }
+    }
+
+    #[test]
+    fn a_token_is_sliced_where_the_view_starts() {
+        assert_eq!(visible_token("hello", 0, 0), Some((0, "hello".to_string())));
+        assert_eq!(visible_token("hello", 0, 2), Some((2, "llo".to_string())));
+        assert_eq!(visible_token("hello", 0, 5), None);
+        assert_eq!(visible_token("hello", 0, 9), None);
+        assert_eq!(visible_token("ab", 4, 4), Some((4, "ab".to_string())));
+        assert_eq!(visible_token("ab", 4, 5), Some((5, "b".to_string())));
+        assert_eq!(visible_token("", 3, 0), Some((3, String::new())));
+        // The column the visible part starts at never goes backwards.
+        for start in 0..6usize {
+            for scroll in 0..6usize {
+                if let Some((first, text)) = visible_token("abcdef", start, scroll) {
+                    assert!(first >= start);
+                    assert_eq!(first + text.chars().count(), start + 6);
+                }
+            }
+        }
     }
 
     #[test]
