@@ -2101,12 +2101,8 @@ impl MacShell {
     /// the caret ended on: pressing Enter records the edit on the line above
     /// the new caret, and lifting the wrong line would show nothing.
     fn edited_line_and_lift(&self) -> (usize, f64) {
-        let latest = self
-            .edit_pulses
-            .on_line(self.session.caret().0)
-            .map(|pulse| (pulse.line, pulse.eased() as f64 * EDIT_LIFT));
-        match latest {
-            Some(lift) => lift,
+        match self.edit_pulses.newest() {
+            Some(pulse) => (pulse.line, pulse.eased() as f64 * EDIT_LIFT),
             None => (usize::MAX, 0.0),
         }
     }
@@ -4044,17 +4040,14 @@ fn self_check() -> i32 {
     }
     report(
         "the highlight fades out",
-        shell.edit_pulses.on_line(shell.session.caret().0).is_none(),
+        shell.edit_pulses.newest().is_none(),
         &mut failures,
     );
     // A paste of more than one character is a paste, not a keystroke.
     shell.edit_pulses = motion_core::EditPulses::new();
     shell.session.paste("hello");
     shell.note_edit(motion_core::EditKind::Paste, 0, 0, 5);
-    let pasted = shell
-        .edit_pulses
-        .on_line(shell.session.caret().0)
-        .map(|pulse| pulse.kind);
+    let pasted = shell.edit_pulses.newest().map(|pulse| pulse.kind);
     report(
         "a paste is recorded as a paste",
         pasted == Some(motion_core::EditKind::Paste),

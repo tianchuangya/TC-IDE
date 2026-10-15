@@ -356,6 +356,15 @@ impl EditPulses {
         self.pulses.iter().rev().find(|pulse| pulse.line == line)
     }
 
+    /// The highlight of the most recent edit, whichever line it touched.
+    ///
+    /// A backend animates the edit that just happened, and that is not always
+    /// the line the caret ended on: pressing Enter records the edit on the
+    /// line above the new caret.
+    pub fn newest(&self) -> Option<&EditPulse> {
+        self.pulses.last()
+    }
+
     /// Every live highlight, oldest first.
     pub fn pulses(&self) -> &[EditPulse] {
         &self.pulses
@@ -769,5 +778,33 @@ mod tests {
         let pulse = pulses.on_line(0).expect("the edit line has one");
         assert_eq!(pulse.line, 0, "the pulse names the line it touched");
         assert!(pulse.eased() > 0.0);
+    }
+
+    #[test]
+    fn the_newest_highlight_is_the_edit_that_just_happened() {
+        // Pressing Enter records the edit on the line the caret was on, then
+        // the caret moves down. A backend that asked for the caret's line would
+        // find nothing, which is what the macOS check caught.
+        let mut pulses = EditPulses::new();
+        assert!(pulses.newest().is_none(), "nothing has happened yet");
+        pulses.push(EditKind::Insert, 0, 3, 4);
+        let newest = pulses.newest().expect("an edit was recorded");
+        assert_eq!(newest.line, 0, "the edit names the line it touched");
+        // The caret moved to the next line, which has no highlight.
+        assert!(pulses.on_line(1).is_none());
+        assert!(pulses.newest().is_some(), "the newest one is still there");
+
+        // A later edit becomes the newest one.
+        pulses.push(EditKind::Paste, 4, 0, 5);
+        assert_eq!(pulses.newest().map(|pulse| pulse.line), Some(4));
+        assert_eq!(
+            pulses.newest().map(|pulse| pulse.kind),
+            Some(EditKind::Paste)
+        );
+        // And it goes away with the rest once its time is up.
+        for _ in 0..(EditPulses::DURATION * 70.0) as usize {
+            pulses.step(1.0 / 60.0);
+        }
+        assert!(pulses.newest().is_none(), "the highlight faded out");
     }
 }
