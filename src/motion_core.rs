@@ -752,4 +752,22 @@ mod tests {
         pulses.push(EditKind::Paste, 0, 0, 5);
         assert_eq!(pulses.on_line(0).map(|p| p.kind), Some(EditKind::Paste));
     }
+
+    #[test]
+    fn a_newline_records_its_edit_on_the_line_it_started_from() {
+        use crate::motion_core::{EditKind, EditPulses};
+        // What pressing Enter at the end of a document does: the edit is
+        // recorded against the line the caret was on, then the caret moves to
+        // the new line. Lifting the caret's line would show nothing.
+        let mut pulses = EditPulses::new();
+        pulses.push(EditKind::Insert, 0, 3, 4); // recorded on line 0
+        let caret_line = 1; // the caret ends on the new line
+        assert!(
+            pulses.on_line(caret_line).is_none(),
+            "the caret line has no pulse"
+        );
+        let pulse = pulses.on_line(0).expect("the edit line has one");
+        assert_eq!(pulse.line, 0, "the pulse names the line it touched");
+        assert!(pulse.eased() > 0.0);
+    }
 }

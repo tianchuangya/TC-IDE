@@ -2095,13 +2095,20 @@ impl MacShell {
         self.edit_pulses.push(kind, line, start, end);
     }
 
-    /// The lift, in points, of the line the newest edit touched.
-    fn edit_lift(&self) -> f64 {
-        let (line, _) = self.session.caret();
-        self.edit_pulses
-            .on_line(line)
-            .map(|pulse| pulse.eased() as f64 * EDIT_LIFT)
-            .unwrap_or(0.0)
+    /// The line the newest edit touched, and how far it lifts.
+    ///
+    /// The line is the one the edit was recorded against rather than the one
+    /// the caret ended on: pressing Enter records the edit on the line above
+    /// the new caret, and lifting the wrong line would show nothing.
+    fn edited_line_and_lift(&self) -> (usize, f64) {
+        let latest = self
+            .edit_pulses
+            .on_line(self.session.caret().0)
+            .map(|pulse| (pulse.line, pulse.eased() as f64 * EDIT_LIFT));
+        match latest {
+            Some(lift) => lift,
+            None => (usize::MAX, 0.0),
+        }
     }
 
     /// Show or hide the settings panel.
@@ -2788,8 +2795,7 @@ unsafe fn draw_frame(shell: &mut MacShell) {
     let scroll_columns = shell.session.scroll_columns;
     let rows = shell.visible_rows();
     let document_name = document.name.clone();
-    let edited_line = shell.session.caret().0;
-    let edit_lift = shell.edit_lift();
+    let (edited_line, edit_lift) = shell.edited_line_and_lift();
     for (row, line) in lines.iter().skip(scroll_lines).take(rows).enumerate() {
         let index = scroll_lines + row;
         let y = area.y + row as f64 * step;
@@ -4026,15 +4032,19 @@ fn self_check() -> i32 {
         recorded,
         &mut failures,
     );
-    let lifting = shell.edit_lift();
-    report("the edited line lifts", lifting > 0.0, &mut failures);
+    let (edit_line, lifting) = shell.edited_line_and_lift();
+    report(
+        "the edited line lifts",
+        lifting > 0.0 && edit_line < shell.session.document().lines.len(),
+        &mut failures,
+    );
     // The highlight is short lived: after its duration the lift is gone.
     for _ in 0..(motion_core::EditPulses::DURATION * 70.0) as usize {
         shell.edit_pulses.step(1.0 / 60.0);
     }
     report(
         "the highlight fades out",
-        shell.edit_lift() == 0.0,
+        shell.edit_pulses.on_line(shell.session.caret().0).is_none(),
         &mut failures,
     );
     // A paste of more than one character is a paste, not a keystroke.
