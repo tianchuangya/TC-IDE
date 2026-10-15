@@ -23,6 +23,7 @@ use crate::index_core;
 use crate::lsp_core;
 use crate::motion_core;
 use crate::package_motion;
+use crate::search_core;
 use crate::session_core;
 use crate::syntax_core;
 use crate::terminal_core;
@@ -429,6 +430,8 @@ const UP_KEYSYM: c_ulong = 0xff52;
 const RIGHT_KEYSYM: c_ulong = 0xff53;
 const DOWN_KEYSYM: c_ulong = 0xff54;
 const F5_KEYSYM: c_ulong = 0xffc2;
+/// F3, which steps to the next match of a search.
+const F3_KEYSYM: c_ulong = 0xffc0;
 /// F2, which renames the symbol at the caret.
 const F2_KEYSYM: c_ulong = 0xffbf;
 /// F12, which asks the language server for the definition.
@@ -780,6 +783,17 @@ struct App {
     /// pointer was when it was grabbed.
     background_drag: Option<(background_core::Handle, i32, i32)>,
     graph_relation: graph_core::GraphRelation,
+    /// Find bar: the text, how it compares, and what is being searched for.
+    find_open: bool,
+    find_text: String,
+    replace_text: String,
+    find_case: search_core::CaseMode,
+    find_whole_word: bool,
+    /// Which match the search is on, out of the matches in the file.
+    find_index: usize,
+    /// Which field has the keyboard.
+    find_focused: bool,
+    find_replace_focused: bool,
     /// Fold points that are closed, by the line each region starts on.
     folded: Vec<usize>,
     /// Line the user asked to jump to, and whether the prompt has the keyboard.
@@ -3562,6 +3576,7 @@ impl App {
         self.draw_hover();
         self.draw_language_overlays();
         self.draw_goto_prompt();
+        self.draw_find_bar();
         self.draw_condition_prompt();
         if self.create_kind.is_some() && self.create_motion.value > 0.01 {
             self.draw_create_dialog();
@@ -5982,6 +5997,37 @@ impl App {
                 ));
                 true
             }
+            "find" => {
+                // A search with several matches and a replacement typed in, so
+                // the count, the highlight and the button can all be seen.
+                self.files = vec![FileBuffer::new(
+                    "main.rs".into(),
+                    PathBuf::from("/tmp/tc-ide-preview/main.rs"),
+                    vec![
+                        "fn build(engine: &Engine) -> Engine {".into(),
+                        "    let engine = engine.clone();".into(),
+                        "    engine.start();".into(),
+                        "    engine".into(),
+                        "}".into(),
+                        "".into(),
+                        "fn main() {".into(),
+                        "    let engine = build(&Engine::new());".into(),
+                        "    println!(\"{}\", engine.name);".into(),
+                        "}".into(),
+                    ],
+                )];
+                self.selected_file = 0;
+                self.caret_line = 1;
+                self.caret_column = 8;
+                self.find_open = true;
+                self.find_focused = true;
+                self.find_replace_focused = true;
+                self.find_text = "engine".into();
+                self.replace_text = "motor".into();
+                self.find_index = 0;
+                self.select_match_at_index();
+                true
+            }
             "folding" => {
                 // A file with a folded block, so the marker, the arrow and the
                 // missing lines can all be seen at once.
@@ -7224,6 +7270,200 @@ impl App {
             .find(|diagnostic| diagnostic.line as usize == self.caret_line)
     }
 
+    /// The query the search bar currently describes.
+    fn search_query(&self) -> search_core::Query {
+        search_core::Query {
+            needle: self.find_text.clone(),
+            case: self.find_case,
+            regex: false,
+            whole_word: self.find_whole_word,
+        }
+    }
+
+    /// Matches of the current query in the active file.
+    fn find_matches(&self) -> Vec<search_core::Match> {
+        search_core::find_in_lines(&self.files[self.selected_file].lines, &self.search_query())
+    }
+
+    /// Open the find bar, or close it when it is already open.
+    fn toggle_find(&mut self) {
+        if self.find_open {
+            self.find_open = false;
+            self.find_replace_focused = false;
+            self.find_focused = false;
+            return;
+        }
+        self.find_open = true;
+        self.find_focused = true;
+        self.find_replace_focused = false;
+        // The word under the caret is a good guess at what is wanted.
+        if self.find_text.is_empty() {
+            if let Some(word) = self.word_at_caret() {
+                self.find_text = word;
+                self.find_index = 0;
+                self.select_match_at_index();
+            }
+        }
+        self.status_message = self
+            .tr(
+                "Find: type to search, Enter for the next, Esc to close",
+                "查找：输入即搜索，回车下一个，Esc 关闭",
+            )
+            .into();
+    }
+
+    /// The word the caret is inside, if it is inside one.
+    fn word_at_caret(&self) -> Option<String> {
+        let line = &self.files[self.selected_file].lines[self.caret_line];
+        let mut start = self.caret_column.min(line.len());
+        let mut end = start;
+        while start > 0 {
+            let previous = line[..start].chars().next_back()?;
+            if !search_core::is_word_character(previous) {
+                break;
+            }
+            start -= previous.len_utf8();
+        }
+        while end < line.len() {
+            let next = line[end..].chars().next()?;
+            if !search_core::is_word_character(next) {
+                break;
+            }
+            end += next.len_utf8();
+        }
+        (end > start).then(|| line[start..end].to_string())
+    }
+
+    /// Move the caret to the match the search is on.
+    fn select_match_at_index(&mut self) -> bool {
+        let matches = self.find_matches();
+        if matches.is_empty() {
+            self.find_index = 0;
+            return false;
+        }
+        self.find_index = self.find_index.min(matches.len() - 1);
+        let found = matches[self.find_index];
+        // A match inside a folded block is opened, or the jump is invisible.
+        let regions = self.fold_regions();
+        let hidden = self.folded_lines();
+        if hidden.contains(&found.line) {
+            self.folded.retain(|start| {
+                !regions
+                    .iter()
+                    .any(|region| region.start_line == *start && region.hides(found.line))
+            });
+        }
+        self.caret_line = found.line;
+        self.caret_column = found.start;
+        self.selection_anchor = Some((found.line, found.start));
+        self.selection_head = Some((found.line, found.end));
+        true
+    }
+
+    /// Step to the next match, wrapping around.
+    fn find_next(&mut self) {
+        let matches = self.find_matches();
+        if matches.is_empty() {
+            self.status_message = self
+                .tr("No matches in this file", "本文件中没有匹配项")
+                .into();
+            return;
+        }
+        let from = (self.caret_line, self.caret_column);
+        if let Some(found) = search_core::next_match(&matches, from) {
+            if let Some(index) = matches.iter().position(|entry| *entry == found) {
+                self.find_index = index;
+            }
+        }
+        self.select_match_at_index();
+        let position = self.find_index + 1;
+        let total = matches.len();
+        self.status_message = format!("{} {position}/{total}", self.tr("Match", "匹配"));
+    }
+
+    /// Step to the previous match.
+    fn find_previous(&mut self) {
+        let matches = self.find_matches();
+        if matches.is_empty() {
+            self.status_message = self
+                .tr("No matches in this file", "本文件中没有匹配项")
+                .into();
+            return;
+        }
+        let from = (self.caret_line, self.caret_column);
+        if let Some(found) = search_core::previous_match(&matches, from) {
+            if let Some(index) = matches.iter().position(|entry| *entry == found) {
+                self.find_index = index;
+            }
+        }
+        self.select_match_at_index();
+        let position = self.find_index + 1;
+        let total = matches.len();
+        self.status_message = format!("{} {position}/{total}", self.tr("Match", "匹配"));
+    }
+
+    /// Replace the match the search is on.
+    fn replace_current(&mut self) {
+        let matches = self.find_matches();
+        if matches.is_empty() {
+            return;
+        }
+        let found = matches[self.find_index.min(matches.len() - 1)];
+        let line = self.files[self.selected_file].lines[found.line].clone();
+        let updated = search_core::replace_one(&line, found, &self.replace_text);
+        if updated == line {
+            return;
+        }
+        // The replacement goes through the buffer so it can be undone.
+        let end = found.end;
+        self.files[self.selected_file].buffer.replace(
+            (found.line, found.start),
+            (found.line, end),
+            &self.replace_text,
+        );
+        self.files[self.selected_file].sync();
+        self.note_edit(
+            motion_core::EditKind::Paste,
+            found.line,
+            found.start,
+            found.start + self.replace_text.len(),
+        );
+        // Stay on the same place, then move to the next match.
+        self.find_next();
+    }
+
+    /// Replace every match in the active file.
+    fn replace_every(&mut self) {
+        let matches = self.find_matches();
+        if matches.is_empty() {
+            self.status_message = self
+                .tr("No matches in this file", "本文件中没有匹配项")
+                .into();
+            return;
+        }
+        let total = matches.len();
+        let lines = self.files[self.selected_file].lines.clone();
+        let updated = search_core::replace_all(&lines, &self.search_query(), &self.replace_text);
+        // One edit in the history, so a wrong replace-all is one undo away.
+        self.files[self.selected_file].buffer.begin_group();
+        for (index, (before, after)) in lines.iter().zip(updated.iter()).enumerate() {
+            if before == after {
+                continue;
+            }
+            self.files[self.selected_file]
+                .buffer
+                .replace((index, 0), (index, before.len()), after);
+        }
+        self.files[self.selected_file].buffer.end_group();
+        self.files[self.selected_file].sync();
+        self.note_edit(motion_core::EditKind::Paste, self.caret_line, 0, 0);
+        self.status_message = format!(
+            "{} {total} {}",
+            self.tr("Replaced", "已替换"),
+            self.tr("occurrence(s)", "处")
+        );
+    }
+
     /// Regions of the active file that can be folded.
     fn fold_regions(&self) -> Vec<syntax_core::FoldRegion> {
         let file = &self.files[self.selected_file];
@@ -7348,6 +7588,128 @@ impl App {
                 .any(|region| region.start_line == *start && region.hides(line))
         });
         self.status_message = format!("{} {}", self.tr("Line", "第"), target.line);
+    }
+
+    /// The find and replace bar, over the top of the editor.
+    ///
+    /// # Safety
+    /// Requires a live Cairo context.
+    unsafe fn draw_find_bar(&self) {
+        if !self.find_open {
+            return;
+        }
+        let s = |v| self.s(v);
+        let x = (self.width as f32 * 0.17) as i32 + s(20);
+        let width = (self.width - x - s(40)).min(s(620));
+        let top = s(78);
+        let height = if self.find_replace_focused || !self.replace_text.is_empty() {
+            s(78)
+        } else {
+            s(44)
+        };
+        self.rect(self.colors.panel_2, x, top, width, height);
+        self.outline(self.colors.line, x, top, width, height);
+
+        // The find field, and how many matches it has.
+        let found = self.find_matches().len();
+        self.text(
+            self.colors.muted,
+            x + s(10),
+            top + s(20),
+            self.tr("Find", "查找"),
+        );
+        let field = x + s(70);
+        let field_width = width - s(70) - s(150);
+        self.rect(self.colors.panel, field, top + s(6), field_width, s(24));
+        self.outline(
+            if self.find_focused {
+                self.colors.accent
+            } else {
+                self.colors.line
+            },
+            field,
+            top + s(6),
+            field_width,
+            s(24),
+        );
+        let shown = if self.find_text.is_empty() {
+            self.tr("search this file", "在本文件中搜索")
+        } else {
+            self.find_text.as_str()
+        };
+        self.text(
+            if self.find_text.is_empty() {
+                self.colors.muted
+            } else {
+                self.colors.bright
+            },
+            field + s(8),
+            top + s(21),
+            shown,
+        );
+        // The count is what tells the reader whether the search found anything
+        // without moving the caret.
+        let count = if self.find_text.is_empty() {
+            String::new()
+        } else if found == 0 {
+            self.tr("no matches", "无匹配").to_string()
+        } else {
+            format!("{}/{}", self.find_index + 1, found)
+        };
+        self.text(
+            if found == 0 && !self.find_text.is_empty() {
+                self.colors.preprocessor
+            } else {
+                self.colors.muted
+            },
+            field + field_width + s(10),
+            top + s(21),
+            &count,
+        );
+
+        if height > s(44) {
+            // The replace field and the button that replaces everything.
+            self.text(
+                self.colors.muted,
+                x + s(10),
+                top + s(58),
+                self.tr("Replace", "替换"),
+            );
+            self.rect(self.colors.panel, field, top + s(44), field_width, s(24));
+            self.outline(
+                if self.find_replace_focused {
+                    self.colors.accent
+                } else {
+                    self.colors.line
+                },
+                field,
+                top + s(44),
+                field_width,
+                s(24),
+            );
+            self.text(
+                if self.replace_text.is_empty() {
+                    self.colors.muted
+                } else {
+                    self.colors.bright
+                },
+                field + s(8),
+                top + s(59),
+                if self.replace_text.is_empty() {
+                    self.tr("replacement", "替换为")
+                } else {
+                    self.replace_text.as_str()
+                },
+            );
+            let button = field + field_width + s(10);
+            self.rect(self.colors.bright, button, top + s(44), s(130), s(24));
+            self.text(
+                self.colors.bg,
+                button + s(12),
+                top + s(59),
+                self.tr("REPLACE ALL", "全部替换"),
+            );
+        }
     }
 
     /// The line prompt, over the editor.
@@ -8226,6 +8588,20 @@ impl App {
                 return;
             }
         }
+        if self.find_open {
+            // The replace button, in the same place it is drawn.
+            let s2 = |v| self.s(v);
+            let x0 = (self.width as f32 * 0.17) as i32 + s2(20);
+            let width = (self.width - x0 - s2(40)).min(s2(620));
+            let field = x0 + s2(70);
+            let field_width = width - s2(70) - s2(150);
+            let button = field + field_width + s2(10);
+            let top = s2(78) + s2(44);
+            if x >= button && x <= button + s2(130) && y >= top && y <= top + s2(24) {
+                self.replace_every();
+                return;
+            }
+        }
         let (_, graph_y, _, _) = self.graph_bounds();
         if button == 1 && x >= graph_left && y >= graph_y + s(8) && y <= graph_y + s(35) {
             // The buttons are AUTO plus the four ranges the shared model
@@ -8969,6 +9345,28 @@ impl App {
         {
             return true;
         }
+        // Ctrl+F finds, Ctrl+H finds and replaces, F3 steps through matches
+        // forwards and Shift+F3 backwards.
+        if control && keysym == ('F' as c_ulong | 0x20) {
+            self.toggle_find();
+            return true;
+        }
+        if control && keysym == ('H' as c_ulong | 0x20) {
+            if !self.find_open {
+                self.toggle_find();
+            }
+            self.find_replace_focused = true;
+            self.find_focused = false;
+            return true;
+        }
+        if keysym == F3_KEYSYM {
+            if event.state & SHIFT_MASK != 0 {
+                self.find_previous();
+            } else {
+                self.find_next();
+            }
+            return true;
+        }
         // Ctrl+G asks for a line, Ctrl+Shift+[ folds the block at the caret
         // and Ctrl+Shift+] opens every block, the keys the editor has room for.
         if control && keysym == ('G' as c_ulong | 0x20) {
@@ -9081,6 +9479,64 @@ impl App {
             }
             if count > 0 && !input.chars().any(char::is_control) {
                 self.terminals[self.terminal_active].input.push_str(input);
+            }
+            return true;
+        }
+        if self.find_focused || self.find_replace_focused {
+            let replace = self.find_replace_focused;
+            if keysym == ESCAPE_KEYSYM {
+                self.find_open = false;
+                self.find_focused = false;
+                self.find_replace_focused = false;
+                self.editor_focused = true;
+                return true;
+            }
+            if keysym == RETURN_KEYSYM {
+                if replace {
+                    self.replace_current();
+                } else {
+                    self.find_next();
+                }
+                return true;
+            }
+            if keysym == TAB_KEYSYM {
+                // Tab swaps between the two fields.
+                self.find_focused = !self.find_focused;
+                self.find_replace_focused = !self.find_replace_focused;
+                return true;
+            }
+            if keysym == F3_KEYSYM {
+                if event.state & SHIFT_MASK != 0 {
+                    self.find_previous();
+                } else {
+                    self.find_next();
+                }
+                return true;
+            }
+            if keysym == BACKSPACE_KEYSYM {
+                let field = if replace {
+                    &mut self.replace_text
+                } else {
+                    &mut self.find_text
+                };
+                field.pop();
+                self.find_index = 0;
+                if !replace {
+                    self.select_match_at_index();
+                }
+                return true;
+            }
+            if count > 0 && !input.chars().any(|character| character.is_control()) {
+                let field = if replace {
+                    &mut self.replace_text
+                } else {
+                    &mut self.find_text
+                };
+                field.push_str(input);
+                self.find_index = 0;
+                if !replace {
+                    self.select_match_at_index();
+                }
             }
             return true;
         }
@@ -10967,6 +11423,14 @@ pub fn run() {
             extension_upgrades: 0,
             background_drag: None,
             graph_relation: graph_core::GraphRelation::Follow,
+            find_open: false,
+            find_text: String::new(),
+            replace_text: String::new(),
+            find_case: search_core::CaseMode::Insensitive,
+            find_whole_word: false,
+            find_index: 0,
+            find_focused: false,
+            find_replace_focused: false,
             folded: Vec::new(),
             goto_prompt: None,
             goto_focused: false,

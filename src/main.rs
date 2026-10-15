@@ -13,6 +13,7 @@ mod lsp_core;
 mod macos_app;
 mod motion_core;
 mod package_motion;
+mod search_core;
 mod session_core;
 mod syntax_core;
 mod terminal_core;

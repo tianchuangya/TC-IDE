@@ -64,6 +64,7 @@ jobs:
           xvfb-run -a cargo run -- --render-frame /tmp/tc-diagnostics.png --render-scene diagnostics
           xvfb-run -a cargo run -- --render-frame /tmp/tc-brackets.png --render-scene brackets
           xvfb-run -a cargo run -- --render-frame /tmp/tc-folding.png --render-scene folding
+          xvfb-run -a cargo run -- --render-frame /tmp/tc-find.png --render-scene find
           xvfb-run -a cargo run -- --render-frame /tmp/tc-callees.png --render-scene graph-callees
           xvfb-run -a cargo run -- --render-frame /tmp/tc-crop.png --render-scene background-crop
           xvfb-run -a cargo run -- --render-frame /tmp/tc-hover.png --render-scene settings-hover
@@ -84,6 +85,7 @@ jobs:
               "/tmp/tc-diagnostics.png",
               "/tmp/tc-brackets.png",
               "/tmp/tc-folding.png",
+              "/tmp/tc-find.png",
               "/tmp/tc-callees.png",
               "/tmp/tc-crop.png",
               "/tmp/tc-hover.png",
