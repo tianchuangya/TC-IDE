@@ -691,6 +691,32 @@ mod tests {
     }
 
     #[test]
+    fn a_click_past_the_line_end_stops_at_the_line_end() {
+        // The sequence the macOS state check walks through, so a change to the
+        // mapping is caught here instead of on the macOS runner.
+        let mut session = scratch("one\ntwo");
+        session.viewport = Viewport::new(20, 80);
+        session.backspace();
+        session.move_caret(-1, 0);
+        session.move_to_line_end(true);
+        session.insert_text("X");
+        assert_eq!(session.document().lines, ["oneX", "tw"]);
+
+        let line = session.line_at(46.0 + 18.0 * 1.5, 46.0, 18.0);
+        assert_eq!(line, 1);
+        let column = session.column_at(54.0 + 7.4 * 1.5, 54.0, 7.4, line);
+        assert_eq!(column, 1);
+        session.set_caret(line, column);
+        assert_eq!(session.caret(), (1, 1));
+
+        // Forty columns into a two character line is still column two.
+        let far = session.column_at(54.0 + 7.4 * 40.0, 54.0, 7.4, line);
+        assert_eq!(far, 2);
+        session.set_caret(line, far);
+        assert_eq!(session.caret(), (1, 2));
+    }
+
+    #[test]
     fn documents_are_kept_as_tabs_with_their_dirty_mark() {
         let mut session = scratch("one");
         session.add_document(Document::from_lines("other.rs", None, vec!["two".into()]));
