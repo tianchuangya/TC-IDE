@@ -35,6 +35,18 @@ jobs:
         run: cargo check --all-targets
       - name: Test
         run: cargo test --all-targets
+      - name: Install the Windows cross toolchain and Wine
+        run: |
+          sudo apt-get install --yes gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 wine
+          rustup target add x86_64-pc-windows-gnu
+      - name: Run the Windows state layer under Wine
+        # The Windows backend is otherwise only exercised by the windows job,
+        # whose log is not readable from a developer machine. Building it here
+        # means a failure in the shared code shows up in the same run as the
+        # Linux tests, with its output in front of whoever pushed.
+        env:
+          MINGW_ROOT: /usr
+        run: bash tools/windows_selfcheck_wine.sh
       - name: Install headless X for the frame smoke test
         run: sudo apt-get install --yes xvfb
       - name: Render one native frame

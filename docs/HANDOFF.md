@@ -297,6 +297,12 @@ Windows 独有的编辑逻辑也可以在 Linux 上直接跑一遍：`python3 to
 退格、剪切、撤销/重做、Unicode 与补全序列。它是排查工具（真正的测试在 Windows 测试模块与 CI 中），
 本轮正是靠它定位到「剪切没有关闭编辑组导致无法撤销」的真实缺陷。
 
+**更强的办法：在 Linux 上编译并运行真正的 Windows 后端。** `bash tools/windows_selfcheck_wine.sh`
+会用 GNU 目标 + `rust-lld` + mingw 运行时（`apt-get download` 取包、`dpkg-deb -x` 解包，**都不需要 root**）
+把 Windows 后端连**真实的 `windows` crate 与 Direct2D** 一起编出来，再在 Wine 里跑 `--self-check`。
+本机实测：40 项断言全过，且故意改坏一处后会准确报出失败项——这就是此前"没有 Windows 实机"却必须靠 CI 猜的那一环。
+`docs/KNOWN-ISSUES.md` 末尾有完整的环境准备步骤。
+
 ```bash
 cargo fmt --check
 cargo test --all-targets
