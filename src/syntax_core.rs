@@ -116,8 +116,6 @@ pub struct FileScan {
     pub calls: Vec<Call>,
     /// Local variables whose value is a constructor call of a known class.
     pub bindings: Vec<LocalBinding>,
-    /// Return type each function declares, by name.
-    pub returns: Vec<(String, String)>,
 }
 
 /// A local variable that holds an instance of a class.
@@ -350,8 +348,6 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
     let mut declarations = Vec::new();
     let mut calls = Vec::new();
     let mut bindings = Vec::new();
-    let mut returns: Vec<(String, String)> = Vec::new();
-    let language = editor_core::language_for_file(file);
     let mut stack: Vec<usize> = vec![0];
     let mut pending_braces: Vec<usize> = Vec::new();
     let mut indent_stack: Vec<(usize, usize)> = Vec::new();
@@ -478,14 +474,6 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
             }
         }
 
-        // A declared return type is remembered, so a later step can follow
-        // `let engine = build()` to the class `build` hands back.
-        if let Some((function, returned)) = declared_return_type(&masked, language) {
-            if !returns.iter().any(|(known, _)| known == &function) {
-                returns.push((function, returned));
-            }
-        }
-
         // `let engine = Engine::new()` and `const engine = new Engine()`: the
         // only local type information a line scanner can be sure about.
         if let Some((name, class)) = local_binding(&masked) {
@@ -551,7 +539,6 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
         declarations,
         calls,
         bindings,
-        returns,
     }
 }
 
