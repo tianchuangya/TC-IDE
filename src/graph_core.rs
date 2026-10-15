@@ -2095,4 +2095,49 @@ mod tests {
         assert_eq!(first.detail, "src/engine.rs:4", "the member of Engine");
         assert_eq!(first.edge, Some(GraphEdge::Callee));
     }
+
+    #[test]
+    fn the_graph_follows_a_call_result_to_its_member() {
+        // `engine.run()` is resolved through `build`'s declared return type, so
+        // the focused function's callee list names the method of the class it
+        // hands back rather than every `run` in the project.
+        let lines = vec![
+            "struct Engine {}".to_string(),
+            "impl Engine {".to_string(),
+            "    fn run(&self) {}".to_string(),
+            "}".to_string(),
+            "fn build() -> Engine {".to_string(),
+            "    Engine {}".to_string(),
+            "}".to_string(),
+            "fn main() {".to_string(),
+            "    let engine = build();".to_string(),
+            "    engine.run();".to_string(),
+            "}".to_string(),
+        ];
+        let symbols = editor_core::symbol_occurrences(&lines, "src/engine.rs");
+        let hovered = occurrence("main", 7, SymbolRole::Declaration);
+        let project = vec![
+            project_entry("src/engine.rs", "main", 7, SymbolRole::Declaration),
+            project_entry("src/engine.rs", "build", 4, SymbolRole::Declaration),
+            project_entry("src/engine.rs", "run", 2, SymbolRole::Declaration),
+        ];
+        let graph = build_graph(
+            &GraphInputs {
+                relation: GraphRelation::Callees,
+                ..inputs_folded(&lines, &symbols, &project, Some(&hovered), &[])
+            },
+            GraphScope::Symbol,
+            "",
+        );
+        let callees = graph
+            .nodes
+            .iter()
+            .map(|node| (node.caption(), node.edge))
+            .collect::<Vec<_>>();
+        let called_run = callees
+            .iter()
+            .find(|(caption, _)| caption.starts_with("called") && caption.contains("run"))
+            .unwrap_or_else(|| panic!("a callee node for run: {callees:?}"));
+        assert_eq!(called_run.1, Some(GraphEdge::Callee));
+    }
 }

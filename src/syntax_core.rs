@@ -116,6 +116,8 @@ pub struct FileScan {
     pub calls: Vec<Call>,
     /// Local variables whose value is a constructor call of a known class.
     pub bindings: Vec<LocalBinding>,
+    /// Return type each function declares, by name.
+    pub returns: Vec<(String, String)>,
 }
 
 /// A local variable that holds an instance of a class.
@@ -348,6 +350,8 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
     let mut declarations = Vec::new();
     let mut calls = Vec::new();
     let mut bindings = Vec::new();
+    let mut returns: Vec<(String, String)> = Vec::new();
+    let language = editor_core::language_for_file(file);
     let mut stack: Vec<usize> = vec![0];
     let mut pending_braces: Vec<usize> = Vec::new();
     let mut indent_stack: Vec<(usize, usize)> = Vec::new();
@@ -474,9 +478,17 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
             }
         }
 
+        // A declared return type is remembered, so `let engine = build()` can
+        // follow `build` to the class it hands back.
+        if let Some((function, returned)) = declared_return_type(&masked, language) {
+            if !returns.iter().any(|(known, _)| known == &function) {
+                returns.push((function, returned));
+            }
+        }
+
         // `let engine = Engine::new()` and `const engine = new Engine()`: the
         // only local type information a line scanner can be sure about.
-        if let Some((name, class)) = local_binding(&masked) {
+        if let Some((name, class)) = local_binding(&masked, &returns) {
             bindings.push(LocalBinding {
                 name,
                 class,
@@ -539,6 +551,7 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
         declarations,
         calls,
         bindings,
+        returns,
     }
 }
 
@@ -548,7 +561,7 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
 /// and `const engine = Engine()`, in the languages that spell them that way. A
 /// variable assigned something the scan cannot name (`let engine = build()`) is
 /// left out instead of guessed.
-fn local_binding(masked: &str) -> Option<(String, String)> {
+fn local_binding(masked: &str, returns: &[(String, String)]) -> Option<(String, String)> {
     let trimmed = masked.trim_start();
     // A declaration keyword, or a typed declaration such as
     // `Engine engine = Engine::new()` where only the name before `=` matters.
@@ -590,7 +603,23 @@ fn local_binding(masked: &str) -> Option<(String, String)> {
     {
         return Some((name.to_string(), class));
     }
-    None
+    // `let engine = build()`: the value is a plain call whose name matches a
+    // function with a declared return type, so the binding holds that type.
+    // The check is deliberately narrow - the value has to be exactly
+    // `name(...)`, optionally with a trailing semicolon - so a member call, a
+    // chain or any other expression is left to the ordinary rules.
+    let call = after.strip_suffix(';').unwrap_or(after).trim_end();
+    if !call.starts_with('(') || !call.ends_with(')') {
+        return None;
+    }
+    let arguments = &call[1..call.len() - 1];
+    if arguments.contains('(') || arguments.contains(')') {
+        return None;
+    }
+    returns
+        .iter()
+        .find(|(known, _)| known == &class)
+        .map(|(_, returned)| (name.to_string(), returned.clone()))
 }
 
 /// The return type a function declaration names, when it names one.
@@ -673,12 +702,16 @@ fn return_type_name(value: &str) -> Option<String> {
         .trim_end_matches(['*', '&', ' ', '{', ';'])
         .trim();
     // `Vec<Engine>` names the argument, which is what a `.run()` would be on.
+    // The closing bracket has to come after the opening one: a line such as
+    // `if a < b > c` would otherwise slice a range that runs backwards.
     if let Some(open) = cleaned.find('<') {
         if let Some(close) = cleaned.rfind('>') {
-            let inner = &cleaned[open + 1..close];
-            if let Some(argument) = inner.split(',').next().map(str::trim) {
-                if !argument.is_empty() {
-                    return return_type_name(argument);
+            if close > open {
+                let inner = &cleaned[open + 1..close];
+                if let Some(argument) = inner.split(',').next().map(str::trim) {
+                    if !argument.is_empty() {
+                        return return_type_name(argument);
+                    }
                 }
             }
         }
@@ -1641,5 +1674,107 @@ mod tests {
                 let _ = declared_return_type(sample, language);
             }
         }
+    }
+
+    #[test]
+    fn a_comparison_is_not_mistaken_for_a_generic() {
+        // `a < b` has a `<` and a `>`, but the `>` comes first, so the range
+        // between them runs backwards. Reading it as a generic used to panic
+        // with "byte range starts at 35 but ends at 12".
+        for line in [
+            "if count < limit > other {",
+            "while a < b > c {",
+            "let x = a < b;",
+            "fn f() -> Vec<",
+            "fn f() -> <",
+            "fn f() -> >",
+            "fn f() -> > <",
+        ] {
+            let _ = declared_return_type(line, "Rust");
+            let _ = declared_return_type(line, "C++");
+        }
+        // The real generic still reads as its argument.
+        assert_eq!(
+            declared_return_type("fn all(&self) -> Vec<Engine> {", "Rust"),
+            Some(("all".into(), "Engine".into()))
+        );
+        // And a comparison is not a generic at all.
+        assert_eq!(
+            declared_return_type("if count < limit > other {", "C++"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_call_result_carries_its_declared_return_type() {
+        let lines = vec![
+            "struct Engine {}".to_string(),
+            "impl Engine {".to_string(),
+            "    fn run(&self) {}".to_string(),
+            "}".to_string(),
+            "fn build() -> Engine {".to_string(),
+            "    Engine {}".to_string(),
+            "}".to_string(),
+            "fn main() {".to_string(),
+            "    let engine = build();".to_string(),
+            "    engine.run();".to_string(),
+            "}".to_string(),
+        ];
+        let scan = scan(&lines, "main.rs");
+        assert!(scan
+            .returns
+            .iter()
+            .any(|(name, returned)| name == "build" && returned == "Engine"));
+
+        // The binding follows the return type, so the call resolves to the
+        // method of the class `build` hands back rather than to every `run`.
+        let binding = scan.binding_of("engine", 8, 6).expect("a binding");
+        assert_eq!(binding.class, "Engine");
+        let call = scan
+            .calls
+            .iter()
+            .find(|call| call.name == "run" && call.line == 9)
+            .expect("the run call");
+        let resolved = resolve_call(call, &scan, "main.rs", &[], 4);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].declaration.name, "run");
+        assert_eq!(resolved[0].declaration.owner.as_deref(), Some("Engine"));
+        assert_eq!(resolved[0].confidence, CallConfidence::Member);
+    }
+
+    #[test]
+    fn an_unknown_return_type_does_not_invent_a_class() {
+        let lines = vec![
+            "struct Engine {}".to_string(),
+            "impl Engine {".to_string(),
+            "    fn run(&self) {}".to_string(),
+            "}".to_string(),
+            "fn make() {".to_string(),
+            "}".to_string(),
+            "fn main() {".to_string(),
+            "    let thing = make();".to_string(),
+            "}".to_string(),
+        ];
+        let scan = scan(&lines, "main.rs");
+        assert!(!scan.returns.iter().any(|(name, _)| name == "make"));
+        assert!(scan.binding_of("thing", 7, 6).is_none());
+    }
+
+    #[test]
+    fn only_a_plain_call_takes_its_return_type() {
+        let returns = vec![("build".to_string(), "Engine".to_string())];
+        assert_eq!(
+            local_binding("let engine = build();", &returns),
+            Some(("engine".to_string(), "Engine".to_string()))
+        );
+        assert_eq!(
+            local_binding("let engine = build(1, 2);", &returns),
+            Some(("engine".to_string(), "Engine".to_string()))
+        );
+        // A member call names its own receiver, a chain is not a constructor,
+        // and an unknown name has no declared type to follow.
+        assert_eq!(local_binding("let e = factory.build();", &returns), None);
+        assert_eq!(local_binding("let e = build().finish();", &returns), None);
+        assert_eq!(local_binding("let e = unknown();", &returns), None);
     }
 }
