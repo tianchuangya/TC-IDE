@@ -1373,7 +1373,7 @@ mod tests {
             project_entry("src/engine.rs", "run", 5, SymbolRole::Declaration),
         ];
         let inputs = inputs_current_file(&lines, &symbols, &project, None);
-        let graph = build_graph(&inputs, GraphScope::File, "");
+        let graph = build_graph(&inputs, GraphScope::Symbol, "");
         let captions = graph
             .nodes
             .iter()
@@ -2094,5 +2094,60 @@ mod tests {
             .expect("a callee");
         assert_eq!(first.detail, "src/engine.rs:4", "the member of Engine");
         assert_eq!(first.edge, Some(GraphEdge::Callee));
+    }
+
+    #[test]
+    fn the_graph_follows_a_call_result_to_its_member() {
+        // The payoff of the return type table: `engine.run()` resolves through
+        // `build`'s declared return type, so the focused function's callee list
+        // names the method of the class it hands back rather than every `run`
+        // in the project. This mirrors how the panel is driven: a declaration
+        // under the caret, its callees listed beside it.
+        let lines = vec![
+            "struct Engine {}".to_string(),
+            "impl Engine {".to_string(),
+            "    fn run(&self) {}".to_string(),
+            "}".to_string(),
+            "fn build() -> Engine {".to_string(),
+            "    Engine {}".to_string(),
+            "}".to_string(),
+            "fn main() {".to_string(),
+            "    let engine = build();".to_string(),
+            "    engine.run();".to_string(),
+            "}".to_string(),
+        ];
+        let symbols = editor_core::symbol_occurrences(&lines, "src/engine.rs");
+        let hovered = occurrence("main", 7, SymbolRole::Declaration);
+        let project = vec![
+            project_entry("src/engine.rs", "main", 7, SymbolRole::Declaration),
+            project_entry("src/engine.rs", "build", 4, SymbolRole::Declaration),
+            project_entry("src/engine.rs", "run", 2, SymbolRole::Declaration),
+        ];
+        let graph = build_graph(
+            &GraphInputs {
+                relation: GraphRelation::Callees,
+                ..inputs_folded(&lines, &symbols, &project, Some(&hovered), &[])
+            },
+            GraphScope::Symbol,
+            "",
+        );
+        let callees = graph
+            .nodes
+            .iter()
+            .map(|node| (node.caption(), node.edge))
+            .collect::<Vec<_>>();
+        // `run` is only reachable because the binding follows `build`'s return
+        // type; without it the call would not resolve to this class's method.
+        let called_run = callees
+            .iter()
+            .find(|(caption, _)| caption.starts_with("called") && caption.contains("run"))
+            .unwrap_or_else(|| panic!("a callee node for run: {callees:?}"));
+        assert_eq!(called_run.1, Some(GraphEdge::Callee));
+        assert!(
+            callees
+                .iter()
+                .any(|(caption, _)| caption.starts_with("called") && caption.contains("build")),
+            "build is called directly: {callees:?}"
+        );
     }
 }
