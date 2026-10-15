@@ -116,6 +116,8 @@ pub struct FileScan {
     pub calls: Vec<Call>,
     /// Local variables whose value is a constructor call of a known class.
     pub bindings: Vec<LocalBinding>,
+    /// Return type each function declares, by name.
+    pub returns: Vec<(String, String)>,
 }
 
 /// A local variable that holds an instance of a class.
@@ -348,6 +350,8 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
     let mut declarations = Vec::new();
     let mut calls = Vec::new();
     let mut bindings = Vec::new();
+    let mut returns: Vec<(String, String)> = Vec::new();
+    let language = editor_core::language_for_file(file);
     let mut stack: Vec<usize> = vec![0];
     let mut pending_braces: Vec<usize> = Vec::new();
     let mut indent_stack: Vec<(usize, usize)> = Vec::new();
@@ -474,6 +478,14 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
             }
         }
 
+        // A declared return type is remembered, so a later step can follow
+        // `let engine = build()` to the class `build` hands back.
+        if let Some((function, returned)) = declared_return_type(&masked, language) {
+            if !returns.iter().any(|(known, _)| known == &function) {
+                returns.push((function, returned));
+            }
+        }
+
         // `let engine = Engine::new()` and `const engine = new Engine()`: the
         // only local type information a line scanner can be sure about.
         if let Some((name, class)) = local_binding(&masked) {
@@ -539,6 +551,7 @@ pub fn scan(lines: &[String], file: &str) -> FileScan {
         declarations,
         calls,
         bindings,
+        returns,
     }
 }
 
@@ -1641,5 +1654,36 @@ mod tests {
                 let _ = declared_return_type(sample, language);
             }
         }
+    }
+
+    #[test]
+    fn a_scan_remembers_what_each_function_returns() {
+        let lines = vec![
+            "fn build() -> Engine {".to_string(),
+            "    Engine {}".to_string(),
+            "}".to_string(),
+            "fn run(&self) {".to_string(),
+            "}".to_string(),
+            "static Widget* make() {".to_string(),
+            "    return 0;".to_string(),
+            "}".to_string(),
+        ];
+        let scan = scan(&lines, "main.rs");
+        assert!(scan
+            .returns
+            .iter()
+            .any(|(name, returned)| name == "build" && returned == "Engine"));
+        assert!(scan
+            .returns
+            .iter()
+            .any(|(name, returned)| name == "make" && returned == "Widget"));
+        // A function that promises nothing is not recorded.
+        assert!(!scan.returns.iter().any(|(name, _)| name == "run"));
+        // Recording must not invent bindings of its own.
+        assert!(
+            scan.bindings.is_empty(),
+            "nothing here declares a local: {:?}",
+            scan.bindings
+        );
     }
 }
