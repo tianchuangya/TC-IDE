@@ -24,7 +24,9 @@ use std::time::Instant;
 
 use crate::editor_core;
 use crate::editor_session;
+use crate::graph_core::{self, Graph, GraphNode, GraphRelation, GraphScope};
 use crate::motion_core;
+use crate::syntax_core;
 use crate::terminal_core::{
     self, TerminalKey, TerminalParser, TerminalView, TerminalViewport, Utf8Chunker,
 };
@@ -882,6 +884,139 @@ fn terminal_key(key_code: u16) -> Option<TerminalKey> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Relation graph panel
+// ---------------------------------------------------------------------------
+
+/// The view state of the relation graph panel.
+///
+/// The graph itself comes from the shared `graph_core`, built from the documents
+/// the session has open, so the macOS backend shows the same hierarchy, edges
+/// and folds as the others.
+struct GraphPanel {
+    open: bool,
+    focused: bool,
+    selection: usize,
+    scroll: usize,
+    folded: Vec<String>,
+    relation: GraphRelation,
+    scope: Option<GraphScope>,
+    /// Search query the graph is filtered by.
+    search: String,
+    /// Rebuilt when the documents change, not on every frame.
+    graph: Graph,
+    dirty: bool,
+}
+
+impl GraphPanel {
+    /// A closed panel with an empty graph.
+    fn new() -> Self {
+        Self {
+            open: false,
+            focused: false,
+            selection: 0,
+            scroll: 0,
+            folded: Vec::new(),
+            relation: GraphRelation::Follow,
+            scope: None,
+            search: String::new(),
+            graph: Graph {
+                scope: GraphScope::File,
+                search: String::new(),
+                nodes: Vec::new(),
+                truncated: false,
+            },
+            dirty: true,
+        }
+    }
+
+    /// Rows the panel can show in a panel of this height.
+    ///
+    /// The layout constants come from the shared graph core, so the macOS panel
+    /// lines up with the Windows and Linux ones instead of guessing its own.
+    fn rows_for(height: f64) -> usize {
+        graph_core::visible_rows(0.0, height as f32, 1.0)
+    }
+
+    /// The row a point of the panel is over, in the shared layout.
+    fn row_at(y: f64, rows: usize) -> Option<usize> {
+        let top = graph_core::FIRST_ROW_TOP as f64;
+        if y < top {
+            return None;
+        }
+        let row = ((y - top) / graph_core::ROW_HEIGHT as f64).floor();
+        if row < 0.0 {
+            return None;
+        }
+        let row = row as usize;
+        if row < rows {
+            Some(row)
+        } else {
+            None
+        }
+    }
+
+    /// Keep the selection inside the node list and the list in view.
+    fn clamp(&mut self, count: usize, rows: usize) {
+        let count = count.max(1);
+        self.selection = self.selection.min(count - 1);
+        if self.selection < self.scroll {
+            self.scroll = self.selection;
+        } else if self.selection >= self.scroll + rows {
+            self.scroll = self.selection + 1 - rows;
+        }
+    }
+
+    /// The node the keyboard is on.
+    fn selected(&self) -> Option<&GraphNode> {
+        self.graph.nodes.get(self.selection)
+    }
+
+    /// Move the selection by a number of rows.
+    fn move_selection(&mut self, delta: i64, rows: usize) {
+        let count = self.graph.nodes.len() as i64;
+        if count == 0 {
+            return;
+        }
+        self.selection = (self.selection as i64 + delta).clamp(0, count - 1) as usize;
+        self.clamp(count as usize, rows);
+    }
+
+    /// Fold or unfold the selected node.
+    fn toggle_fold(&mut self) {
+        let Some(node) = self.graph.nodes.get(self.selection) else {
+            return;
+        };
+        if !node.has_children() {
+            return;
+        }
+        let key = node.key.clone();
+        match self.folded.iter().position(|known| *known == key) {
+            Some(index) => {
+                self.folded.remove(index);
+            }
+            None => self.folded.push(key),
+        }
+        self.dirty = true;
+    }
+
+    /// Walk to the next relation.
+    fn cycle_relation(&mut self) {
+        self.relation = self.relation.next();
+        self.selection = 0;
+        self.scroll = 0;
+        self.dirty = true;
+    }
+
+    /// Walk to the next range, back to automatic at the end.
+    fn cycle_scope(&mut self) {
+        self.scope = graph_core::cycle_scope(self.scope, true);
+        self.selection = 0;
+        self.scroll = 0;
+        self.dirty = true;
+    }
+}
+
 /// Index of the tab a point of the header is over.
 ///
 /// The tabs are a fixed width strip starting at the left margin, which keeps the
@@ -926,6 +1061,13 @@ enum MacCommand {
     PreviousTab,
     CloseTab,
     ToggleTerminal,
+    ToggleGraph,
+    GraphPrevious,
+    GraphNext,
+    GraphFold,
+    GraphJump,
+    GraphRelation,
+    GraphScope,
 }
 
 /// Map a key code and modifiers to an editor command.
@@ -961,8 +1103,11 @@ fn key_command(key_code: u16, command: bool, shift: bool) -> Option<MacCommand> 
         30 if command && shift => Some(MacCommand::NextTab),
         33 if command && shift => Some(MacCommand::PreviousTab),
         13 if command => Some(MacCommand::CloseTab),
-        // ⌘J shows or hides the terminal drawer.
+        // ⌘J shows or hides the terminal drawer, ⌘G the relation graph.
         38 if command => Some(MacCommand::ToggleTerminal),
+        5 if command && shift => Some(MacCommand::GraphScope),
+        5 if command => Some(MacCommand::ToggleGraph),
+        // The panel owns these while it has the keyboard.
         _ => None,
     }
 }
@@ -987,6 +1132,9 @@ fn command_for_menu_action(action: &str) -> Option<MacCommand> {
         "tcPreviousTab:" => Some(MacCommand::PreviousTab),
         "tcCloseTab:" => Some(MacCommand::CloseTab),
         "tcToggleTerminal:" => Some(MacCommand::ToggleTerminal),
+        "tcToggleGraph:" => Some(MacCommand::ToggleGraph),
+        "tcGraphRelation:" => Some(MacCommand::GraphRelation),
+        "tcGraphScope:" => Some(MacCommand::GraphScope),
         _ => None,
     }
 }
@@ -1007,6 +1155,10 @@ struct MacShell {
     palette: theme_core::Palette,
     status: String,
     started: Instant,
+    /// The relation graph panel.
+    graph: GraphPanel,
+    /// Folder the user opened as the project, when there is one.
+    project: Option<PathBuf>,
     /// The terminal drawer, once a shell has been started.
     terminal: Option<TerminalState>,
     /// Whether keystrokes go to the shell instead of the document.
@@ -1037,6 +1189,8 @@ impl MacShell {
             preferences,
             status: "Ready".into(),
             started: Instant::now(),
+            graph: GraphPanel::new(),
+            project: None,
             terminal: None,
             terminal_focused: false,
             measured_cell: None,
@@ -1114,9 +1268,18 @@ impl MacShell {
     /// Apply a command through the shared session.
     fn apply(&mut self, command: MacCommand) {
         match command {
-            MacCommand::InsertNewline => self.session.insert_text("\n"),
-            MacCommand::Backspace => self.session.backspace(),
-            MacCommand::DeleteForward => self.session.delete_forward(),
+            MacCommand::InsertNewline => {
+                self.session.insert_text("\n");
+                self.graph.dirty = true;
+            }
+            MacCommand::Backspace => {
+                self.session.backspace();
+                self.graph.dirty = true;
+            }
+            MacCommand::DeleteForward => {
+                self.session.delete_forward();
+                self.graph.dirty = true;
+            }
             MacCommand::MoveLeft => self.session.move_caret(0, -1),
             MacCommand::MoveRight => self.session.move_caret(0, 1),
             MacCommand::MoveUp => self.session.move_caret(-1, 0),
@@ -1124,7 +1287,10 @@ impl MacShell {
             MacCommand::MoveLineStart => self.session.move_to_line_end(false),
             MacCommand::MoveLineEnd => self.session.move_to_line_end(true),
             MacCommand::SelectAll => self.session.select_all(),
-            MacCommand::Tab => self.session.insert_text("    "),
+            MacCommand::Tab => {
+                self.session.insert_text("    ");
+                self.graph.dirty = true;
+            }
             MacCommand::Save => {
                 self.status = match self.session.save() {
                     Ok(path) => format!("Saved {}", path.display()),
@@ -1147,7 +1313,10 @@ impl MacShell {
             }
             MacCommand::Copy => self.copy_selection(),
             MacCommand::Cut => self.cut_selection(),
-            MacCommand::Paste => self.paste_clipboard(),
+            MacCommand::Paste => {
+                self.paste_clipboard();
+                self.graph.dirty = true;
+            }
             MacCommand::OpenFile => self.open_file_panel(),
             MacCommand::OpenFolder => self.open_project_panel(),
             MacCommand::Reveal => self.reveal_in_finder(),
@@ -1156,6 +1325,13 @@ impl MacShell {
             MacCommand::PreviousTab => self.step_tab(-1),
             MacCommand::CloseTab => self.close_tab(),
             MacCommand::ToggleTerminal => self.toggle_terminal(),
+            MacCommand::ToggleGraph => self.toggle_graph(),
+            MacCommand::GraphPrevious => self.graph_move(-1),
+            MacCommand::GraphNext => self.graph_move(1),
+            MacCommand::GraphFold => self.graph_fold(),
+            MacCommand::GraphJump => self.graph_activate(),
+            MacCommand::GraphRelation => self.graph_cycle_relation(),
+            MacCommand::GraphScope => self.graph_cycle_scope(),
         }
     }
 
@@ -1195,6 +1371,189 @@ impl MacShell {
             return None;
         }
         tab_index_at(x, self.session.documents().len(), self.tab_width())
+    }
+
+    /// Rebuild the graph when the documents changed.
+    fn refresh_graph(&mut self) {
+        if !self.graph.dirty {
+            return;
+        }
+        self.graph.dirty = false;
+        let active = self.session.active();
+        #[allow(clippy::redundant_clone)]
+        let document = self.session.document().clone();
+        let searched = self.graph.search.trim().to_ascii_lowercase();
+        let entries = self
+            .session
+            .documents()
+            .iter()
+            .map(|document| {
+                (
+                    document.name.clone(),
+                    editor_core::symbol_occurrences(&document.lines, &document.name),
+                    syntax_core::declaration_refs(
+                        &syntax_core::scan(&document.lines, &document.name),
+                        &document.name,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let file_symbols = entries
+            .get(active)
+            .map(|entry| entry.1.as_slice())
+            .unwrap_or(&[]);
+        let project_symbols =
+            entries
+                .iter()
+                .flat_map(|entry| {
+                    let name = entry.0.clone();
+                    entry.1.iter().cloned().map(move |symbol| {
+                        editor_core::ProjectSymbolOccurrence {
+                            file: name.clone(),
+                            symbol,
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+        let project_declarations = entries
+            .iter()
+            .flat_map(|entry| entry.2.iter().cloned())
+            .collect::<Vec<_>>();
+        let project_name = self
+            .project
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "TC-IDE".to_string());
+        // The symbol under the caret is the focus, so the caller and callee
+        // relations describe where the user is working.
+        let hovered = editor_core::symbol_at(
+            &document.lines,
+            &document.name,
+            document.caret_line,
+            document.caret_column,
+        );
+        let inputs = graph_core::GraphInputs {
+            project_name: &project_name,
+            current_file: &document.name,
+            current_folder: graph_core::folder_of(&document.name),
+            hovered: hovered.as_ref(),
+            file_lines: &document.lines,
+            file_symbols,
+            project_symbols: &project_symbols,
+            project_declarations: &project_declarations,
+            folded: &self.graph.folded,
+            relation: self.graph.relation,
+        };
+        let scope = graph_core::auto_scope(hovered.as_ref(), &searched, self.graph.scope);
+        self.graph.graph = graph_core::build_graph(&inputs, scope, &self.graph.search);
+        let rows = self.graph_rows();
+        let count = self.graph.graph.nodes.len();
+        self.graph.clamp(count, rows);
+    }
+
+    /// Rows the graph panel can show.
+    fn graph_rows(&self) -> usize {
+        GraphPanel::rows_for(self.view_height() - self.status_height())
+    }
+
+    /// Left edge of the graph panel.
+    fn graph_panel_left(&self) -> f64 {
+        self.view_width() - self.graph_panel_width()
+    }
+
+    /// Width of the graph panel.
+    fn graph_panel_width(&self) -> f64 {
+        (self.view_width() * 0.27).max(260.0)
+    }
+
+    /// The row of the graph panel a point is over.
+    fn graph_row_at(&self, x: f64, y: f64) -> Option<usize> {
+        if !self.graph.open || x < self.graph_panel_left() {
+            return None;
+        }
+        GraphPanel::row_at(y, self.graph_rows())
+    }
+
+    /// Show or hide the graph panel.
+    fn toggle_graph(&mut self) {
+        self.graph.open = !self.graph.open;
+        self.graph.focused = self.graph.open;
+        self.graph.dirty = true;
+        self.status = if self.graph.open {
+            "Relation graph shown".into()
+        } else {
+            "Relation graph hidden".into()
+        };
+    }
+
+    /// Move the graph selection.
+    fn graph_move(&mut self, delta: i64) {
+        if !self.graph.focused {
+            return;
+        }
+        let rows = self.graph_rows();
+        self.graph.move_selection(delta, rows);
+        if let Some(node) = self.graph.selected() {
+            self.status = format!("{}  {}", node.caption(), node.detail);
+        }
+    }
+
+    /// Fold or unfold the node the keyboard is on.
+    fn graph_fold(&mut self) {
+        if !self.graph.focused {
+            return;
+        }
+        self.graph.toggle_fold();
+        self.refresh_graph();
+    }
+
+    /// Jump to the target of the selected node.
+    fn graph_activate(&mut self) {
+        if !self.graph.focused {
+            return;
+        }
+        let Some(target) = self.graph.selected().and_then(|node| node.target.clone()) else {
+            self.status = "This node has nowhere to jump to".into();
+            return;
+        };
+        let open = self.session.documents().iter().position(|document| {
+            document
+                .path
+                .as_ref()
+                .map(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        == Some(target.file.clone())
+                })
+                .unwrap_or(false)
+                || document.name == target.file
+        });
+        if let Some(index) = open {
+            self.session.activate(index);
+        }
+        self.session.set_caret(target.line, target.column);
+        self.status = format!("Jumped to {}:{}", target.file, target.line + 1);
+    }
+
+    /// Walk to the next relation, then leave the panel focused.
+    fn graph_cycle_relation(&mut self) {
+        if !self.graph.focused {
+            return;
+        }
+        self.graph.cycle_relation();
+        self.refresh_graph();
+        self.status = format!("Relation: {}", self.graph.relation.label());
+    }
+
+    /// Walk to the next range, then leave the panel focused.
+    fn graph_cycle_scope(&mut self) {
+        if !self.graph.focused {
+            return;
+        }
+        self.graph.cycle_scope();
+        self.refresh_graph();
+        self.status = format!("Range: {}", self.graph.graph.scope_label());
     }
 
     /// Step everything that moves in one frame and collect what the shell wrote.
@@ -1358,7 +1717,10 @@ impl MacShell {
             return;
         };
         self.status = match self.session.open_file(path.clone()) {
-            Ok(_) => format!("Opened {}", path.display()),
+            Ok(_) => {
+                self.graph.dirty = true;
+                format!("Opened {}", path.display())
+            }
             Err(message) => message,
         };
     }
@@ -1426,6 +1788,16 @@ impl MacShell {
             }
             return;
         }
+        if let Some(row) = self.graph_row_at(x, y) {
+            let rows = self.graph_rows();
+            self.graph.focused = true;
+            self.graph.selection = self.graph.scroll + row;
+            self.graph.clamp(self.graph.graph.nodes.len(), rows);
+            if let Some(node) = self.graph.selected() {
+                self.status = format!("{}  {}", node.caption(), node.detail);
+            }
+            return;
+        }
         let area = self.text_area();
         if !area.contains(CGPoint { x, y }) {
             return;
@@ -1437,6 +1809,8 @@ impl MacShell {
 
     /// Open a project, which the session then remembers.
     fn open_project(&mut self, root: PathBuf) {
+        self.project = Some(root.clone());
+        self.graph.dirty = true;
         self.status = format!("Project {}", root.display());
     }
 
@@ -1633,6 +2007,103 @@ unsafe fn draw_frame(shell: &mut MacShell) {
         }
     }
 
+    // The relation graph panel, on the right.
+    if shell.graph.open {
+        let panel_left = shell.graph_panel_left();
+        let panel_width = shell.graph_panel_width();
+        fill_rect(
+            CGRect::new(panel_left, 0.0, panel_width, height - status),
+            palette.panel,
+            1.0,
+        );
+        fill_rect(
+            CGRect::new(panel_left, 0.0, 1.0, height - status),
+            palette.border,
+            1.0,
+        );
+        let header = format!(
+            "{}  ·  {}",
+            shell.graph.graph.scope_label(),
+            shell.graph.relation.label()
+        );
+        draw_text(
+            &header,
+            panel_left + 12.0,
+            10.0,
+            12.0,
+            if shell.graph.focused {
+                palette.accent
+            } else {
+                palette.muted
+            },
+            false,
+        );
+        let rows = shell.graph_rows();
+        let scroll = shell.graph.graph.clamped_scroll(shell.graph.scroll, rows);
+        let visible = shell.graph.graph.visible(scroll, rows).to_vec();
+        for (row, node) in visible.iter().enumerate() {
+            let index = scroll + row;
+            let y = graph_core::FIRST_ROW_TOP as f64 + row as f64 * graph_core::ROW_HEIGHT as f64;
+            if index == shell.graph.selection && shell.graph.focused {
+                fill_rect(
+                    CGRect::new(
+                        panel_left + 6.0,
+                        y,
+                        panel_width - 12.0,
+                        graph_core::ROW_HEIGHT as f64 - 2.0,
+                    ),
+                    palette.selection,
+                    1.0,
+                );
+            }
+            let marker = if node.folded {
+                "▸"
+            } else if node.has_children() {
+                "▾"
+            } else {
+                " "
+            };
+            let indent = 12.0 + node.depth as f64 * 12.0;
+            draw_text(
+                marker,
+                panel_left + indent,
+                y + 4.0,
+                11.0,
+                palette.muted,
+                false,
+            );
+            draw_text(
+                &node.caption(),
+                panel_left + indent + 14.0,
+                y + 4.0,
+                12.0,
+                if node.edge.is_some() {
+                    palette.accent
+                } else {
+                    palette.text
+                },
+                false,
+            );
+            draw_text(
+                &node.detail,
+                panel_left + panel_width - 150.0,
+                y + 5.0,
+                10.0,
+                palette.muted,
+                false,
+            );
+        }
+        let footer = shell.graph.graph.footer(scroll, rows);
+        draw_text(
+            &footer,
+            panel_left + 12.0,
+            height - status - graph_core::FOOTER_HEIGHT as f64 + 4.0,
+            10.0,
+            palette.muted,
+            false,
+        );
+    }
+
     // The terminal drawer sits above the status bar.
     if let Some(terminal) = shell.terminal.as_mut() {
         let progress = terminal.motion.clamp(0.0, 1.0);
@@ -1731,6 +2202,38 @@ unsafe extern "C" fn editor_key_down(_view: Id, _selector: Sel, event: Id) {
         // command shortcuts that open and close panels.
         if shell.terminal_focused && !command && shell.terminal_send_key(key_code) {
             return;
+        }
+        // While the graph has the keyboard it takes the keys the editor would
+        // otherwise use, so a fold never turns into a line break.
+        if shell.graph.focused {
+            match key_code {
+                125 => {
+                    shell.apply(MacCommand::GraphNext);
+                    return;
+                }
+                126 => {
+                    shell.apply(MacCommand::GraphPrevious);
+                    return;
+                }
+                49 => {
+                    shell.apply(MacCommand::GraphFold);
+                    return;
+                }
+                48 => {
+                    shell.apply(MacCommand::GraphRelation);
+                    return;
+                }
+                36 | 76 => {
+                    shell.apply(MacCommand::GraphJump);
+                    return;
+                }
+                53 => {
+                    shell.graph.focused = false;
+                    shell.status = "The editor has the keyboard again".into();
+                    return;
+                }
+                _ => {}
+            }
         }
         // Page up walks back into the scrollback, page down comes forward.
         if !command
@@ -1883,6 +2386,8 @@ unsafe fn install_menu_bar() {
         ("Next Tab", "tcNextTab:", "}"),
         ("Previous Tab", "tcPreviousTab:", "{"),
         ("Close Tab", "tcCloseTab:", "w"),
+        ("Toggle Terminal", "tcToggleTerminal:", "j"),
+        ("Relation Graph", "tcToggleGraph:", "g"),
     ] {
         let item = menu_item(title, action, key, target);
         msg_void_id(edit_menu, "addItem:", item);
@@ -2244,6 +2749,142 @@ fn self_check() -> i32 {
         shell.session.documents().len() == 1 && shell.session.active() == 0,
         &mut failures,
     );
+    // The relation graph is built from the open documents through graph_core.
+    shell.session.replace_all(
+        "struct Engine {\n}\nimpl Engine {\n    fn build(&self) {\n        self.prepare();\n    }\n    fn prepare(&self) {}\n}\n",
+    );
+    shell.graph.dirty = true;
+    shell.refresh_graph();
+    report(
+        "the graph builds from the open document",
+        !shell.graph.graph.nodes.is_empty()
+            && shell.graph.graph.nodes[0].level == graph_core::GraphLevel::Project
+            && shell
+                .graph
+                .graph
+                .nodes
+                .iter()
+                .any(|node| node.level == graph_core::GraphLevel::Class),
+        &mut failures,
+    );
+    // Putting the caret on `build` and asking for its callees is what exercises
+    // the shared resolution: `self.prepare()` has to become a member of Engine.
+    shell.session.set_caret(3, 8);
+    shell.graph.relation = GraphRelation::Callees;
+    shell.graph.dirty = true;
+    shell.refresh_graph();
+    report(
+        "the graph resolves a member call to its class",
+        shell
+            .graph
+            .graph
+            .nodes
+            .iter()
+            .any(|node| node.caption().contains("prepare") && node.edge.is_some()),
+        &mut failures,
+    );
+    shell.graph.relation = GraphRelation::Follow;
+    shell.graph.dirty = true;
+    shell.refresh_graph();
+    let unfolded = shell.graph.graph.nodes.len();
+    shell.graph.folded.push(graph_core::file_key("main.rs"));
+    shell.graph.dirty = true;
+    shell.refresh_graph();
+    report(
+        "folding a file hides its symbols",
+        shell.graph.graph.nodes.len() < unfolded,
+        &mut failures,
+    );
+    shell.graph.folded.clear();
+    shell.graph.dirty = true;
+    shell.refresh_graph();
+
+    // The arrows move the selection and the panel keeps it in view.
+    shell.graph.focused = true;
+    shell.graph.selection = 0;
+    shell.graph_move(1);
+    let moved = shell.graph.selection;
+    shell.graph_move(500);
+    let clamped = shell.graph.selection;
+    report(
+        "the graph selection moves and clamps",
+        moved == 1 && clamped == shell.graph.graph.nodes.len().saturating_sub(1),
+        &mut failures,
+    );
+
+    // Enter jumps to the target of the selected node.
+    if let Some((index, line)) =
+        shell
+            .graph
+            .graph
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, node)| {
+                node.target
+                    .as_ref()
+                    .filter(|target| target.file == "main.rs")
+                    .map(|target| (index, target.line))
+            })
+    {
+        shell.graph.selection = index;
+        shell.graph_activate();
+        report(
+            "the graph jumps to the node target",
+            shell.session.document().caret_line == line,
+            &mut failures,
+        );
+    } else {
+        report("the graph jumps to the node target", false, &mut failures);
+    }
+
+    // Ranges and relations cycle back to where they started.
+    let mut scope_back = false;
+    for _ in 0..5 {
+        shell.graph_cycle_scope();
+        if shell.graph.scope.is_none() {
+            scope_back = true;
+        }
+    }
+    let mut relation_back = false;
+    for _ in 0..3 {
+        shell.graph_cycle_relation();
+        if shell.graph.relation == GraphRelation::Follow {
+            relation_back = true;
+        }
+    }
+    report(
+        "ranges and relations cycle",
+        scope_back && relation_back,
+        &mut failures,
+    );
+    report(
+        "the graph panel has a keyboard shortcut and a menu item",
+        key_command(5, true, false) == Some(MacCommand::ToggleGraph)
+            && key_command(5, true, true) == Some(MacCommand::GraphScope)
+            && command_for_menu_action("tcToggleGraph:") == Some(MacCommand::ToggleGraph)
+            && command_for_menu_action("tcGraphRelation:") == Some(MacCommand::GraphRelation)
+            && command_for_menu_action("tcGraphScope:") == Some(MacCommand::GraphScope),
+        &mut failures,
+    );
+    report(
+        "the panel rows follow the shared layout",
+        GraphPanel::row_at(graph_core::FIRST_ROW_TOP as f64 + 1.0, 3) == Some(0)
+            && GraphPanel::row_at(graph_core::FIRST_ROW_TOP as f64 - 1.0, 3).is_none()
+            && GraphPanel::row_at(
+                graph_core::FIRST_ROW_TOP as f64 + graph_core::ROW_HEIGHT as f64 + 1.0,
+                3,
+            ) == Some(1)
+            && GraphPanel::row_at(
+                graph_core::FIRST_ROW_TOP as f64 + graph_core::ROW_HEIGHT as f64 * 5.0,
+                3,
+            )
+            .is_none()
+            && GraphPanel::rows_for(1000.0) >= 1,
+        &mut failures,
+    );
+    shell.graph.focused = false;
+
     report(
         "the terminal keys are mapped to their sequences",
         terminal_key(126) == Some(TerminalKey::Up)
@@ -2539,6 +3180,93 @@ mod tests {
             "scrolling clamps"
         );
         terminal.pty.close();
+    }
+
+    #[test]
+    fn the_graph_panel_maps_rows_and_clamps_its_selection() {
+        // The layout constants are the shared ones, so this test pins the mapping
+        // to them instead of to a copy.
+        let top = graph_core::FIRST_ROW_TOP as f64;
+        let step = graph_core::ROW_HEIGHT as f64;
+        assert_eq!(GraphPanel::row_at(top, 3), Some(0));
+        assert_eq!(GraphPanel::row_at(top + step - 1.0, 3), Some(0));
+        assert_eq!(GraphPanel::row_at(top + step, 3), Some(1));
+        assert_eq!(GraphPanel::row_at(top + step * 2.0, 3), Some(2));
+        assert_eq!(GraphPanel::row_at(top + step * 3.0, 3), None);
+        assert_eq!(GraphPanel::row_at(top - 1.0, 3), None);
+        assert!(GraphPanel::rows_for(1000.0) >= 1);
+        assert!(
+            GraphPanel::rows_for(4.0) >= 1,
+            "a tiny panel still shows a row"
+        );
+
+        let mut panel = GraphPanel::new();
+        panel.graph = graph_core::build_graph(
+            &graph_core::GraphInputs {
+                project_name: "demo",
+                current_file: "main.rs",
+                current_folder: "",
+                hovered: None,
+                file_lines: &[],
+                file_symbols: &[],
+                project_symbols: &[],
+                project_declarations: &[],
+                folded: &[],
+                relation: graph_core::GraphRelation::Follow,
+            },
+            graph_core::GraphScope::File,
+            "",
+        );
+        let count = panel.graph.nodes.len();
+        panel.selection = 0;
+        panel.move_selection(2, 3);
+        assert_eq!(panel.selection, 2.min(count.saturating_sub(1)));
+        panel.move_selection(-5, 3);
+        assert_eq!(panel.selection, 0);
+        panel.selection = 99;
+        panel.clamp(count, 3);
+        assert_eq!(panel.selection, count.saturating_sub(1));
+        panel.selection = 0;
+        panel.clamp(count, 3);
+        assert_eq!(panel.scroll, 0);
+    }
+
+    #[test]
+    fn the_graph_commands_are_mapped() {
+        assert_eq!(key_command(5, true, false), Some(MacCommand::ToggleGraph));
+        assert_eq!(key_command(5, true, true), Some(MacCommand::GraphScope));
+        assert_eq!(key_command(5, false, false), None);
+        assert_eq!(
+            command_for_menu_action("tcToggleGraph:"),
+            Some(MacCommand::ToggleGraph)
+        );
+        assert_eq!(
+            command_for_menu_action("tcGraphRelation:"),
+            Some(MacCommand::GraphRelation)
+        );
+        assert_eq!(
+            command_for_menu_action("tcGraphScope:"),
+            Some(MacCommand::GraphScope)
+        );
+    }
+
+    #[test]
+    fn cycling_ranges_and_relations_returns_to_the_start() {
+        let mut panel = GraphPanel::new();
+        assert!(panel.scope.is_none());
+        for _ in 0..5 {
+            panel.cycle_scope();
+        }
+        assert!(panel.scope.is_none(), "the range cycle wraps to automatic");
+        assert_eq!(panel.relation, GraphRelation::Follow);
+        for _ in 0..3 {
+            panel.cycle_relation();
+        }
+        assert_eq!(panel.relation, GraphRelation::Follow);
+        for _ in 0..1 {
+            panel.cycle_relation();
+        }
+        assert_eq!(panel.relation, GraphRelation::Callers);
     }
 
     #[test]

@@ -76,6 +76,9 @@
 
 ### macOS 后端
 
+- 关系图面板：右侧面板由共享 `graph_core` 驱动（打开的文件即索引，光标所在符号即焦点），
+  范围/关系/折叠/选择都用共享模型，几何沿用 `graph_core` 的行高与可见行数常量；
+  `⌘G` 开关、`⌘⇧G` 切范围、上下键选择、空格折叠、Tab 切关系、回车跳转、点击选中、Esc 交回键盘。
 - 终端：`forkpty` 起真正的 shell，输出经共享 `TerminalParser`/`TerminalView` 画成底部抽屉（`⌘J` 开关、
   PageUp/PageDown 翻历史、共享弹簧动画），键盘在终端聚焦时整键转发（`terminal_core::key_sequence`），
   窗口尺寸变化用 `ioctl(TIOCSWINSZ)` 同步；`terminal_core` 新增 `TerminalKey`/`key_sequence` 与
