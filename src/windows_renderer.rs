@@ -2415,6 +2415,11 @@ impl DirectEditorRenderer {
         let syntax_type = unsafe { Self::brush(&target_base, palette.syntax_type, 1.0) }?;
         let function = unsafe { Self::brush(&target_base, palette.function, 1.0) }?;
         let constant = unsafe { Self::brush(&target_base, palette.constant, 1.0) }?;
+        let syntax_variable = unsafe { Self::brush(&target_base, palette.variable, 1.0) }?;
+        let syntax_parameter = unsafe { Self::brush(&target_base, palette.parameter, 1.0) }?;
+        let syntax_property = unsafe { Self::brush(&target_base, palette.property, 1.0) }?;
+        let syntax_macro = unsafe { Self::brush(&target_base, palette.macro_name, 1.0) }?;
+        let syntax_module = unsafe { Self::brush(&target_base, palette.module, 1.0) }?;
         let preprocessor = unsafe { Self::brush(&target_base, palette.preprocessor, 1.0) }?;
         let literal = unsafe { Self::brush(&target_base, palette.literal, 1.0) }?;
         let comment = unsafe { Self::brush(&target_base, palette.comment, 1.0) }?;
@@ -2886,6 +2891,11 @@ impl DirectEditorRenderer {
                     TokenKind::Type => &syntax_type,
                     TokenKind::Function => &function,
                     TokenKind::Constant => &constant,
+                    TokenKind::Variable => &syntax_variable,
+                    TokenKind::Parameter => &syntax_parameter,
+                    TokenKind::Property => &syntax_property,
+                    TokenKind::Macro => &syntax_macro,
+                    TokenKind::Module => &syntax_module,
                     TokenKind::Preprocessor => &preprocessor,
                     TokenKind::Literal => &literal,
                     TokenKind::Comment => &comment,

@@ -49,6 +49,16 @@ pub struct Palette {
     pub function: u32,
     /// Syntax colour of a named constant.
     pub constant: u32,
+    /// Syntax colour of a local binding.
+    pub variable: u32,
+    /// Syntax colour of a parameter.
+    pub parameter: u32,
+    /// Syntax colour of a member reached through `.` or `::`.
+    pub property: u32,
+    /// Syntax colour of a macro or an annotation.
+    pub macro_name: u32,
+    /// Syntax colour of a module or namespace name.
+    pub module: u32,
     /// Syntax colour of a preprocessor directive.
     pub preprocessor: u32,
     /// Syntax colour of a literal.
@@ -79,6 +89,11 @@ impl Palette {
             syntax_type: 0x30d158,
             function: 0xbf5af2,
             constant: 0xffd60a,
+            variable: 0xe8e8ed,
+            parameter: 0xc9c9d1,
+            property: 0x9fd7ff,
+            macro_name: 0xff8fa3,
+            module: 0xb9b9c6,
             preprocessor: 0xff375f,
             literal: 0xff9f0a,
             comment: 0x8e8e93,
@@ -107,6 +122,11 @@ impl Palette {
             syntax_type: 0x146b2e,
             function: 0x71317f,
             constant: 0x785700,
+            variable: 0x24292f,
+            parameter: 0x3d4451,
+            property: 0x1b5e8a,
+            macro_name: 0x8a2f45,
+            module: 0x4a4f57,
             preprocessor: 0x9e1b3d,
             literal: 0x8a4b08,
             comment: 0x5f6368,

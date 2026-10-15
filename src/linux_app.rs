@@ -523,6 +523,11 @@ struct Palette {
     syntax_type: c_ulong,
     function: c_ulong,
     constant: c_ulong,
+    variable: c_ulong,
+    parameter: c_ulong,
+    property: c_ulong,
+    macro_name: c_ulong,
+    module: c_ulong,
     preprocessor: c_ulong,
     literal: c_ulong,
     comment: c_ulong,
@@ -941,27 +946,7 @@ impl App {
     /// instead of repeating the numbers.
     fn color_rgb(&self, color: c_ulong) -> (f64, f64, f64) {
         let palette = theme_core::Palette::for_scheme(self.light_theme);
-        let hex = if color == self.colors.bg {
-            palette.background
-        } else if color == self.colors.panel {
-            palette.panel
-        } else if color == self.colors.panel_2 {
-            palette.raised
-        } else if color == self.colors.line {
-            palette.border
-        } else if color == self.colors.muted {
-            palette.muted
-        } else if color == self.colors.text {
-            palette.text
-        } else if color == self.colors.bright {
-            palette.bright
-        } else if color == self.colors.accent {
-            palette.accent
-        } else if color == self.colors.shadow {
-            palette.shadow
-        } else {
-            palette.selection
-        };
+        let hex = palette_colour_of(&self.colors, &palette, color);
         (
             ((hex >> 16) & 255) as f64 / 255.0,
             ((hex >> 8) & 255) as f64 / 255.0,
@@ -2268,6 +2253,11 @@ impl App {
                 editor_core::TokenKind::Type => self.colors.syntax_type,
                 editor_core::TokenKind::Function => self.colors.function,
                 editor_core::TokenKind::Constant => self.colors.constant,
+                editor_core::TokenKind::Variable => self.colors.variable,
+                editor_core::TokenKind::Parameter => self.colors.parameter,
+                editor_core::TokenKind::Property => self.colors.property,
+                editor_core::TokenKind::Macro => self.colors.macro_name,
+                editor_core::TokenKind::Module => self.colors.module,
                 editor_core::TokenKind::Preprocessor => self.colors.preprocessor,
                 editor_core::TokenKind::Literal => self.colors.literal,
                 editor_core::TokenKind::Comment => self.colors.comment,
@@ -7657,6 +7647,63 @@ fn symbol_role(line: &str, symbol: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// The shared palette colour an X11 pixel stands for.
+///
+/// Text is handed its colour as an X11 pixel value, and drawing has to turn that
+/// back into the palette entry it came from. Every colour the tokenizer can
+/// produce has to be listed: a missing one silently becomes the fallback, which
+/// is how keywords, types and constants once ended up drawn in the selection
+/// colour and were almost invisible in the dark theme.
+fn palette_colour_of(colors: &Palette, palette: &theme_core::Palette, color: c_ulong) -> u32 {
+    if color == colors.bg {
+        palette.background
+    } else if color == colors.panel {
+        palette.panel
+    } else if color == colors.panel_2 {
+        palette.raised
+    } else if color == colors.line {
+        palette.border
+    } else if color == colors.muted {
+        palette.muted
+    } else if color == colors.text {
+        palette.text
+    } else if color == colors.bright {
+        palette.bright
+    } else if color == colors.accent {
+        palette.accent
+    } else if color == colors.shadow {
+        palette.shadow
+    } else if color == colors.keyword {
+        palette.keyword
+    } else if color == colors.syntax_type {
+        palette.syntax_type
+    } else if color == colors.function {
+        palette.function
+    } else if color == colors.constant {
+        palette.constant
+    } else if color == colors.variable {
+        palette.variable
+    } else if color == colors.parameter {
+        palette.parameter
+    } else if color == colors.property {
+        palette.property
+    } else if color == colors.macro_name {
+        palette.macro_name
+    } else if color == colors.module {
+        palette.module
+    } else if color == colors.preprocessor {
+        palette.preprocessor
+    } else if color == colors.literal {
+        palette.literal
+    } else if color == colors.comment {
+        palette.comment
+    } else if color == colors.project {
+        palette.accent
+    } else {
+        palette.text
+    }
+}
+
 fn extension_for_language(language: &str) -> &'static str {
     match language {
         "C" => "c",
@@ -8116,6 +8163,11 @@ pub fn run() {
             syntax_type: color(display, map, &theme_core::Palette::hex(palette.syntax_type)),
             function: color(display, map, &theme_core::Palette::hex(palette.function)),
             constant: color(display, map, &theme_core::Palette::hex(palette.constant)),
+            variable: color(display, map, &theme_core::Palette::hex(palette.variable)),
+            parameter: color(display, map, &theme_core::Palette::hex(palette.parameter)),
+            property: color(display, map, &theme_core::Palette::hex(palette.property)),
+            macro_name: color(display, map, &theme_core::Palette::hex(palette.macro_name)),
+            module: color(display, map, &theme_core::Palette::hex(palette.module)),
             preprocessor: color(
                 display,
                 map,
@@ -8655,5 +8707,74 @@ mod tests {
             .iter()
             .any(|line| line.contains("T I A N C H U A N G Y A")));
         assert!(banner.iter().all(|line| line.len() <= 64));
+    }
+
+    #[test]
+    fn the_pixel_colour_maps_back_to_the_palette_it_came_from() {
+        // The renderer passes X11 pixel values around and has to turn them back
+        // into palette entries. A colour missing from the mapping used to fall
+        // through to the selection colour, which drew keywords, types and
+        // constants in a dark blue that was nearly invisible on the dark theme.
+        use theme_core::Palette as SharedPalette;
+        for palette in [SharedPalette::dark(), SharedPalette::light()] {
+            let colors = Palette {
+                bg: 1,
+                panel: 2,
+                panel_2: 3,
+                line: 4,
+                muted: 5,
+                text: 6,
+                bright: 7,
+                accent: 8,
+                keyword: 9,
+                syntax_type: 10,
+                function: 11,
+                constant: 12,
+                variable: 13,
+                parameter: 14,
+                property: 15,
+                macro_name: 16,
+                module: 17,
+                preprocessor: 18,
+                literal: 19,
+                comment: 20,
+                project: 21,
+                shadow: 22,
+            };
+            let cases = [
+                (colors.keyword, palette.keyword, "keyword"),
+                (colors.syntax_type, palette.syntax_type, "type"),
+                (colors.function, palette.function, "function"),
+                (colors.constant, palette.constant, "constant"),
+                (colors.variable, palette.variable, "variable"),
+                (colors.parameter, palette.parameter, "parameter"),
+                (colors.property, palette.property, "property"),
+                (colors.macro_name, palette.macro_name, "macro"),
+                (colors.module, palette.module, "module"),
+                (colors.preprocessor, palette.preprocessor, "preprocessor"),
+                (colors.literal, palette.literal, "literal"),
+                (colors.comment, palette.comment, "comment"),
+            ];
+            for (pixel, expected, name) in cases {
+                assert_eq!(
+                    palette_colour_of(&colors, &palette, pixel),
+                    expected,
+                    "{name} has to map back to its own palette colour"
+                );
+                assert_ne!(
+                    palette_colour_of(&colors, &palette, pixel),
+                    palette.selection,
+                    "{name} must never fall back to the selection colour"
+                );
+            }
+            // Every syntax colour is distinct, so the kinds can be told apart.
+            let mut seen = std::collections::HashSet::new();
+            for (_, expected, _) in cases {
+                seen.insert(expected);
+            }
+            assert_eq!(seen.len(), cases.len());
+            // An unknown pixel still produces something readable.
+            assert_eq!(palette_colour_of(&colors, &palette, 9999), palette.text);
+        }
     }
 }
