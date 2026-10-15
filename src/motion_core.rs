@@ -729,4 +729,27 @@ mod tests {
         pulses.clear();
         assert!(pulses.is_empty());
     }
+
+    #[test]
+    fn the_macos_self_check_expectations_hold_here() {
+        // The macOS self-check asserts exactly this about the edit highlight,
+        // and the runner is the only place it otherwise runs, so the same
+        // expectations are pinned here where they are cheap to check.
+        let mut pulses = EditPulses::new();
+        pulses.push(EditKind::Insert, 0, 0, 1);
+        assert!(pulses.on_line(0).is_some(), "an edit is recorded");
+        let lifted = pulses.on_line(0).map(|p| p.eased()).unwrap_or(0.0);
+        assert!(lifted > 0.0, "the line lifts");
+
+        // After the duration the highlight is gone.
+        for _ in 0..(EditPulses::DURATION * 70.0) as usize {
+            pulses.step(1.0 / 60.0);
+        }
+        assert_eq!(pulses.on_line(0).map(|p| p.eased()), None, "it fades out");
+
+        // A paste is recorded as a paste.
+        let mut pulses = EditPulses::new();
+        pulses.push(EditKind::Paste, 0, 0, 5);
+        assert_eq!(pulses.on_line(0).map(|p| p.kind), Some(EditKind::Paste));
+    }
 }

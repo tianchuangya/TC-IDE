@@ -342,6 +342,9 @@ const TAB_WIDTH: f64 = 150.0;
 /// Left margin of the first tab.
 const TAB_MARGIN: f64 = 12.0;
 
+/// How far a line lifts while its edit fades, in points.
+const EDIT_LIFT: f64 = 7.0;
+
 /// Width of the line number gutter, in points.
 const GUTTER_WIDTH: f64 = 54.0;
 /// Width of one character of the code font, in points.
@@ -1649,6 +1652,8 @@ struct MacShell {
     extensions: ExtensionsPanel,
     /// The packaging panel.
     package: PackagePanel,
+    /// Highlight of the newest edit, from the shared motion model.
+    edit_pulses: motion_core::EditPulses,
     /// The pointer, for hover and pressed states.
     mouse: (f64, f64),
     mouse_pressed: bool,
@@ -1688,6 +1693,7 @@ impl MacShell {
             settings: SettingsPanel::new(),
             extensions: ExtensionsPanel::new(),
             package: PackagePanel::new(),
+            edit_pulses: motion_core::EditPulses::new(),
             mouse: (0.0, 0.0),
             mouse_pressed: false,
             project: None,
@@ -1769,15 +1775,21 @@ impl MacShell {
     fn apply(&mut self, command: MacCommand) {
         match command {
             MacCommand::InsertNewline => {
+                let line = self.session.caret().0;
                 self.session.insert_text("\n");
+                self.note_edit(motion_core::EditKind::Insert, line, 0, 1);
                 self.graph.dirty = true;
             }
             MacCommand::Backspace => {
+                let (line, column) = self.session.caret();
                 self.session.backspace();
+                self.note_edit(motion_core::EditKind::Delete, line, column, column);
                 self.graph.dirty = true;
             }
             MacCommand::DeleteForward => {
+                let (line, column) = self.session.caret();
                 self.session.delete_forward();
+                self.note_edit(motion_core::EditKind::Delete, line, column, column);
                 self.graph.dirty = true;
             }
             MacCommand::MoveLeft => self.session.move_caret(0, -1),
@@ -1788,7 +1800,9 @@ impl MacShell {
             MacCommand::MoveLineEnd => self.session.move_to_line_end(true),
             MacCommand::SelectAll => self.session.select_all(),
             MacCommand::Tab => {
+                let (line, column) = self.session.caret();
                 self.session.insert_text("    ");
+                self.note_edit(motion_core::EditKind::Insert, line, column, column + 4);
                 self.graph.dirty = true;
             }
             MacCommand::Save => {
@@ -2073,6 +2087,23 @@ impl MacShell {
         self.status = format!("Range: {}", self.graph.graph.scope_label());
     }
 
+    /// Note an edit so the line it touched can lift while it fades.
+    ///
+    /// Windows and Linux both animate this; macOS animated only its terminal
+    /// drawer, so a keystroke there did nothing visible.
+    fn note_edit(&mut self, kind: motion_core::EditKind, line: usize, start: usize, end: usize) {
+        self.edit_pulses.push(kind, line, start, end);
+    }
+
+    /// The lift, in points, of the line the newest edit touched.
+    fn edit_lift(&self) -> f64 {
+        let (line, _) = self.session.caret();
+        self.edit_pulses
+            .on_line(line)
+            .map(|pulse| pulse.eased() as f64 * EDIT_LIFT)
+            .unwrap_or(0.0)
+    }
+
     /// Show or hide the settings panel.
     fn toggle_settings(&mut self) {
         self.settings.open = !self.settings.open;
@@ -2318,6 +2349,7 @@ impl MacShell {
     /// Step everything that moves in one frame and collect what the shell wrote.
     fn tick(&mut self) {
         self.session.tick();
+        self.edit_pulses.step(1.0 / 60.0);
         // The geometry is read before the terminal is borrowed, so the shell can
         // be asked for its metrics while the drawer is stepped.
         let cell = self.measured_cell.unwrap_or(TEXT_CELL).max(1.0);
@@ -2464,7 +2496,18 @@ impl MacShell {
             return;
         };
         let characters = text.chars().count();
+        let (line, column) = self.session.caret();
         self.session.paste(&text);
+        self.note_edit(
+            if characters > 1 {
+                motion_core::EditKind::Paste
+            } else {
+                motion_core::EditKind::Insert
+            },
+            line,
+            column,
+            column + characters,
+        );
         self.status = format!("Pasted {characters} character(s)");
     }
 
@@ -2745,6 +2788,8 @@ unsafe fn draw_frame(shell: &mut MacShell) {
     let scroll_columns = shell.session.scroll_columns;
     let rows = shell.visible_rows();
     let document_name = document.name.clone();
+    let edited_line = shell.session.caret().0;
+    let edit_lift = shell.edit_lift();
     for (row, line) in lines.iter().skip(scroll_lines).take(rows).enumerate() {
         let index = scroll_lines + row;
         let y = area.y + row as f64 * step;
@@ -2778,6 +2823,10 @@ unsafe fn draw_frame(shell: &mut MacShell) {
         else {
             continue;
         };
+        // The line the newest edit touched lifts while its highlight fades, the
+        // way it does on the other two backends, so a keystroke, a paste and a
+        // deletion all read as an edit rather than as nothing.
+        let lift = if index == edited_line { edit_lift } else { 0.0 };
         let mut column = first_visible;
         for token in editor_core::syntax_tokens(&clipped, &document_name) {
             let start = column;
@@ -2785,7 +2834,7 @@ unsafe fn draw_frame(shell: &mut MacShell) {
             draw_text(
                 &token.text,
                 MacShell::column_x_with(start - scroll_columns, cell),
-                y,
+                y - lift,
                 font,
                 token_color(&palette, token.kind),
                 true,
@@ -3425,7 +3474,18 @@ unsafe extern "C" fn editor_insert_text(_view: Id, _selector: Sel, text: Id) {
     with_shell(|shell| {
         // Typing goes to the shell while the terminal has focus.
         if !shell.terminal_insert(&value) {
+            let (line, column) = shell.session.caret();
             shell.session.insert_text(&value);
+            shell.note_edit(
+                if value.chars().count() > 1 {
+                    motion_core::EditKind::Paste
+                } else {
+                    motion_core::EditKind::Insert
+                },
+                line,
+                column,
+                column + value.chars().count(),
+            );
         }
     });
 }
@@ -3951,6 +4011,47 @@ fn self_check() -> i32 {
         shell.session.documents().len() == 1 && shell.session.active() == 0,
         &mut failures,
     );
+    // Editing animates: an edit is recorded, the line lifts, and the highlight
+    // fades out rather than staying forever.
+    shell.session.replace_all("one\ntwo");
+    shell.edit_pulses = motion_core::EditPulses::new();
+    shell.apply(MacCommand::InsertNewline);
+    let recorded = shell
+        .edit_pulses
+        .on_line(shell.session.caret().0 - 1)
+        .is_some()
+        || shell.edit_pulses.on_line(shell.session.caret().0).is_some();
+    report(
+        "an edit is recorded for the animation",
+        recorded,
+        &mut failures,
+    );
+    let lifting = shell.edit_lift();
+    report("the edited line lifts", lifting > 0.0, &mut failures);
+    // The highlight is short lived: after its duration the lift is gone.
+    for _ in 0..(motion_core::EditPulses::DURATION * 70.0) as usize {
+        shell.edit_pulses.step(1.0 / 60.0);
+    }
+    report(
+        "the highlight fades out",
+        shell.edit_lift() == 0.0,
+        &mut failures,
+    );
+    // A paste of more than one character is a paste, not a keystroke.
+    shell.edit_pulses = motion_core::EditPulses::new();
+    shell.session.paste("hello");
+    shell.note_edit(motion_core::EditKind::Paste, 0, 0, 5);
+    let pasted = shell
+        .edit_pulses
+        .on_line(shell.session.caret().0)
+        .map(|pulse| pulse.kind);
+    report(
+        "a paste is recorded as a paste",
+        pasted == Some(motion_core::EditKind::Paste),
+        &mut failures,
+    );
+    shell.edit_pulses = motion_core::EditPulses::new();
+
     // A long line is cut at the code area edge rather than drawn over the panel
     // beside it, and the tokens are taken from the slice so colours line up.
     let long_line = "let value = compute_something(alpha, beta, gamma); // a long note";
