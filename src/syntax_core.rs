@@ -593,6 +593,109 @@ fn local_binding(masked: &str) -> Option<(String, String)> {
     None
 }
 
+/// The return type a function declaration names, when it names one.
+///
+/// This is what lets `let engine = build(); engine.run()` resolve: the scanner
+/// knows `build` returns an `Engine`, so the binding holds one. Only declared
+/// types are read - a function whose signature says nothing (or says `auto`,
+/// `void`, `var`) is deliberately left alone rather than guessed at.
+fn declared_return_type(line: &str, language: &str) -> Option<(String, String)> {
+    let trimmed = line.trim_start();
+    // Rust and TypeScript: `fn build(&self) -> Engine {`.
+    for keyword in ["fn ", "pub fn ", "async fn ", "function ", "func "] {
+        let Some(rest) = trimmed.strip_prefix(keyword) else {
+            continue;
+        };
+        let rest = rest.trim_start_matches("async ").trim_start();
+        let name = identifier_at(rest)?;
+        let after_name = rest[name.len()..].trim_start();
+        let after_params = after_name.strip_prefix('(')?;
+        let close = after_params.find(')')?;
+        let tail = after_params[close + 1..].trim_start();
+        let returned = tail.strip_prefix("->").or_else(|| tail.strip_prefix(':'))?;
+        return Some((name, return_type_name(returned)?));
+    }
+    // C, C++, Java, C#: `Engine build(int count) {` - the type comes first.
+    let (before, _) = trimmed.split_once('(')?;
+    let head = before.trim_end();
+    let call_name = head.rsplit(|character: char| !character.is_alphanumeric() && character != '_');
+    let function = call_name.clone().next()?.to_string();
+    if function.is_empty() || matches!(function.as_str(), "if" | "for" | "while" | "switch") {
+        return None;
+    }
+    let type_part = head[..head.len() - function.len()].trim();
+    if type_part.is_empty() {
+        return None;
+    }
+    // `static Engine*` keeps its storage modifier in front of the type, and
+    // `virtual`/`const`/`inline` do the same, so they are dropped before the
+    // type is read.
+    let type_part = type_part
+        .split_whitespace()
+        .filter(|word| {
+            !matches!(
+                word.trim_end_matches(['*', '&']),
+                "static"
+                    | "virtual"
+                    | "inline"
+                    | "const"
+                    | "constexpr"
+                    | "extern"
+                    | "public"
+                    | "private"
+                    | "protected"
+                    | "final"
+                    | "abstract"
+                    | "async"
+                    | "unsafe"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if type_part.is_empty() {
+        return None;
+    }
+    let returned = return_type_name(&type_part)?;
+    if matches!(returned.as_str(), "return" | "new" | "delete") {
+        return None;
+    }
+    let _ = language;
+    Some((function, returned))
+}
+
+/// The class name inside a written return type, dropping pointers, references
+/// and generics: `Engine*`, `&Engine` and `Vec<Engine>` all name something the
+/// scanner can look up, and `Vec` alone would be the wrong answer.
+fn return_type_name(value: &str) -> Option<String> {
+    let cleaned = value
+        .trim()
+        .trim_start_matches(['&', '*', ' '])
+        .trim_end_matches(['*', '&', ' ', '{', ';'])
+        .trim();
+    // `Vec<Engine>` names the argument, which is what a `.run()` would be on.
+    if let Some(open) = cleaned.find('<') {
+        if let Some(close) = cleaned.rfind('>') {
+            let inner = &cleaned[open + 1..close];
+            if let Some(argument) = inner.split(',').next().map(str::trim) {
+                if !argument.is_empty() {
+                    return return_type_name(argument);
+                }
+            }
+        }
+    }
+    let name = identifier_at(cleaned)?;
+    if matches!(
+        name.as_str(),
+        "void" | "auto" | "var" | "self" | "Self" | "None" | "never"
+    ) {
+        return None;
+    }
+    if !name.chars().next().is_some_and(char::is_uppercase) {
+        return None;
+    }
+    Some(name)
+}
+
 /// Identifier at the start of a piece of code.
 fn identifier_at(value: &str) -> Option<String> {
     let value = value.trim_start();
@@ -1440,5 +1543,103 @@ mod tests {
             "no local holds a constructed instance here: {:?}",
             scan.bindings
         );
+    }
+
+    #[test]
+    fn a_declared_return_type_is_read_from_the_signature() {
+        // Rust and TypeScript spell the return type after an arrow or a colon.
+        assert_eq!(
+            declared_return_type("fn build(&self) -> Engine {", "Rust"),
+            Some(("build".into(), "Engine".into()))
+        );
+        assert_eq!(
+            declared_return_type("    pub fn make(count: usize) -> Engine {", "Rust"),
+            Some(("make".into(), "Engine".into()))
+        );
+        assert_eq!(
+            declared_return_type("function make(): Engine {", "TypeScript"),
+            Some(("make".into(), "Engine".into()))
+        );
+        // C style: the type comes first, modifiers and all.
+        assert_eq!(
+            declared_return_type("Engine build(int count) {", "C++"),
+            Some(("build".into(), "Engine".into()))
+        );
+        assert_eq!(
+            declared_return_type("static Engine* make() {", "C"),
+            Some(("make".into(), "Engine".into()))
+        );
+
+        // A reference, a pointer and a generic all name the class a call would
+        // be made on rather than the wrapper around it.
+        assert_eq!(
+            declared_return_type("fn build(&self) -> &Engine {", "Rust"),
+            Some(("build".into(), "Engine".into()))
+        );
+        assert_eq!(
+            declared_return_type("fn all(&self) -> Vec<Engine> {", "Rust"),
+            Some(("all".into(), "Engine".into()))
+        );
+
+        // A signature that promises nothing is left alone rather than guessed.
+        assert_eq!(declared_return_type("fn run(&self) {", "Rust"), None);
+        assert_eq!(declared_return_type("fn run(&self) -> () {", "Rust"), None);
+        assert_eq!(declared_return_type("void run() {", "C++"), None);
+        assert_eq!(declared_return_type("auto make() {", "C++"), None);
+        assert_eq!(declared_return_type("if (count > 0) {", "C++"), None);
+        assert_eq!(
+            declared_return_type("for (int i = 0; i < 3; i++) {", "C++"),
+            None
+        );
+        assert_eq!(declared_return_type("return engine;", "C++"), None);
+        assert_eq!(declared_return_type("", "Rust"), None);
+    }
+
+    #[test]
+    fn the_return_type_reader_never_panics_on_odd_input() {
+        // It runs on every line of every file, so malformed text has to be
+        // harmless rather than a crash.
+        for sample in [
+            "",
+            "(",
+            ")",
+            "()",
+            "->",
+            ":",
+            "fn",
+            "fn ",
+            "fn (",
+            "fn f(",
+            "fn f() ->",
+            "fn f() -> {",
+            "Engine",
+            "Engine (",
+            "Engine make(",
+            "static",
+            "static (",
+            "return",
+            "if (",
+            "for (",
+            "(",
+            "-> ->",
+            "a -> b",
+            "fn f() -> Vec<",
+            "fn f() -> Vec<Engine",
+            "fn f() -> &",
+            "fn f() -> *",
+            "::",
+            "x ->",
+        ] {
+            for language in [
+                "Rust",
+                "C",
+                "C++",
+                "Python",
+                "TypeScript / JavaScript",
+                "Plain Text",
+            ] {
+                let _ = declared_return_type(sample, language);
+            }
+        }
     }
 }
