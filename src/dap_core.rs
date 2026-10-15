@@ -1422,4 +1422,55 @@ mod debug_row_tests {
         assert_eq!(shown.len(), 4, "no limit means no limit");
         assert_eq!(hidden, 0);
     }
+
+    #[test]
+    fn a_breakpoint_can_carry_a_condition_and_go_back_to_plain() {
+        // What the prompt does: type an expression, apply it, then clear it.
+        let mut table = Breakpoints::new();
+        assert!(table.toggle("main.c", 4));
+        assert!(!table.specs("main.c")[0].is_conditional());
+
+        // Applying a condition keeps the breakpoint and marks it.
+        assert!(table.condition("main.c", 4, Some("count > 10")));
+        assert!(table.specs("main.c")[0].is_conditional());
+        assert_eq!(
+            table.specs("main.c")[0].condition.as_deref(),
+            Some("count > 10")
+        );
+        // The line list does not change just because the condition did.
+        assert_eq!(table.lines("main.c"), vec![4]);
+
+        // Clearing it leaves a plain breakpoint rather than removing it.
+        assert!(table.condition("main.c", 4, None));
+        assert!(!table.specs("main.c")[0].is_conditional());
+        assert_eq!(table.lines("main.c"), vec![4]);
+
+        // Whitespace is not a condition.
+        assert!(table.condition("main.c", 4, Some("   ")));
+        assert!(!table.specs("main.c")[0].is_conditional());
+
+        // A line that holds no breakpoint cannot be conditioned.
+        assert!(!table.condition("main.c", 9, Some("x > 1")));
+        assert!(!table.condition("other.c", 4, Some("x > 1")));
+    }
+
+    #[test]
+    fn the_arguments_sent_to_the_adapter_carry_the_condition() {
+        let mut table = Breakpoints::new();
+        table.toggle("main.c", 4);
+        table.toggle("main.c", 9);
+        table.condition("main.c", 4, Some("count > 10"));
+        let arguments = set_breakpoints_arguments("main.c", table.specs("main.c"));
+        // The condition travels with the breakpoint, and the plain one does not
+        // grow a field it does not use.
+        assert!(
+            arguments.contains("\"condition\":\"count > 10\""),
+            "{arguments}"
+        );
+        // The protocol counts lines from one, so line 4 goes out as 5.
+        assert_eq!(arguments.matches("\"line\":5").count(), 1);
+        assert_eq!(arguments.matches("\"line\":10").count(), 1);
+        // Only the breakpoint that has a condition carries one.
+        assert_eq!(arguments.matches("condition").count(), 1);
+    }
 }

@@ -707,6 +707,12 @@ struct App {
     graph_fraction: f32,
     panel_drag: Option<PanelDrag>,
     breakpoints: dap_core::Breakpoints,
+    /// Text of the condition prompt, when it is open.
+    breakpoint_prompt: Option<String>,
+    /// Caret position inside the condition prompt.
+    condition_caret: usize,
+    /// Whether the condition prompt has the keyboard.
+    condition_focused: bool,
     debug_session: Option<dap_core::DebugSession>,
     debug_state: dap_core::DebugState,
     /// Whether the call stack and scope panel is shown.
@@ -814,6 +820,105 @@ impl App {
             .path
             .to_string_lossy()
             .into_owned()
+    }
+
+    /// Open the prompt that edits the condition of the caret line's breakpoint.
+    ///
+    /// A conditional breakpoint stops only while an expression holds, which is
+    /// the difference between stepping through a loop a hundred times and
+    /// stopping on the one pass that matters. Windows had the prompt already;
+    /// this is the same flow on Linux.
+    fn begin_breakpoint_condition(&mut self) {
+        let path = self.active_breakpoint_path();
+        let line = self.caret_line;
+        let Some(spec) = self
+            .breakpoints
+            .specs(&path)
+            .iter()
+            .find(|spec| spec.line == line)
+            .cloned()
+        else {
+            self.status_message = format!(
+                "{} {}",
+                self.tr(
+                    "No breakpoint on line to condition",
+                    "此行没有可设置条件的断点"
+                ),
+                line + 1
+            );
+            return;
+        };
+        let existing = spec.condition.clone().unwrap_or_default();
+        self.condition_caret = existing.chars().count();
+        self.breakpoint_prompt = Some(existing);
+        self.condition_focused = true;
+        self.status_message = format!(
+            "{} {}",
+            self.tr(
+                "Condition for line: type an expression, Enter applies, Esc clears",
+                "该行条件：输入表达式，回车应用，Esc 清除"
+            ),
+            line + 1
+        );
+    }
+
+    /// Apply the typed condition to the caret line's breakpoint.
+    fn apply_breakpoint_condition(&mut self) {
+        let Some(prompt) = self.breakpoint_prompt.take() else {
+            return;
+        };
+        self.condition_focused = false;
+        let path = self.active_breakpoint_path();
+        let line = self.caret_line;
+        let condition = prompt.trim().to_string();
+        let text = if condition.is_empty() {
+            None
+        } else {
+            Some(condition.as_str())
+        };
+        if !self.breakpoints.condition(&path, line, text) {
+            self.status_message = format!(
+                "{} {}",
+                self.tr("No breakpoint on line any more", "此行已没有断点"),
+                line + 1
+            );
+            return;
+        }
+        self.status_message = if condition.is_empty() {
+            format!(
+                "{} {}",
+                self.tr(
+                    "Breakpoint now stops every time on line",
+                    "断点现在每次都会停在第"
+                ),
+                line + 1
+            )
+        } else {
+            format!(
+                "{} {}: {condition}",
+                self.tr("Breakpoint stops when line", "断点将在该行满足条件时停下"),
+                line + 1
+            )
+        };
+        if let Some(session) = self.debug_session.as_mut() {
+            let arguments =
+                dap_core::set_breakpoints_arguments(&path, self.breakpoints.specs(&path));
+            let _ = session.request(dap_core::PendingRequest::SetBreakpoints, &arguments);
+        }
+    }
+
+    /// Whether a line holds a breakpoint, and whether it has a condition.
+    fn breakpoint_mark(&self, line: usize) -> Option<bool> {
+        let path = self.active_breakpoint_path();
+        self.breakpoints
+            .specs(&path)
+            .iter()
+            .find(|spec| spec.line == line)
+            .map(|spec| spec.is_conditional())
+    }
+
+    fn open_breakpoint_condition(&mut self) {
+        self.begin_breakpoint_condition();
     }
 
     fn toggle_breakpoint(&mut self) {
@@ -2953,6 +3058,7 @@ impl App {
         if self.extensions_motion.value > 0.01 {
             self.draw_extensions();
         }
+        self.draw_condition_prompt();
         if self.create_kind.is_some() && self.create_motion.value > 0.01 {
             self.draw_create_dialog();
         }
@@ -3695,18 +3801,25 @@ impl App {
                 break;
             }
             self.text(self.colors.line, left + s(15), y, &(index + 1).to_string());
-            if self
-                .breakpoints
-                .lines(&self.active_breakpoint_path())
-                .contains(&index)
-            {
-                self.circle(
-                    self.colors.preprocessor,
-                    self.colors.preprocessor,
-                    left + s(42),
-                    y - s(6),
-                    s(5),
-                );
+            if let Some(conditional) = self.breakpoint_mark(index) {
+                // A conditional breakpoint may not stop at all, so it is drawn
+                // in a different colour from one that always stops, with a
+                // second ring around it.
+                let dot = if conditional {
+                    self.colors.keyword
+                } else {
+                    self.colors.preprocessor
+                };
+                self.circle(dot, dot, left + s(42), y - s(6), s(5));
+                if conditional {
+                    self.circle(
+                        self.colors.keyword,
+                        self.colors.keyword,
+                        left + s(42),
+                        y - s(6),
+                        s(9),
+                    );
+                }
             }
             let color = if line.contains("fn ") {
                 self.colors.accent
@@ -4298,6 +4411,59 @@ impl App {
             start.1,
             s(3),
         );
+    }
+
+    /// The condition prompt: one line over the editor, with the caret in it.
+    ///
+    /// # Safety
+    /// Requires a live Cairo context.
+    unsafe fn draw_condition_prompt(&self) {
+        let Some(prompt) = self.breakpoint_prompt.as_ref() else {
+            return;
+        };
+        let s = |v| self.s(v);
+        let width = (self.width as f32 * 0.4) as i32;
+        let x = (self.width - width) / 2;
+        let y = s(96);
+        self.rect(self.colors.panel_2, x, y, width, s(46));
+        self.outline(self.colors.accent, x, y, width, s(46));
+        self.text(
+            self.colors.muted,
+            x + s(12),
+            y + s(19),
+            &format!(
+                "{} {}",
+                self.tr("Breakpoint condition on line", "该行断点条件"),
+                self.caret_line + 1
+            ),
+        );
+        let field_x = x + s(12);
+        let field_y = y + s(40);
+        let value = if prompt.is_empty() {
+            self.tr("for example count > 10", "例如 count > 10")
+        } else {
+            prompt.as_str()
+        };
+        self.text(
+            if prompt.is_empty() {
+                self.colors.muted
+            } else {
+                self.colors.bright
+            },
+            field_x,
+            field_y,
+            value,
+        );
+        if blink_phase(self.started) {
+            let prefix: String = prompt.chars().take(self.condition_caret).collect();
+            let caret = field_x + self.pango_text_size(&prefix, false).0;
+            self.line(
+                self.colors.bright,
+                1,
+                (caret, field_y - s(14)),
+                (caret, field_y + s(4)),
+            );
+        }
     }
 
     unsafe fn draw_status(&self) {
@@ -5264,6 +5430,20 @@ impl App {
                 };
                 // The panel is part of this scene, so a frame covers both the
                 // inline labels and the call stack panel.
+                // One plain breakpoint and one with a condition, so the two
+                // marks can be told apart in the frame, plus the prompt open.
+                self.breakpoints.clear("/tmp/tc-ide-preview/main.cpp", 4);
+                self.breakpoints.set(
+                    "/tmp/tc-ide-preview/main.cpp",
+                    dap_core::BreakpointSpec::new(4),
+                );
+                self.breakpoints.set(
+                    "/tmp/tc-ide-preview/main.cpp",
+                    dap_core::BreakpointSpec::conditional(5, "count > LIMIT"),
+                );
+                self.breakpoint_prompt = Some("count > LIMIT".to_string());
+                self.condition_caret = "count > LIMIT".chars().count();
+                self.condition_focused = true;
                 self.debug_panel_open = true;
                 self.debug_frame = 0;
                 true
@@ -7019,7 +7199,13 @@ impl App {
         let input = std::str::from_utf8(&bytes).unwrap_or("");
         let control = event.state & CONTROL_MASK != 0;
         if keysym == F9_KEYSYM {
-            self.toggle_breakpoint();
+            // Shift+F9 conditions the breakpoint instead of toggling it, which
+            // is the key Windows uses for the same thing.
+            if event.state & SHIFT_MASK != 0 {
+                self.open_breakpoint_condition();
+            } else {
+                self.toggle_breakpoint();
+            }
             return true;
         }
         if keysym == F5_KEYSYM {
@@ -7049,6 +7235,32 @@ impl App {
             }
             if count > 0 && !input.chars().any(char::is_control) {
                 self.terminals[self.terminal_active].input.push_str(input);
+            }
+            return true;
+        }
+        if self.condition_focused {
+            // Enter applies, Esc clears the condition and closes.
+            if keysym == RETURN_KEYSYM {
+                self.apply_breakpoint_condition();
+                return true;
+            }
+            if keysym == ESCAPE_KEYSYM {
+                if let Some(prompt) = self.breakpoint_prompt.as_mut() {
+                    prompt.clear();
+                }
+                self.apply_breakpoint_condition();
+                return true;
+            }
+            if keysym == BACKSPACE_KEYSYM {
+                if let Some(prompt) = self.breakpoint_prompt.as_mut() {
+                    prompt.pop();
+                }
+                return true;
+            }
+            if count > 0 && !input.chars().any(char::is_control) {
+                if let Some(prompt) = self.breakpoint_prompt.as_mut() {
+                    prompt.push_str(input);
+                }
             }
             return true;
         }
@@ -8794,6 +9006,9 @@ pub fn run() {
             graph_fraction: 0.39,
             panel_drag: None,
             breakpoints: dap_core::Breakpoints::new(),
+            breakpoint_prompt: None,
+            condition_caret: 0,
+            condition_focused: false,
             debug_session: None,
             debug_state: dap_core::DebugState::default(),
             debug_panel_open: false,
