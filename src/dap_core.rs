@@ -964,8 +964,7 @@ while True:
             // The adapter test needs a real interpreter, not a Store stub.
             return;
         }
-        let directory = std::env::temp_dir().join("tc-ide-dap-test");
-        let _ = std::fs::create_dir_all(&directory);
+        let directory = crate::lsp_core::test_directory("tc-ide-dap-test");
         let script_path = directory.join("fake_adapter.py");
         std::fs::write(&script_path, script).expect("write fake adapter");
         let spec = AdapterSpec {
@@ -984,7 +983,9 @@ while True:
 
         // Drive the session until it has stopped, then collect its state.
         let mut saw_stop = false;
-        let stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        // A loaded runner can be slow to start the interpreter; this guards
+        // against hanging rather than asserting how fast it starts.
+        let stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while std::time::Instant::now() < stop_deadline {
             let Some(_) = session.poll() else {
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1020,7 +1021,7 @@ while True:
 
         session.control(PendingRequest::Continue).expect("continue");
         let mut terminated = false;
-        let term_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let term_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while std::time::Instant::now() < term_deadline {
             if session.poll().is_none() {
                 std::thread::sleep(std::time::Duration::from_millis(10));

@@ -1443,8 +1443,7 @@ while True:
     elif method == "exit":
         break
 "#;
-        let directory = std::env::temp_dir().join("tc-ide-lsp-test");
-        let _ = std::fs::create_dir_all(&directory);
+        let directory = test_directory("tc-ide-lsp-test");
         let script_path = directory.join("fake_server.py");
         std::fs::write(&script_path, script).expect("write fake server");
         let python = if cfg!(windows) { "python" } else { "python3" };
@@ -1471,7 +1470,10 @@ while True:
         // Collect messages, answering any server request as the real client does.
         let mut diagnostics = 0;
         let mut collected = Vec::new();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        // The child is a real interpreter, and a loaded CI runner can take a
+        // while to start one; the deadline is a guard against hanging, not a
+        // performance assertion.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while std::time::Instant::now() < deadline {
             let Some(message) = server.try_message() else {
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1494,7 +1496,7 @@ while True:
             .position_request("textDocument/completion", "/tmp/app.py", 0, 5)
             .expect("completion");
         let mut completion = None;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while std::time::Instant::now() < deadline {
             let Some(message) = server.try_message() else {
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1528,4 +1530,17 @@ while True:
         assert_eq!(braces, ["{\"b\":\"}{\"}"]);
         assert!(json_objects("{\"a\":[]}", "a").is_empty());
     }
+}
+
+/// A private directory for one test, so a stale file from an earlier or a
+/// concurrent run can never be picked up instead of the fixture just written.
+#[cfg(test)]
+pub(crate) fn test_directory(name: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let process = std::process::id();
+    let directory = std::env::temp_dir().join(format!("{name}-{process}-{unique}"));
+    let _ = std::fs::create_dir_all(&directory);
+    directory
 }
