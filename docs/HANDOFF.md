@@ -203,6 +203,7 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
 - [x] 用户级运行时缓存清单：记录 id/版本/校验和/字节数/目录，支持复用、修剪与序列化（Windows 已接入，Linux 待接入）。
 - [x] Debugger/Formatter：格式化当前文件已完成；调试是真正的 DAP 会话（F9 断点、F5/Shift+F5、F10、F11/Shift+F11、自动取调用栈/作用域/变量并跳到停下的帧），调用栈、变量与断点现在显示在 `Ctrl+Shift+D` 面板中并可回车跳转。（**本轮补齐最后两项**：①选区格式化——`workspace_core::format_selection_command` 按工具给出带范围的命令（`rustfmt --file-lines` 的 JSON 行区间、`clang-format -i --lines=a:b`），没有范围选项的格式化器（ruff/biome/gofmt）明确回报"整文件重排"而不是假装只改了选区；`Ctrl+Shift+F` 有选区时只格式化选区，没选区时整文件。②断点的就地编辑（增删/条件）——`dap_core::Breakpoints` 成为断点表（按文件、按行、带条件），`BreakpointSpec` 支持 condition/hitCondition/logMessage 并正确转义进 `setBreakpoints` 请求；F9 仍增删断点，新增 **Ctrl+F9 就地编辑光标所在行的条件**（状态栏内联输入，Enter 应用、Esc 取消），`Ctrl+Shift+D` 面板的断点行会显示条件。顺带修掉两个真实缺陷：F2 重命名的内联输入此前**没有任何提交路径**（输入完按回车什么都不发生），现在 Enter 提交、Esc 取消；"格式化当前文件"此前在把命令写进终端后**立刻**重读文件（格式化器还没跑完），现在靠结束标记等待工具真正完成，20 秒无响应给出可读提示。Linux 端本来就没有格式化入口（本次未新增）。新增 3 项单元测试（范围命令、条件断点请求、断点表编辑））
 - [x] AI：`ai_core::ChatSession` 子进程 curl（Key 走环境变量、SSE 增量、HTTP 状态、可取消）+ Windows 面板（内联输入、Enter 发送、Esc 取消、流式回答、错误显示、最近 12 轮上下文），会话按项目保存到 `.tc-ide-ai/history.conf` 并在打开项目时恢复。
+**Linux AI 面板本轮补齐**：`ai_core`（设置、请求体、SSE 流式、会话、历史）此前**只有 Windows 在用**，Linux 既没有面板也没有会话，而队列没把它列为缺失——因为当初那一条把面板范围限定为 Windows。现 `Ctrl+Shift+I` 打开面板：会话与输入行、回车发送、Esc 取消/关闭、请求进行中每帧收集事件把回答流式写进面板；会话随项目存到 `.tc-ide-ai/`（与 Windows 同一路径与文件），打开项目时读回；Endpoint/模型/Key 复用设置页已有的字段而不是再存一份，两者不可能不一致。2 项测试覆盖：会话通过该文件往返且保留「谁说的」、请求体携带会话而 **Key 既不在请求体也不在命令行**（只出现环境变量名）。新增 `ai-panel` 渲染场景并纳入 CI 帧门槛。
 - [x] API 请求使用用户选择的 Endpoint；Key 仅驻内存并通过子进程环境变量 TC_IDE_AI_KEY 传递，不出现在命令行、配置文件或日志。
 
 ### P1：打包与动画
