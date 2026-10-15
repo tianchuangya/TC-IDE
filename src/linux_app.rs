@@ -14,9 +14,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::background_core;
+use crate::dap_core;
 use crate::editor_core;
 use crate::extension_core;
 use crate::graph_core;
+use crate::lsp_core;
 use crate::motion_core;
 use crate::package_motion;
 use crate::session_core;
@@ -422,6 +424,9 @@ const LEFT_KEYSYM: c_ulong = 0xff51;
 const UP_KEYSYM: c_ulong = 0xff52;
 const RIGHT_KEYSYM: c_ulong = 0xff53;
 const DOWN_KEYSYM: c_ulong = 0xff54;
+const F5_KEYSYM: c_ulong = 0xffc2;
+const F9_KEYSYM: c_ulong = 0xffc6;
+const F10_KEYSYM: c_ulong = 0xffc7;
 const LC_ALL: c_int = 6;
 
 fn shortcut_from_keysym(keysym: c_ulong) -> Option<char> {
@@ -498,6 +503,12 @@ enum CreateKind {
     File,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PanelDrag {
+    CallHierarchy,
+    Terminal,
+}
+
 #[derive(Clone, Copy)]
 struct Palette {
     bg: c_ulong,
@@ -508,6 +519,13 @@ struct Palette {
     text: c_ulong,
     bright: c_ulong,
     accent: c_ulong,
+    keyword: c_ulong,
+    syntax_type: c_ulong,
+    function: c_ulong,
+    constant: c_ulong,
+    preprocessor: c_ulong,
+    literal: c_ulong,
+    comment: c_ulong,
     project: c_ulong,
     shadow: c_ulong,
 }
@@ -607,6 +625,7 @@ struct App {
     font_search: String,
     font_search_focused: bool,
     edit_menu_open: bool,
+    view_menu_open: bool,
     workspace_search: String,
     workspace_search_focused: bool,
     project_tree_expanded: bool,
@@ -616,18 +635,28 @@ struct App {
     tree_motion_updated: Instant,
     new_menu_motion: UiMotion,
     edit_menu_motion: UiMotion,
+    view_menu_motion: UiMotion,
     settings_motion: UiMotion,
     package_motion: UiMotion,
     extensions_motion: UiMotion,
     create_motion: UiMotion,
     terminal_motion: UiMotion,
+    graph_motion: UiMotion,
     collapsed_folders: BTreeSet<String>,
     terminal_open: bool,
+    terminal_height: i32,
     terminal_focused: bool,
     terminal_active: usize,
     terminals: Vec<TerminalSession>,
     terminal_menu_open: bool,
     graph_current: bool,
+    graph_visible: bool,
+    graph_fraction: f32,
+    panel_drag: Option<PanelDrag>,
+    breakpoints: dap_core::Breakpoints,
+    debug_session: Option<dap_core::DebugSession>,
+    debug_state: dap_core::DebugState,
+    debug_stop_seen: String,
     graph_zoom: f32,
     session: session_core::Session,
     runtime_cache: extension_core::RuntimeCache,
@@ -698,6 +727,212 @@ impl App {
 
     fn code_line_step(&self) -> i32 {
         (self.s(28) + self.code_zoom * self.s(2)).max(self.s(20))
+    }
+
+    fn graph_left(&self) -> i32 {
+        if self.graph_motion.value <= 0.001 {
+            return self.width;
+        }
+        let workspace = (self.width as f32 * 0.17) as i32;
+        let base = (self.width as f32 * self.graph_fraction).round().clamp(
+            self.s(260) as f32,
+            (self.width - workspace - self.s(360)) as f32,
+        );
+        self.width - (base * self.graph_motion.value.clamp(0.0, 1.0)).round() as i32
+    }
+
+    fn terminal_top(&self) -> i32 {
+        if self.terminal_open {
+            self.height
+                - self
+                    .terminal_height
+                    .clamp(self.s(150), self.height - self.s(150))
+        } else {
+            self.height - self.s(28)
+        }
+    }
+
+    fn active_breakpoint_path(&self) -> String {
+        self.files[self.selected_file]
+            .path
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn toggle_breakpoint(&mut self) {
+        let path = self.active_breakpoint_path();
+        let enabled = self.breakpoints.toggle(&path, self.caret_line);
+        self.status_message = format!(
+            "{} {}",
+            self.tr(
+                if enabled {
+                    "Breakpoint set on line"
+                } else {
+                    "Breakpoint removed from line"
+                },
+                if enabled {
+                    "已在此行设置断点"
+                } else {
+                    "已移除此行断点"
+                },
+            ),
+            self.caret_line + 1
+        );
+        if let Some(session) = self.debug_session.as_mut() {
+            let arguments =
+                dap_core::set_breakpoints_arguments(&path, self.breakpoints.specs(&path));
+            let _ = session.request(dap_core::PendingRequest::SetBreakpoints, &arguments);
+        }
+    }
+
+    fn debug_program(&mut self, language: &str) -> Result<PathBuf, String> {
+        let source = self.files[self.selected_file].path.clone();
+        let root = self.active_root();
+        match language {
+            "C" | "C++" => {
+                let output = root.join(".tc-ide-debug");
+                let compiler = if language == "C++" { "g++" } else { "gcc" };
+                let status = Command::new(compiler)
+                    .args(["-g", "-O0"])
+                    .arg(&source)
+                    .arg("-o")
+                    .arg(&output)
+                    .current_dir(&root)
+                    .status()
+                    .map_err(|error| format!("{compiler} could not start: {error}"))?;
+                if !status.success() {
+                    return Err(self
+                        .tr(
+                            "Debug build failed; see compiler output",
+                            "调试构建失败，请检查编译输出",
+                        )
+                        .into());
+                }
+                Ok(output)
+            }
+            "Python" => Ok(source),
+            _ => Ok(source),
+        }
+    }
+
+    fn start_or_continue_debugging(&mut self) {
+        if let Some(session) = self.debug_session.as_mut() {
+            let action = if self.debug_state.stopped.is_some() {
+                dap_core::PendingRequest::Continue
+            } else {
+                dap_core::PendingRequest::Pause
+            };
+            let _ = session.control(action);
+            return;
+        }
+        self.save_current_file();
+        let language = self.detected_language_for_file(&self.files[self.selected_file].name);
+        let Some(mut spec) = dap_core::adapter_for(language) else {
+            self.status_message = format!("No debug adapter is configured for {language}");
+            return;
+        };
+        if !lsp_core::executable_available(&spec.program)
+            && matches!(language, "C" | "C++" | "Rust")
+            && lsp_core::executable_available("gdb")
+        {
+            spec.program = "gdb".into();
+            spec.arguments = vec!["-q".into(), "-i".into(), "dap".into()];
+        }
+        if !lsp_core::executable_available(&spec.program) {
+            self.status_message = format!("{} is not installed", spec.program);
+            return;
+        }
+        let program = match self.debug_program(language) {
+            Ok(program) => program,
+            Err(error) => {
+                self.status_message = error;
+                return;
+            }
+        };
+        let root = self.active_root();
+        match dap_core::DebugSession::start(&spec, &root) {
+            Ok(mut session) => {
+                let program = program.to_string_lossy();
+                let cwd = root.to_string_lossy();
+                if let Err(error) =
+                    session.initialize_and_launch(&program, &cwd, &self.breakpoints.files())
+                {
+                    self.status_message = error;
+                    return;
+                }
+                self.debug_session = Some(session);
+                self.debug_state = dap_core::DebugState::default();
+                self.debug_stop_seen.clear();
+                self.terminal_open = true;
+                self.status_message = format!("Debugging with {}", spec.program);
+            }
+            Err(error) => self.status_message = error,
+        }
+    }
+
+    fn step_debugging(&mut self) {
+        if let Some(session) = self.debug_session.as_mut() {
+            let _ = session.control(dap_core::PendingRequest::Next);
+        } else {
+            self.status_message = self.tr("Start debugging first", "请先启动调试").into();
+        }
+    }
+
+    fn stop_debugging(&mut self) {
+        if let Some(session) = self.debug_session.as_mut() {
+            let _ = session.control(dap_core::PendingRequest::Disconnect);
+        }
+        self.debug_session = None;
+        self.debug_state = dap_core::DebugState::default();
+        self.debug_stop_seen.clear();
+        self.status_message = self.tr("Debugging stopped", "调试已停止").into();
+    }
+
+    fn poll_debug_session(&mut self) {
+        let Some(mut session) = self.debug_session.take() else {
+            return;
+        };
+        if !session.is_running() {
+            self.debug_state = dap_core::DebugState::default();
+            self.status_message = format!("{} stopped", session.spec().program);
+            return;
+        }
+        while session.poll().is_some() {}
+        self.debug_state = session.state();
+        if self.debug_state.stopped.is_some() {
+            if self.debug_state.frames.is_empty()
+                && !session.has_pending(dap_core::PendingRequest::StackTrace)
+            {
+                let _ = session.refresh_state();
+            } else if self.debug_state.scopes.is_empty()
+                && !session.has_pending(dap_core::PendingRequest::Scopes)
+            {
+                let _ = session.request_scope_variables();
+            } else if self.debug_state.variables.is_empty()
+                && !session.has_pending(dap_core::PendingRequest::Variables)
+            {
+                let _ = session.request_variables_of_first_scope();
+            }
+            if let Some(frame) = self.debug_state.frames.first() {
+                self.caret_line = frame
+                    .line
+                    .min(self.files[self.selected_file].lines.len().saturating_sub(1));
+                self.caret_column = frame
+                    .column
+                    .min(self.files[self.selected_file].lines[self.caret_line].len());
+                let key = format!("{}:{}", frame.name, frame.line);
+                if key != self.debug_stop_seen {
+                    self.debug_stop_seen = key;
+                    self.status_message = self
+                        .debug_state
+                        .stopped
+                        .as_ref()
+                        .map(dap_core::StopEvent::describe)
+                        .unwrap_or_else(|| self.tr("Paused", "已暂停").into());
+                }
+            }
+        }
+        self.debug_session = Some(session);
     }
 
     /// The theme colour behind an X11 pixel, for the code that blends colours.
@@ -1191,7 +1426,7 @@ impl App {
     /// Size of the region the background is drawn into behind the editor.
     fn background_view_size(&self) -> (f64, f64) {
         let left = (self.width as f32 * 0.17) as i32;
-        let right = (self.width as f32 * 0.61) as i32;
+        let right = self.graph_left();
         (
             (right - left - 1).max(1) as f64,
             (self.height - self.s(154)).max(1) as f64,
@@ -2025,20 +2260,26 @@ impl App {
 
     unsafe fn highlighted_text(&self, x: i32, y: i32, value: &str, language: &str) {
         let mut cursor = x;
-        for (token, kind) in syntax_tokens(value, completion_words_for_language(language)) {
-            let color = match kind {
-                1 => self.colors.accent,
-                2 => self.colors.bright,
-                3 => self.colors.project,
-                _ => self.colors.text,
+        for token in
+            editor_core::syntax_tokens(value, &format!("file.{}", extension_for_language(language)))
+        {
+            let color = match token.kind {
+                editor_core::TokenKind::Keyword => self.colors.keyword,
+                editor_core::TokenKind::Type => self.colors.syntax_type,
+                editor_core::TokenKind::Function => self.colors.function,
+                editor_core::TokenKind::Constant => self.colors.constant,
+                editor_core::TokenKind::Preprocessor => self.colors.preprocessor,
+                editor_core::TokenKind::Literal => self.colors.literal,
+                editor_core::TokenKind::Comment => self.colors.comment,
+                editor_core::TokenKind::Plain => self.colors.text,
             };
-            self.pango_text(color, cursor, y, &token, true);
-            cursor += self.code_text_width(&token);
+            self.pango_text(color, cursor, y, &token.text, true);
+            cursor += self.code_text_width(&token.text);
         }
     }
 
     fn graph_bounds(&self) -> (i32, i32, i32, i32) {
-        let left = (self.width as f32 * 0.61) as i32;
+        let left = self.graph_left();
         (
             left,
             self.s(82),
@@ -2314,7 +2555,9 @@ impl App {
         self.draw_header();
         self.draw_workspace();
         self.draw_editor();
-        self.draw_graph();
+        if self.graph_motion.value > 0.08 {
+            self.draw_graph();
+        }
         if self.hovered_from_code {
             self.draw_code_relations();
         }
@@ -2326,6 +2569,9 @@ impl App {
         }
         if self.edit_menu_motion.value > 0.01 {
             self.draw_edit_menu();
+        }
+        if self.view_menu_motion.value > 0.01 {
+            self.draw_view_menu();
         }
         if self.settings_motion.value > 0.01 {
             self.draw_settings_menu();
@@ -2410,12 +2656,24 @@ impl App {
             s(27),
         );
         self.text(self.colors.text, s(219), s(29), self.tr("Edit", "编辑"));
+        self.outline(
+            if self.view_menu_open {
+                self.colors.accent
+            } else {
+                self.colors.line
+            },
+            s(302),
+            s(10),
+            s(88),
+            s(27),
+        );
+        self.text(self.colors.text, s(314), s(29), self.tr("View", "查看"));
         let path = format!(
             "{}  /  {}",
             self.project_name, self.files[self.selected_file].name
         );
         let path_x = self.width / 2 - self.pango_text_size(&path, false).0 / 2;
-        self.text(self.colors.muted, path_x.max(s(220)), s(29), &path);
+        self.text(self.colors.muted, path_x.max(s(405)), s(29), &path);
         self.outline(
             if self.settings_open {
                 self.colors.accent
@@ -2910,10 +3168,63 @@ impl App {
         }
     }
 
+    unsafe fn draw_view_menu(&self) {
+        let s = |v| self.s(v);
+        let x = s(302);
+        let y = s(43) + self.overlay_offset(self.view_menu_motion);
+        let w = s(280);
+        let h = s(116);
+        self.floating_panel(x, y, w, h);
+        self.text(
+            self.colors.muted,
+            x + s(15),
+            y + s(23),
+            self.tr("PANELS", "栏位"),
+        );
+        for (index, (label, enabled)) in [
+            (self.tr("Call hierarchy", "调用层级"), self.graph_visible),
+            (self.tr("Terminal", "终端"), self.terminal_open),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let cy = y + s(51 + index as i32 * 36);
+            self.text(self.colors.text, x + s(18), cy + s(5), label);
+            let sx = x + w - s(64);
+            self.rect(
+                if *enabled {
+                    self.colors.accent
+                } else {
+                    self.colors.line
+                },
+                sx,
+                cy - s(13),
+                s(46),
+                s(24),
+            );
+            let progress = if index == 0 {
+                self.graph_motion.value
+            } else {
+                self.terminal_motion.value
+            }
+            .clamp(0.0, 1.0);
+            let thumb_x = sx + s(12) + (s(22) as f32 * progress) as i32;
+            let stretch = ((progress * std::f32::consts::PI).sin() * s(3) as f32) as i32;
+            self.rounded_rect(
+                self.colors.bright,
+                thumb_x - s(8) - stretch,
+                cy - s(9),
+                s(16) + stretch * 2,
+                s(16),
+                s(8),
+            );
+        }
+    }
+
     unsafe fn draw_editor(&self) {
         let s = |v| self.s(v);
         let left = (self.width as f32 * 0.17) as i32;
-        let right = (self.width as f32 * 0.61) as i32;
+        let right = self.graph_left();
         self.rect(
             self.colors.bg,
             left + 1,
@@ -2936,6 +3247,27 @@ impl App {
             s(71),
             &self.files[self.selected_file].name,
         );
+        let debug_x = left + s(174);
+        for (index, label) in ["●  BP", "▶  F5", "→  F10", "■  STOP"].iter().enumerate() {
+            let bx = debug_x + index as i32 * s(78);
+            self.outline(self.colors.line, bx, s(52), s(72), s(25));
+            self.text(
+                if (index == 1 && self.debug_session.is_some())
+                    || (index == 0
+                        && self
+                            .breakpoints
+                            .lines(&self.active_breakpoint_path())
+                            .contains(&self.caret_line))
+                {
+                    self.colors.accent
+                } else {
+                    self.colors.muted
+                },
+                bx + s(7),
+                s(70),
+                label,
+            );
+        }
         let language = self.language_for_file(&self.files[self.selected_file].name);
         self.text(self.colors.muted, right - s(150), s(71), &language);
         XSetFont(self.display, self.gc, (*self.code_font).fid);
@@ -2949,6 +3281,19 @@ impl App {
                 break;
             }
             self.text(self.colors.line, left + s(15), y, &(index + 1).to_string());
+            if self
+                .breakpoints
+                .lines(&self.active_breakpoint_path())
+                .contains(&index)
+            {
+                self.circle(
+                    self.colors.preprocessor,
+                    self.colors.preprocessor,
+                    left + s(42),
+                    y - s(6),
+                    s(5),
+                );
+            }
             let color = if line.contains("fn ") {
                 self.colors.accent
             } else if line.contains("struct ") || line.starts_with("impl") {
@@ -3057,6 +3402,7 @@ impl App {
             }
         }
         XSetFont(self.display, self.gc, (*self.font).fid);
+        self.draw_debug_values(left, right, base_y, step);
         let hint = if self.editor_focused {
             self.tr(
                 "EDITOR ACTIVE - type, Backspace, Enter, arrows",
@@ -3112,6 +3458,69 @@ impl App {
                 );
             }
         }
+    }
+
+    unsafe fn draw_debug_values(&self, left: i32, right: i32, base_y: i32, step: i32) {
+        let Some(frame) = self.debug_state.frames.first() else {
+            return;
+        };
+        let line_index = frame
+            .line
+            .min(self.files[self.selected_file].lines.len().saturating_sub(1));
+        let line = &self.files[self.selected_file].lines[line_index];
+        let y = base_y + line_index as i32 * step;
+        let mut lane = 0;
+        for variable in self.debug_state.variables.iter().take(6) {
+            let Some((start, end, _)) = editor_core::identifier_ranges(line)
+                .into_iter()
+                .find(|(_, _, name)| name == &variable.name)
+            else {
+                continue;
+            };
+            let anchor_x = left + self.s(52) + self.code_text_width(&line[..start]);
+            let anchor_w = self.code_text_width(&line[start..end]);
+            let label = format!("{} = {}", variable.name, variable.value);
+            let label_w = (self.pango_text_size(&label, false).0 + self.s(20)).min(self.s(250));
+            let label_x = (anchor_x + anchor_w / 2 - label_w / 2)
+                .clamp(left + self.s(48), right - label_w - self.s(12));
+            let label_y = y - self.s(35 + lane * 27);
+            self.rect(
+                self.colors.panel_2,
+                label_x,
+                label_y - self.s(18),
+                label_w,
+                self.s(23),
+            );
+            self.outline(
+                self.colors.function,
+                label_x,
+                label_y - self.s(18),
+                label_w,
+                self.s(23),
+            );
+            self.text(self.colors.bright, label_x + self.s(9), label_y, &label);
+            self.line(
+                self.colors.function,
+                1,
+                (label_x + label_w / 2, label_y + self.s(5)),
+                (anchor_x + anchor_w / 2, y - self.s(19)),
+            );
+            lane = (lane + 1).min(2);
+        }
+        let gutter_x = left + self.s(43);
+        self.line(
+            self.colors.accent,
+            2,
+            (gutter_x, base_y - self.s(17)),
+            (gutter_x, y - self.s(6)),
+        );
+        self.circle(
+            self.colors.bright,
+            self.colors.accent,
+            gutter_x,
+            y - self.s(6),
+            self.s(5),
+        );
     }
 
     unsafe fn draw_graph(&self) {
@@ -3473,7 +3882,8 @@ impl App {
     unsafe fn draw_status(&self) {
         let s = |v| self.s(v);
         let terminal_progress = self.terminal_motion.value.clamp(0.0, 1.0);
-        let panel_h = s(28) + ((s(230) - s(28)) as f32 * terminal_progress) as i32;
+        let expanded = self.terminal_height.clamp(s(150), self.height - s(150));
+        let panel_h = s(28) + ((expanded - s(28)) as f32 * terminal_progress) as i32;
         let top = self.height - panel_h;
         self.rect(self.colors.panel_2, 0, top, self.width, panel_h);
         self.line(self.colors.line, 1, (0, top), (self.width, top));
@@ -4337,6 +4747,55 @@ impl App {
                 .unwrap_or_else(Instant::now)
         };
         match name {
+            "view" => {
+                self.view_menu_open = true;
+                self.view_menu_motion = UiMotion::new(1.0);
+                self.terminal_open = true;
+                self.terminal_motion = UiMotion::new(1.0);
+                true
+            }
+            "debug" => {
+                self.files = vec![FileBuffer {
+                    name: "main.cpp".into(),
+                    path: PathBuf::from("/tmp/tc-ide-preview/main.cpp"),
+                    lines: vec![
+                        "#include <iostream>".into(),
+                        "constexpr int LIMIT = 42;".into(),
+                        "int main() {".into(),
+                        "    int count = LIMIT;".into(),
+                        "    std::cout << count << std::endl;".into(),
+                        "    return 0;".into(),
+                        "}".into(),
+                    ],
+                }];
+                self.selected_file = 0;
+                self.caret_line = 4;
+                self.breakpoints.toggle("/tmp/tc-ide-preview/main.cpp", 4);
+                self.debug_state = dap_core::DebugState {
+                    stopped: Some(dap_core::StopEvent {
+                        reason: "breakpoint".into(),
+                        thread_id: Some(1),
+                        file: Some("/tmp/tc-ide-preview/main.cpp".into()),
+                        line: Some(4),
+                    }),
+                    frames: vec![dap_core::StackFrame {
+                        id: 1,
+                        name: "main".into(),
+                        file: Some("/tmp/tc-ide-preview/main.cpp".into()),
+                        line: 4,
+                        column: 17,
+                    }],
+                    scopes: vec![],
+                    variables: vec![dap_core::Variable {
+                        name: "count".into(),
+                        value: "42".into(),
+                        kind: "int".into(),
+                    }],
+                    terminated: false,
+                    output: vec![],
+                };
+                true
+            }
             "packaging" => {
                 self.package_targets = [true, true, true, true];
                 self.build_started = Some(ago(absorb * 0.55));
@@ -4465,7 +4924,7 @@ impl App {
             let t = (elapsed / absorb_seconds).clamp(0.0, 1.0);
             if t > 0.76 {
                 let left = (self.width as f32 * 0.17) as i32;
-                let right = (self.width as f32 * 0.61) as i32;
+                let right = self.graph_left();
                 self.rect(
                     self.colors.bg,
                     left + s(1),
@@ -4588,6 +5047,7 @@ impl App {
     }
 
     fn update_background(&mut self) {
+        self.poll_debug_session();
         let now = Instant::now();
         let dt = now
             .duration_since(self.tree_motion_updated)
@@ -4603,11 +5063,13 @@ impl App {
         );
         Self::step_ui_motion(&mut self.new_menu_motion, self.new_menu_open, dt);
         Self::step_ui_motion(&mut self.edit_menu_motion, self.edit_menu_open, dt);
+        Self::step_ui_motion(&mut self.view_menu_motion, self.view_menu_open, dt);
         Self::step_ui_motion(&mut self.settings_motion, self.settings_open, dt);
         Self::step_ui_motion(&mut self.package_motion, self.package_open, dt);
         Self::step_ui_motion(&mut self.extensions_motion, self.extensions_open, dt);
         Self::step_ui_motion(&mut self.create_motion, self.create_kind.is_some(), dt);
         Self::step_ui_motion(&mut self.terminal_motion, self.terminal_open, dt);
+        Self::step_ui_motion(&mut self.graph_motion, self.graph_visible, dt);
         for folder in self.folders.clone() {
             let target = if self.collapsed_folders.contains(&folder) {
                 0.0
@@ -5142,51 +5604,44 @@ impl App {
         };
         let manifest=format!("name={name}\nlanguage={language}\nversion={version}\nenvironment={environment}\nruntime_cache={}\n",cache.as_ref().map(|path|path.display().to_string()).unwrap_or_default());
         let _ = fs::write(root.join(".tc-ide-project"), manifest);
-        let (file_name, file_path, content, folders): (String, PathBuf, String, Vec<String>) =
-            if language == "Python" {
-                if environment == "venv" {
-                    let interpreter = python_interpreter(version);
-                    let _ = Command::new(interpreter)
-                        .args(["-m", "venv", ".venv"])
-                        .current_dir(&root)
-                        .spawn();
+        if language == "Python" && environment == "venv" {
+            let interpreter = python_interpreter(version);
+            let _ = Command::new(interpreter)
+                .args(["-m", "venv", ".venv"])
+                .current_dir(&root)
+                .spawn();
+        }
+        let template = workspace_core::project_template(name, language, version, environment);
+        let mut folders = Vec::new();
+        for file in &template.files {
+            let path = root.join(&file.path);
+            if let Some(parent) = path.parent().filter(|parent| *parent != root) {
+                let _ = fs::create_dir_all(parent);
+                if let Ok(relative) = parent.strip_prefix(&root) {
+                    let relative = relative.to_string_lossy().to_string();
+                    if !relative.is_empty() && !folders.contains(&relative) {
+                        folders.push(relative);
+                    }
                 }
-                let file = "main.py".to_string();
-                let path = root.join(&file);
-                (file,path,format!("# {name} - Python {version} - {environment}\n\nprint(\"Hello from TC-IDE\")\n"),if environment=="venv"{vec![".venv".to_string()]}else{Vec::new()})
-            } else if language == "Rust" {
-                let src = root.join("src");
-                let _ = fs::create_dir_all(&src);
-                let _ = fs::write(
-                    root.join("Cargo.toml"),
-                    format!(
-                        "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-                        name.to_ascii_lowercase().replace(' ', "-")
-                    ),
-                );
-                let content = "fn main() {\n    println!(\"Hello from TC-IDE\");\n}\n".to_string();
-                (
-                    "main.rs".into(),
-                    src.join("main.rs"),
-                    content,
-                    vec!["src".to_string()],
-                )
-            } else {
-                let extension = self.languages[self.project_language]
-                    .extensions
-                    .first()
-                    .copied()
-                    .unwrap_or("txt");
-                let file = if language == "Java" {
-                    "Main.java".to_string()
-                } else {
-                    format!("main.{extension}")
-                };
-                let content = format!("// {name} - {language} {version} - {environment}\n");
-                let path = root.join(&file);
-                (file, path, content, Vec::new())
-            };
-        let _ = fs::write(&file_path, &content);
+            }
+            if let Err(error) = fs::write(&path, &file.contents) {
+                self.status_message = format!("Could not write project template: {error}");
+                return false;
+            }
+        }
+        if language == "Python" && environment == "venv" {
+            folders.push(".venv".to_string());
+        }
+        let primary = template
+            .files
+            .iter()
+            .rev()
+            .find(|file| !matches!(file.path.as_str(), "Cargo.toml" | "go.mod" | ".gitignore"))
+            .or_else(|| template.files.first())
+            .expect("project templates always contain a file");
+        let file_path = root.join(&primary.path);
+        let file_name = primary.path.clone();
+        let content = primary.contents.clone();
         self.project_name = name.to_string();
         self.project_path = Some(root.clone());
         self.folders = folders;
@@ -5223,7 +5678,7 @@ impl App {
     fn handle_click(&mut self, x: i32, y: i32, button: u32, state: c_uint) {
         let scale = self.scale();
         let s = move |v: i32| (v as f32 * scale).round() as i32;
-        let graph_left = (self.width as f32 * 0.61) as i32;
+        let graph_left = self.graph_left();
         if let Some((menu_x, menu_y)) = self.workspace_context_menu {
             if button == 1
                 && x >= menu_x
@@ -5342,6 +5797,32 @@ impl App {
                 self.code_zoom = (self.code_zoom - 1).max(-2);
             }
             self.reload_code_font();
+            return;
+        }
+        let workspace_right = (self.width as f32 * 0.17) as i32;
+        let debug_x = workspace_right + s(174);
+        if button == 1 && y >= s(52) && y <= s(77) && x >= debug_x && x < debug_x + s(312) {
+            match ((x - debug_x) / s(78).max(1)).clamp(0, 3) {
+                0 => self.toggle_breakpoint(),
+                1 => self.start_or_continue_debugging(),
+                2 => self.step_debugging(),
+                _ => self.stop_debugging(),
+            }
+            return;
+        }
+        if button == 1 && self.terminal_open && (y - self.terminal_top()).abs() <= s(7) {
+            self.panel_drag = Some(PanelDrag::Terminal);
+            self.editor_focused = false;
+            return;
+        }
+        if button == 1
+            && self.graph_visible
+            && (x - graph_left).abs() <= s(7)
+            && y >= s(46)
+            && y < self.terminal_top()
+        {
+            self.panel_drag = Some(PanelDrag::CallHierarchy);
+            self.editor_focused = false;
             return;
         }
         if button == 1 && x >= graph_left && y >= s(52) && y <= s(77) {
@@ -5464,10 +5945,55 @@ impl App {
         if x >= s(207) && x <= s(295) && y < s(46) {
             self.edit_menu_open = !self.edit_menu_open;
             self.new_menu_open = false;
+            self.view_menu_open = false;
             self.settings_open = false;
             self.extensions_open = false;
             self.package_open = false;
             return;
+        }
+        if x >= s(302) && x <= s(390) && y < s(46) {
+            self.view_menu_open = !self.view_menu_open;
+            self.new_menu_open = false;
+            self.edit_menu_open = false;
+            self.settings_open = false;
+            self.extensions_open = false;
+            self.package_open = false;
+            self.editor_focused = false;
+            return;
+        }
+        if self.view_menu_open {
+            let menu_x = s(302);
+            let menu_y = s(43);
+            if button == 1
+                && x >= menu_x
+                && x <= menu_x + s(280)
+                && y >= menu_y + s(29)
+                && y <= menu_y + s(105)
+            {
+                let index = ((y - menu_y - s(29)) / s(36).max(1)).clamp(0, 1);
+                if index == 0 {
+                    self.graph_visible = !self.graph_visible;
+                    self.status_message = self
+                        .tr(
+                            if self.graph_visible {
+                                "Call hierarchy shown"
+                            } else {
+                                "Call hierarchy hidden"
+                            },
+                            if self.graph_visible {
+                                "已显示调用层级"
+                            } else {
+                                "已隐藏调用层级"
+                            },
+                        )
+                        .into();
+                } else {
+                    self.terminal_open = !self.terminal_open;
+                    self.terminal_focused = self.terminal_open;
+                }
+                return;
+            }
+            self.view_menu_open = false;
         }
         if self.edit_menu_open {
             let menu_x = s(207);
@@ -5776,12 +6302,7 @@ impl App {
             }
             self.package_open = false;
         }
-        let workspace_right = (self.width as f32 * 0.17) as i32;
-        let terminal_top = if self.terminal_open {
-            self.height - s(230)
-        } else {
-            self.height - s(28)
-        };
+        let terminal_top = self.terminal_top();
         if y >= terminal_top {
             if !self.terminal_open {
                 self.terminal_open = true;
@@ -6003,6 +6524,22 @@ impl App {
             .collect::<Vec<_>>();
         let input = std::str::from_utf8(&bytes).unwrap_or("");
         let control = event.state & CONTROL_MASK != 0;
+        if keysym == F9_KEYSYM {
+            self.toggle_breakpoint();
+            return true;
+        }
+        if keysym == F5_KEYSYM {
+            if event.state & SHIFT_MASK != 0 {
+                self.stop_debugging();
+            } else {
+                self.start_or_continue_debugging();
+            }
+            return true;
+        }
+        if keysym == F10_KEYSYM {
+            self.step_debugging();
+            return true;
+        }
         if self.terminal_focused {
             if keysym == ESCAPE_KEYSYM {
                 self.terminal_focused = false;
@@ -6441,7 +6978,7 @@ impl App {
         }
         let s = |v| self.s(v);
         let left = (self.width as f32 * 0.17) as i32;
-        let graph = (self.width as f32 * 0.61) as i32;
+        let graph = self.graph_left();
         if x < left || x >= graph || y < s(85) {
             return;
         }
@@ -6469,11 +7006,38 @@ impl App {
         }
     }
 
+    fn update_panel_drag(&mut self, x: i32, y: i32, state: c_uint) {
+        let Some(panel) = self.panel_drag else {
+            return;
+        };
+        if state & BUTTON1_MASK == 0 {
+            self.panel_drag = None;
+            return;
+        }
+        match panel {
+            PanelDrag::CallHierarchy => {
+                let minimum = self.s(260) as f32 / self.width.max(1) as f32;
+                let maximum = 1.0
+                    - ((self.width as f32 * 0.17) + self.s(360) as f32) / self.width.max(1) as f32;
+                self.graph_fraction = (1.0 - x as f32 / self.width.max(1) as f32)
+                    .clamp(minimum, maximum.max(minimum));
+                self.status_message = self
+                    .tr("Resizing call hierarchy", "正在调整调用层级宽度")
+                    .into();
+            }
+            PanelDrag::Terminal => {
+                self.terminal_height =
+                    (self.height - y).clamp(self.s(150), self.height - self.s(150));
+                self.status_message = self.tr("Resizing terminal", "正在调整终端高度").into();
+            }
+        }
+    }
+
     fn update_hover(&mut self) {
         let scale = self.scale();
         let s = move |v: i32| (v as f32 * scale).round() as i32;
         let left = (self.width as f32 * 0.17) as i32;
-        let graph = (self.width as f32 * 0.61) as i32;
+        let graph = self.graph_left();
         if self.mouse_x >= left && self.mouse_x < graph && self.mouse_y > s(90) {
             let row = ((self.mouse_y - s(119) + self.code_line_step() / 2)
                 / self.code_line_step().max(1))
@@ -7093,62 +7657,20 @@ fn symbol_role(line: &str, symbol: &str) -> (&'static str, &'static str) {
     }
 }
 
-fn syntax_tokens(value: &str, keywords: &[&str]) -> Vec<(String, u8)> {
-    let chars = value.chars().collect::<Vec<_>>();
-    let mut result = Vec::new();
-    let mut index = 0;
-    while index < chars.len() {
-        let start = index;
-        let kind: u8 = if chars[index] == '"' || chars[index] == '\'' {
-            let quote = chars[index];
-            index += 1;
-            while index < chars.len() {
-                let escaped = index > start && chars[index - 1] == '\\';
-                let done = chars[index] == quote && !escaped;
-                index += 1;
-                if done {
-                    break;
-                }
-            }
-            2
-        } else if chars[index].is_ascii_alphabetic() || chars[index] == '_' {
-            index += 1;
-            while index < chars.len()
-                && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
-            {
-                index += 1;
-            }
-            let word = chars[start..index].iter().collect::<String>();
-            let value = if keywords.contains(&word.as_str()) {
-                1
-            } else {
-                0
-            };
-            result.push((word, value));
-            continue;
-        } else if chars[index].is_ascii_digit() {
-            index += 1;
-            while index < chars.len()
-                && (chars[index].is_ascii_alphanumeric() || chars[index] == '.')
-            {
-                index += 1;
-            }
-            2
-        } else {
-            index += 1;
-            while index < chars.len()
-                && !chars[index].is_ascii_alphanumeric()
-                && chars[index] != '_'
-                && chars[index] != '"'
-                && chars[index] != '\''
-            {
-                index += 1;
-            }
-            0
-        };
-        result.push((chars[start..index].iter().collect(), kind));
+fn extension_for_language(language: &str) -> &'static str {
+    match language {
+        "C" => "c",
+        "C++" => "cpp",
+        "Python" => "py",
+        "Rust" => "rs",
+        "Java" => "java",
+        "Go" => "go",
+        "TypeScript" => "ts",
+        "JavaScript" => "js",
+        "HTML" => "html",
+        "CSS" => "css",
+        _ => "txt",
     }
-    result
 }
 
 fn completion_words_for_language(language: &str) -> &'static [&'static str] {
@@ -7590,6 +8112,17 @@ pub fn run() {
             text: color(display, map, &theme_core::Palette::hex(palette.text)),
             bright: color(display, map, &theme_core::Palette::hex(palette.bright)),
             accent: color(display, map, &theme_core::Palette::hex(palette.accent)),
+            keyword: color(display, map, &theme_core::Palette::hex(palette.keyword)),
+            syntax_type: color(display, map, &theme_core::Palette::hex(palette.syntax_type)),
+            function: color(display, map, &theme_core::Palette::hex(palette.function)),
+            constant: color(display, map, &theme_core::Palette::hex(palette.constant)),
+            preprocessor: color(
+                display,
+                map,
+                &theme_core::Palette::hex(palette.preprocessor),
+            ),
+            literal: color(display, map, &theme_core::Palette::hex(palette.literal)),
+            comment: color(display, map, &theme_core::Palette::hex(palette.comment)),
             project: color(display, map, &theme_core::Palette::hex(palette.selection)),
             shadow: color(display, map, &theme_core::Palette::hex(palette.shadow)),
         };
@@ -7669,6 +8202,7 @@ pub fn run() {
             font_search: String::new(),
             font_search_focused: false,
             edit_menu_open: false,
+            view_menu_open: false,
             workspace_search: String::new(),
             workspace_search_focused: false,
             project_tree_expanded: true,
@@ -7678,18 +8212,28 @@ pub fn run() {
             tree_motion_updated: Instant::now(),
             new_menu_motion: UiMotion::new(0.0),
             edit_menu_motion: UiMotion::new(0.0),
+            view_menu_motion: UiMotion::new(0.0),
             settings_motion: UiMotion::new(0.0),
             package_motion: UiMotion::new(0.0),
             extensions_motion: UiMotion::new(0.0),
             create_motion: UiMotion::new(0.0),
             terminal_motion: UiMotion::new(0.0),
+            graph_motion: UiMotion::new(1.0),
             collapsed_folders: BTreeSet::new(),
             terminal_open: false,
+            terminal_height: (230.0 * (width as f32 / 1440.0).clamp(0.85, 2.0)).round() as i32,
             terminal_focused: false,
             terminal_active: 0,
             terminals: default_terminals(),
             terminal_menu_open: false,
             graph_current: true,
+            graph_visible: true,
+            graph_fraction: 0.39,
+            panel_drag: None,
+            breakpoints: dap_core::Breakpoints::new(),
+            debug_session: None,
+            debug_state: dap_core::DebugState::default(),
+            debug_stop_seen: String::new(),
             graph_zoom: 1.0,
             session: session_core::Session::default(),
             runtime_cache: extension_core::RuntimeCache::default(),
@@ -7798,6 +8342,7 @@ pub fn run() {
                         let motion = event.motion;
                         app.mouse_x = motion.x;
                         app.mouse_y = motion.y;
+                        app.update_panel_drag(motion.x, motion.y, motion.state);
                         app.update_drag_selection(motion.x, motion.y, motion.state);
                         app.update_background_drag(motion.x, motion.y, motion.state);
                         if motion.state & BUTTON1_MASK == 0 {
@@ -8093,16 +8638,13 @@ mod tests {
 
     #[test]
     fn syntax_highlighting_classifies_cpp_keywords_and_strings() {
-        let tokens = syntax_tokens(
-            "constexpr auto name = \"TCI\";",
-            completion_words_for_language("C++"),
-        );
+        let tokens = editor_core::syntax_tokens("constexpr auto name = \"TCI\";", "main.cpp");
+        assert!(tokens.iter().any(
+            |token| token.text == "constexpr" && token.kind == editor_core::TokenKind::Keyword
+        ));
         assert!(tokens
             .iter()
-            .any(|(token, kind)| token == "constexpr" && *kind == 1));
-        assert!(tokens
-            .iter()
-            .any(|(token, kind)| token == "\"TCI\"" && *kind == 2));
+            .any(|token| token.text == "\"TCI\"" && token.kind == editor_core::TokenKind::Literal));
     }
 
     #[test]

@@ -322,6 +322,10 @@ fn visible_token(text: &str, start: usize, scroll: usize) -> Option<(usize, Stri
 fn token_color(palette: &theme_core::Palette, kind: editor_core::TokenKind) -> u32 {
     match kind {
         editor_core::TokenKind::Keyword => palette.keyword,
+        editor_core::TokenKind::Type => palette.syntax_type,
+        editor_core::TokenKind::Function => palette.function,
+        editor_core::TokenKind::Constant => palette.constant,
+        editor_core::TokenKind::Preprocessor => palette.preprocessor,
         editor_core::TokenKind::Literal => palette.literal,
         editor_core::TokenKind::Comment => palette.comment,
         editor_core::TokenKind::Plain => palette.text,
@@ -4458,6 +4462,10 @@ mod tests {
         let kinds = [
             editor_core::TokenKind::Plain,
             editor_core::TokenKind::Keyword,
+            editor_core::TokenKind::Type,
+            editor_core::TokenKind::Function,
+            editor_core::TokenKind::Constant,
+            editor_core::TokenKind::Preprocessor,
             editor_core::TokenKind::Literal,
             editor_core::TokenKind::Comment,
         ];

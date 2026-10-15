@@ -5,6 +5,10 @@
 pub enum TokenKind {
     Plain,
     Keyword,
+    Type,
+    Function,
+    Constant,
+    Preprocessor,
     Literal,
     Comment,
 }
@@ -621,7 +625,19 @@ fn syntax_tokens_without_comment(value: &str, file: &str) -> Vec<SyntaxToken> {
     let mut index = 0;
     while index < chars.len() {
         let start = index;
-        let kind = if chars[index] == '"' || chars[index] == '\'' {
+        let kind = if chars[index] == '#'
+            && value[..value.char_indices().nth(index).map(|v| v.0).unwrap_or(0)]
+                .trim()
+                .is_empty()
+        {
+            index += 1;
+            while index < chars.len()
+                && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
+            {
+                index += 1;
+            }
+            TokenKind::Preprocessor
+        } else if chars[index] == '"' || chars[index] == '\'' {
             let quote = chars[index];
             index += 1;
             while index < chars.len() {
@@ -640,9 +656,57 @@ fn syntax_tokens_without_comment(value: &str, file: &str) -> Vec<SyntaxToken> {
                 index += 1;
             }
             let word = chars[start..index].iter().collect::<String>();
+            let next = chars[index..]
+                .iter()
+                .position(|ch| !ch.is_whitespace())
+                .map(|offset| chars[index + offset]);
+            let known_type = matches!(
+                word.as_str(),
+                "bool"
+                    | "char"
+                    | "double"
+                    | "float"
+                    | "int"
+                    | "long"
+                    | "short"
+                    | "signed"
+                    | "size_t"
+                    | "string"
+                    | "unsigned"
+                    | "void"
+                    | "String"
+                    | "str"
+                    | "usize"
+                    | "isize"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "u128"
+                    | "i8"
+                    | "i16"
+                    | "i32"
+                    | "i64"
+                    | "i128"
+                    | "f32"
+                    | "f64"
+            );
+            let constant = word.len() > 1
+                && word.chars().any(|ch| ch.is_ascii_alphabetic())
+                && word
+                    .chars()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_');
             result.push(SyntaxToken {
-                kind: if keywords.contains(&word.as_str()) {
+                kind: if known_type {
+                    TokenKind::Type
+                } else if constant {
+                    TokenKind::Constant
+                } else if keywords.contains(&word.as_str()) {
                     TokenKind::Keyword
+                } else if word.chars().next().is_some_and(char::is_uppercase) {
+                    TokenKind::Type
+                } else if next == Some('(') {
+                    TokenKind::Function
                 } else {
                     TokenKind::Plain
                 },
@@ -753,6 +817,29 @@ mod tests {
             tokens.last().map(|token| token.kind),
             Some(TokenKind::Comment)
         );
+    }
+
+    #[test]
+    fn cpp_semantic_categories_are_visually_distinct() {
+        let tokens = syntax_tokens(
+            "#include <iostream>\nint main() { return LIMIT + 42; }",
+            "main.cpp",
+        );
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::Preprocessor));
+        assert!(tokens
+            .iter()
+            .any(|token| token.text == "int" && token.kind == TokenKind::Type));
+        assert!(tokens
+            .iter()
+            .any(|token| token.text == "main" && token.kind == TokenKind::Function));
+        assert!(tokens
+            .iter()
+            .any(|token| token.text == "LIMIT" && token.kind == TokenKind::Constant));
+        assert!(tokens
+            .iter()
+            .any(|token| token.text == "42" && token.kind == TokenKind::Literal));
     }
 
     #[test]

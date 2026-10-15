@@ -2412,6 +2412,10 @@ impl DirectEditorRenderer {
         let selection = unsafe { Self::brush(&target_base, palette.selection, 1.0) }?;
         let selected_text = unsafe { Self::brush(&target_base, palette.selected_text, 0.46) }?;
         let keyword = unsafe { Self::brush(&target_base, palette.keyword, 1.0) }?;
+        let syntax_type = unsafe { Self::brush(&target_base, palette.syntax_type, 1.0) }?;
+        let function = unsafe { Self::brush(&target_base, palette.function, 1.0) }?;
+        let constant = unsafe { Self::brush(&target_base, palette.constant, 1.0) }?;
+        let preprocessor = unsafe { Self::brush(&target_base, palette.preprocessor, 1.0) }?;
         let literal = unsafe { Self::brush(&target_base, palette.literal, 1.0) }?;
         let comment = unsafe { Self::brush(&target_base, palette.comment, 1.0) }?;
         let width = width as f32;
@@ -2879,6 +2883,10 @@ impl DirectEditorRenderer {
                     Self::visual_cells(&token.text, token.text.chars().count()) as f32;
                 let token_brush = match token.kind {
                     TokenKind::Keyword => &keyword,
+                    TokenKind::Type => &syntax_type,
+                    TokenKind::Function => &function,
+                    TokenKind::Constant => &constant,
+                    TokenKind::Preprocessor => &preprocessor,
                     TokenKind::Literal => &literal,
                     TokenKind::Comment => &comment,
                     TokenKind::Plain => &text,

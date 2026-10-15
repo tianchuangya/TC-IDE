@@ -1,6 +1,6 @@
 # TC-IDE 进度交接（给下一个 AI）
 
-> 生成时间：第 19 轮结束时。工作目录 `/home/tianchuangya/桌面/TC-IDE`，分支 `main`。
+> 生成时间：第 21 轮结束时。工作目录 `/home/tianchuangya/桌面/TC-IDE`，分支 `main`。
 > 本文件描述**当前真实状态**：做了什么、怎么验证、还差什么、以及**已知的失败**。
 > 与 `docs/HANDOFF.md`（原始需求队列，权威）配合阅读：本文件是"进度快照 + 接手说明"，HANDOFF 是"任务清单"。
 
@@ -11,7 +11,7 @@
 - 项目：**TC-IDE**，原生 Rust 多平台 IDE，**零第三方运行时依赖**（Linux 手写 X11/Cairo/Pango FFI，Windows 用 `windows` crate 但仅 cfg 内，macOS 手写 Objective-C 运行时 FFI，没有 WebView / 没有 HTML）。
 - 三个后端：`linux_app.rs`（成熟）、`windows_app.rs` + `windows_app/`（成熟，14 个模块）、`macos_app.rs`（**最近 7 轮从 5 行占位发展到 4585 行可用后端**）。
 - 共享纯逻辑内核（跨平台、在 Linux 上就能跑单元测试）：`editor_core`、`editor_session`、`graph_core`、`terminal_core`、`text_buffer`、`session_core`、`workspace_core`、`ai_core`、`extension_core`、`lsp_core`、`dap_core`、`syntax_core`、`index_core`、`motion_core`、`package_motion`、`background_core`、`theme_core`，共 **17 个**，全部在 `main.rs` 声明，并被 `tests/platform_boundary.rs` 守着（禁止平台类型/`unsafe` 泄漏进共享核心）。
-- 本地测试：**234 项共享内核测试 + 4 项平台边界测试 + 3 项模块结构测试**（`cargo test --all-targets`），另有只在各平台 CI 里跑的 Windows/macOS 专属测试。
+- 本地测试：**235 项共享内核/平台后端测试 + 4 项平台边界测试 + 3 项模块结构测试**（`cargo test --all-targets`），另有只在各平台 CI 里跑的 Windows/macOS 专属测试。
 - 任务队列（`docs/HANDOFF.md` 第 5 节）：**40 项已勾选 / 3 项部分完成 / 0 项未开始**。
 - 当前 CI 已恢复全绿：`ba427f2` 的 format / Linux / Windows typecheck / Windows / macOS 五个 job 全部通过。
 
@@ -43,6 +43,14 @@ docs/
 ---
 
 ## 2. 最近各轮做了什么（按提交，新→旧）
+
+### 第 21 轮
+
+- Linux 新建项目统一走共享模板：C++ 是 `main.cpp`，不再生成开头说明注释。
+- Linux 接入共享 DAP 会话、断点、继续/停止/单步，停止后抓取栈/作用域/变量；源码上方绘制带连线的变量值标签和当前执行流。
+- 新增“查看”菜单；调用层级和终端可独立隐藏，分隔线可拖动，开关/栏位使用原生弹簧过渡。
+- 三平台语法颜色增加类型、函数、常量、预处理指令，深浅主题均通过对比度测试；CI 新增 debug/view 原生帧烟雾测试。
+- 本地 Linux、Windows MSVC 目标、macOS 目标的 `check` 与 `clippy -D warnings` 均通过；仍需等待本轮推送后的 GitHub Actions 结果。
 
 ### 第 20 轮
 

@@ -43,6 +43,14 @@ pub struct Palette {
     pub selected_text: u32,
     /// Syntax colour of a keyword.
     pub keyword: u32,
+    /// Syntax colour of a type name.
+    pub syntax_type: u32,
+    /// Syntax colour of a function or method name.
+    pub function: u32,
+    /// Syntax colour of a named constant.
+    pub constant: u32,
+    /// Syntax colour of a preprocessor directive.
+    pub preprocessor: u32,
     /// Syntax colour of a literal.
     pub literal: u32,
     /// Syntax colour of a comment.
@@ -68,6 +76,10 @@ impl Palette {
             selection: 0x193451,
             selected_text: 0x0a84ff,
             keyword: 0x64d2ff,
+            syntax_type: 0x30d158,
+            function: 0xbf5af2,
+            constant: 0xffd60a,
+            preprocessor: 0xff375f,
             literal: 0xff9f0a,
             comment: 0x8e8e93,
             shadow: 0x050506,
@@ -92,6 +104,10 @@ impl Palette {
             selection: 0xdbeafe,
             selected_text: 0x0a5aa8,
             keyword: 0x0b5394,
+            syntax_type: 0x146b2e,
+            function: 0x71317f,
+            constant: 0x785700,
+            preprocessor: 0x9e1b3d,
             literal: 0x8a4b08,
             comment: 0x5f6368,
             shadow: 0xc7c7cc,
@@ -113,7 +129,7 @@ impl Palette {
     }
 
     /// Every colour of the palette, for a test that walks all of them.
-    pub fn all(&self) -> [(&'static str, u32); 14] {
+    pub fn all(&self) -> [(&'static str, u32); 18] {
         [
             ("background", self.background),
             ("panel", self.panel),
@@ -126,6 +142,10 @@ impl Palette {
             ("selection", self.selection),
             ("selected_text", self.selected_text),
             ("keyword", self.keyword),
+            ("type", self.syntax_type),
+            ("function", self.function),
+            ("constant", self.constant),
+            ("preprocessor", self.preprocessor),
             ("literal", self.literal),
             ("comment", self.comment),
             ("shadow", self.shadow),
@@ -301,6 +321,10 @@ mod tests {
             for background in [palette.background, palette.panel] {
                 for (role, colour) in [
                     ("keyword", palette.keyword),
+                    ("type", palette.syntax_type),
+                    ("function", palette.function),
+                    ("constant", palette.constant),
+                    ("preprocessor", palette.preprocessor),
                     ("literal", palette.literal),
                     ("comment", palette.comment),
                 ] {
@@ -382,7 +406,7 @@ mod tests {
         assert_eq!(Palette::for_scheme(true), Palette::light());
         assert_eq!(Palette::for_scheme(false), Palette::dark());
         let dark = Palette::dark();
-        assert_eq!(dark.all().len(), 14);
+        assert_eq!(dark.all().len(), 18);
         assert!(dark
             .all()
             .iter()
