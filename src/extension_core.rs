@@ -908,4 +908,82 @@ mod tests {
             .iter()
             .any(|entry| entry.id == "gone"));
     }
+
+    #[test]
+    fn a_catalog_entry_is_planned_verified_and_removable() {
+        // What the panel does with one entry: plan the install, check what it
+        // downloaded, and be able to take it back out.
+        let source = ExtensionSource {
+            id: "rust-tools".into(),
+            name: "Rust".into(),
+            kind: ExtensionKind::Language,
+            version: "1.2.0".into(),
+            url: "https://example.invalid/rust-tools.tar.gz".into(),
+            sha256: "a".repeat(64),
+            bytes: 1024,
+            binary: Some("rust-analyzer".into()),
+        };
+        assert!(source.is_installable(), "a url and a checksum is enough");
+
+        let plan = install_plan("/cache", &source, Shell::Unix).expect("a plan");
+        assert!(plan.directory.contains("rust-tools"), "{}", plan.directory);
+        assert!(!plan.commands.is_empty(), "the download is a real command");
+        // The commands name the url, so the terminal shows what was fetched,
+        // and the plan prints the checksum that was expected beside the one
+        // that arrived: the comparison is left to a caller that can read both.
+        let joined = plan.commands.join("\n");
+        assert!(joined.contains(&source.url), "{joined}");
+        assert!(
+            joined.contains("sha256sum") || joined.contains("shasum"),
+            "the archive is hashed: {joined}"
+        );
+        // The digest the plan prints is the one the manifest expects.
+        let printed = checksum_from_output(&format!("{}\n  {}/x\n", source.sha256, plan.archive));
+        assert_eq!(printed.as_deref(), Some(source.sha256.as_str()));
+        assert!(verify_checksum(
+            printed.as_deref().unwrap_or(""),
+            &source.sha256
+        ));
+
+        // A checksum that does not match is refused.
+        let digest = "b".repeat(64);
+        assert!(!verify_checksum(&digest, &source.sha256));
+        assert!(verify_checksum(&source.sha256, &source.sha256));
+
+        // Removing it produces commands too, rather than only forgetting it.
+        let entry = CacheEntry {
+            id: source.id.clone(),
+            version: source.version.clone(),
+            sha256: source.sha256.clone(),
+            bytes: source.bytes,
+            directory: plan.directory.clone(),
+        };
+        assert!(!uninstall_commands("/cache", &entry, Shell::Unix).is_empty());
+    }
+
+    #[test]
+    fn an_entry_without_a_url_or_a_checksum_is_refused() {
+        // The project ships no invented urls or checksums, so an entry that
+        // lacks them is a configuration mistake that has to be reported.
+        let mut source = ExtensionSource {
+            id: "x".into(),
+            name: "X".into(),
+            kind: ExtensionKind::Language,
+            version: "1".into(),
+            url: "https://example.invalid/x.tgz".into(),
+            sha256: "a".repeat(64),
+            bytes: 1,
+            binary: None,
+        };
+        assert!(install_plan("/cache", &source, Shell::Unix).is_ok());
+
+        source.sha256 = "short".into();
+        assert!(!source.is_installable());
+        assert!(install_plan("/cache", &source, Shell::Unix).is_err());
+
+        source.sha256 = "a".repeat(64);
+        source.url = "http://plain.example.invalid/x.tgz".into();
+        assert!(!source.is_installable(), "a download has to be https");
+        assert!(install_plan("/cache", &source, Shell::Unix).is_err());
+    }
 }

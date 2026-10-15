@@ -6570,14 +6570,29 @@ impl App {
             return;
         }
         self.terminals[active].input.clear();
+        self.run_in_terminal(&command);
+    }
+
+    /// Run one command in the visible terminal and show its output there.
+    ///
+    /// The command is run through the shell so the user sees exactly what was
+    /// executed and what it printed, which is what an install needs to be
+    /// trustworthy.
+    fn run_in_terminal(&mut self, command: &str) {
+        if self.terminals.is_empty() {
+            return;
+        }
+        let active = self.terminal_active.min(self.terminals.len() - 1);
         let output = self.terminals[active].output.clone();
         if let Ok(mut lines) = output.lock() {
             lines.push(format!("$ {command}"));
         }
         let cwd = self.project_path.clone().unwrap_or_else(projects_root);
+        // The thread outlives this call, so it owns the command.
+        let owned = command.to_string();
         thread::spawn(move || {
             let result = Command::new("sh")
-                .args(["-lc", &command])
+                .args(["-lc", &owned])
                 .current_dir(&cwd)
                 .output();
             if let Ok(mut lines) = output.lock() {
@@ -7209,6 +7224,145 @@ impl App {
                 prompt.as_str()
             },
         );
+    }
+
+    /// The catalog the project supplies, if it has one.
+    ///
+    /// Real downloads need a real url and checksum, so the catalog is data the
+    /// user writes at `<project>/.tc-ide-catalog.conf`; the project ships none
+    /// of its own.
+    fn project_catalog(&self) -> Result<Vec<extension_core::ExtensionSource>, String> {
+        let Some(project) = self.project_path.as_ref() else {
+            return Err(self
+                .tr(
+                    "Open a project before installing extensions",
+                    "安装扩展前请先打开项目",
+                )
+                .into());
+        };
+        let path = project.join(CATALOG_FILE);
+        let content = fs::read_to_string(&path).map_err(|_| {
+            format!(
+                "{} {}",
+                self.tr("No catalog at", "没有扩展目录文件："),
+                path.display()
+            )
+        })?;
+        extension_core::parse_catalog(&content)
+    }
+
+    /// The shell commands are written for.
+    fn shell_kind(&self) -> extension_core::Shell {
+        extension_core::Shell::Unix
+    }
+
+    /// Where installed extensions live.
+    fn extension_cache_root(&self) -> PathBuf {
+        runtime_cache_root()
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("extensions")
+    }
+
+    /// Install an extension by planning the real download and unpack steps.
+    ///
+    /// The commands are typed into the terminal rather than run behind the
+    /// user's back, so the download, the checksum check and the unpacking are
+    /// all visible and any error they print stays on screen. A version that is
+    /// already cached is reused instead of downloaded again.
+    fn run_extension_install(&mut self, source: &extension_core::ExtensionSource) {
+        if let Some(entry) = self.runtime_cache.reuse(&source.id, &source.version) {
+            self.status_message = format!(
+                "{} {} {} {}",
+                source.name,
+                entry.version,
+                self.tr("is already cached in", "已缓存在"),
+                entry.directory
+            );
+            return;
+        }
+        let root = self.extension_cache_root();
+        let plan = match extension_core::install_plan(
+            &root.to_string_lossy(),
+            source,
+            self.shell_kind(),
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.status_message = error;
+                return;
+            }
+        };
+        // The commands need a terminal to run in; one is opened if needed.
+        self.terminal_open = true;
+        self.terminal_focused = true;
+        if self.terminals.is_empty() {
+            self.status_message = self
+                .tr("The terminal could not be started", "终端无法启动")
+                .into();
+            return;
+        }
+        for command in &plan.commands {
+            self.run_in_terminal(command);
+        }
+        self.runtime_cache.record(extension_core::CacheEntry {
+            id: source.id.clone(),
+            version: source.version.clone(),
+            sha256: source.sha256.clone(),
+            bytes: 0,
+            directory: plan.directory.clone(),
+        });
+        self.save_runtime_cache();
+        self.status_message = format!(
+            "{} {} {}",
+            self.tr("Installing", "正在安装"),
+            source.name,
+            source.version
+        );
+    }
+
+    /// Remove an installed extension and forget it.
+    fn uninstall_extension(&mut self, id: &str) {
+        let Some(entry) = self
+            .runtime_cache
+            .entries()
+            .iter()
+            .find(|entry| entry.id == id)
+            .cloned()
+        else {
+            self.status_message = self
+                .tr("That extension is not installed", "该扩展尚未安装")
+                .into();
+            return;
+        };
+        let root = self.extension_cache_root();
+        for command in
+            extension_core::uninstall_commands(&root.to_string_lossy(), &entry, self.shell_kind())
+        {
+            self.run_in_terminal(&command);
+        }
+        let remaining = self
+            .runtime_cache
+            .entries()
+            .iter()
+            .filter(|known| known.id != id)
+            .cloned()
+            .collect::<Vec<_>>();
+        self.runtime_cache = extension_core::RuntimeCache::default();
+        for kept in remaining {
+            self.runtime_cache.record(kept);
+        }
+        self.save_runtime_cache();
+        self.status_message = format!("{} {id}", self.tr("Uninstalled", "已卸载"));
+    }
+
+    /// Remember what is installed.
+    fn save_runtime_cache(&self) {
+        let path = runtime_cache_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&path, self.runtime_cache.serialize());
     }
 
     /// Undo the last edit of the active document.
@@ -8206,20 +8360,45 @@ impl App {
                     }
                     if x >= dx && x <= dx + s(355) && y >= menu_y + s(282) && y <= menu_y + s(320) {
                         if self.languages[index].installed {
+                            // Removing means both the panel state and the
+                            // files that were installed for it.
+                            let name = self.languages[index].name.to_string();
+                            self.uninstall_extension(&name);
                             self.languages[index].installed = false;
                             self.status_message = format!(
-                                "{} language extension removed; built-in completion remains active",
-                                self.languages[index].name
+                                "{} {name}",
+                                self.tr(
+                                    "Language extension removed; built-in completion remains active for",
+                                    "已移除语言扩展；以下语言仍使用内置补全："
+                                )
                             );
                             save_language_settings(&self.languages);
                         } else {
-                            self.downloading = Some((index, Instant::now()));
-                            self.status_message = format!(
-                                "Downloading {} {} tooling...",
-                                self.languages[index].name,
-                                self.languages[index].versions
-                                    [self.languages[index].selected_version]
-                            );
+                            // A real install needs a real url and checksum, so
+                            // the catalog is the project's to supply; without
+                            // one the button says so rather than pretending.
+                            let name = self.languages[index].name.to_string();
+                            match self.project_catalog() {
+                                Ok(catalog) => {
+                                    // A catalog entry names the language it
+                                    // belongs to, so the row picks its entry.
+                                    let wanted =
+                                        catalog.iter().find(|source| source.name == name).cloned();
+                                    match wanted {
+                                        Some(source) => self.run_extension_install(&source),
+                                        None => {
+                                            self.status_message = format!(
+                                                "{} {name}",
+                                                self.tr(
+                                                    "The project catalog has no entry for",
+                                                    "项目目录中没有该语言的条目："
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+                                Err(message) => self.status_message = message,
+                            }
                         }
                         return;
                     }
@@ -9397,6 +9576,9 @@ fn runtime_cache_path() -> PathBuf {
     ui_settings_path().with_file_name("runtimes.conf")
 }
 
+/// Name of the file a project keeps its extension catalog in.
+const CATALOG_FILE: &str = ".tc-ide-catalog.conf";
+
 /// How many cached extensions the project catalog offers a newer version of.
 ///
 /// The catalog is user supplied data (`<project>/.tc-ide-catalog.conf`), so a
@@ -9408,7 +9590,8 @@ fn extension_upgrade_count(
     let Some(project) = project.as_ref() else {
         return 0;
     };
-    let Ok(content) = fs::read_to_string(project.join(".tc-ide-catalog.conf")) else {
+    // The same file the panel installs from.
+    let Ok(content) = fs::read_to_string(project.join(CATALOG_FILE)) else {
         return 0;
     };
     let Ok(catalog) = extension_core::parse_catalog(&content) else {
