@@ -26,6 +26,7 @@ use crate::package_motion;
 use crate::session_core;
 use crate::syntax_core;
 use crate::terminal_core;
+use crate::text_buffer;
 use crate::theme_core;
 use crate::workspace_core;
 
@@ -452,6 +453,27 @@ struct FileBuffer {
     name: String,
     path: PathBuf,
     lines: Vec<String>,
+    /// Piece table behind the lines, holding the edit history.
+    buffer: text_buffer::TextBuffer,
+}
+impl FileBuffer {
+    /// A buffer with its own edit history, so undo works per document.
+    fn new(name: String, path: PathBuf, lines: Vec<String>) -> Self {
+        Self {
+            buffer: text_buffer::TextBuffer::from_lines(&lines),
+            name,
+            path,
+            lines,
+        }
+    }
+
+    /// Rebuild the rendered lines from the piece table.
+    ///
+    /// Edits go through the buffer and the lines are read back out of it, so
+    /// the two cannot disagree and the history stays correct.
+    fn sync(&mut self) {
+        self.lines = self.buffer.to_lines();
+    }
 }
 
 struct TerminalSession {
@@ -3216,7 +3238,7 @@ impl App {
                 if lines.is_empty() {
                     lines.push(String::new());
                 }
-                self.files.push(FileBuffer { name, path, lines });
+                self.files.push(FileBuffer::new(name, path, lines));
                 self.selected_file = self.files.len() - 1;
                 self.caret_line = 0;
                 self.caret_column = 0;
@@ -3287,14 +3309,13 @@ impl App {
             if lines.is_empty() {
                 lines.push(String::new());
             }
-            files.push(FileBuffer {
-                name: path
-                    .file_name()
+            files.push(FileBuffer::new(
+                path.file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default(),
                 path,
                 lines,
-            });
+            ));
         }
         if !files.is_empty() {
             self.files = files;
@@ -4080,10 +4101,12 @@ impl App {
         let x = s(207);
         let y = s(43) + self.overlay_offset(self.edit_menu_motion);
         let w = s(260);
-        let h = s(190);
+        let h = s(244);
         self.floating_panel(x, y, w, h);
         let labels = if self.ui_chinese {
             [
+                "撤销",
+                "重做",
                 "保存",
                 "全选",
                 "复制",
@@ -4093,6 +4116,8 @@ impl App {
             ]
         } else {
             [
+                "Undo",
+                "Redo",
                 "Save",
                 "Select All",
                 "Copy",
@@ -4103,7 +4128,9 @@ impl App {
         };
         for (index, (label, key)) in labels
             .iter()
-            .zip(["Ctrl+S", "Ctrl+A", "Ctrl+C", "Ctrl+V", "Ctrl++", "Ctrl+-"])
+            .zip([
+                "Ctrl+Z", "Ctrl+Y", "Ctrl+S", "Ctrl+A", "Ctrl+C", "Ctrl+V", "Ctrl++", "Ctrl+-",
+            ])
             .enumerate()
         {
             let row = y + s(30 + index as i32 * 27);
@@ -5867,10 +5894,10 @@ impl App {
                 true
             }
             "debug" => {
-                self.files = vec![FileBuffer {
-                    name: "main.cpp".into(),
-                    path: PathBuf::from("/tmp/tc-ide-preview/main.cpp"),
-                    lines: vec![
+                self.files = vec![FileBuffer::new(
+                    "main.cpp".into(),
+                    PathBuf::from("/tmp/tc-ide-preview/main.cpp"),
+                    vec![
                         "#include <iostream>".into(),
                         "constexpr int LIMIT = 42;".into(),
                         "int main() {".into(),
@@ -5879,7 +5906,7 @@ impl App {
                         "    return 0;".into(),
                         "}".into(),
                     ],
-                }];
+                )];
                 self.selected_file = 0;
                 self.caret_line = 4;
                 self.breakpoints.toggle("/tmp/tc-ide-preview/main.cpp", 4);
@@ -6488,6 +6515,42 @@ impl App {
         parts.join("\n")
     }
 
+    /// Undo the last edit of the active document.
+    fn undo_edit(&mut self) {
+        let caret = (self.caret_line, self.caret_column);
+        if !self.files[self.selected_file].buffer.undo() {
+            self.status_message = self.tr("Nothing to undo", "没有可撤销的编辑").into();
+            return;
+        }
+        self.files[self.selected_file].sync();
+        self.clamp_caret_to_document(caret);
+        self.note_edit(motion_core::EditKind::Undo, self.caret_line, 0, 0);
+        self.status_message = self.tr("Undone", "已撤销").into();
+    }
+
+    /// Redo the last undone edit.
+    fn redo_edit(&mut self) {
+        let caret = (self.caret_line, self.caret_column);
+        if !self.files[self.selected_file].buffer.redo() {
+            self.status_message = self.tr("Nothing to redo", "没有可重做的编辑").into();
+            return;
+        }
+        self.files[self.selected_file].sync();
+        self.clamp_caret_to_document(caret);
+        self.note_edit(motion_core::EditKind::Redo, self.caret_line, 0, 0);
+        self.status_message = self.tr("Redone", "已重做").into();
+    }
+
+    /// Keep the caret inside the document after the lines changed.
+    fn clamp_caret_to_document(&mut self, caret: (usize, usize)) {
+        let last = self.files[self.selected_file].lines.len().saturating_sub(1);
+        self.caret_line = caret.0.min(last);
+        let length = self.files[self.selected_file].lines[self.caret_line].len();
+        self.caret_column = caret.1.min(length);
+        self.selection_anchor = None;
+        self.selection_head = None;
+    }
+
     fn delete_selection(&mut self) -> bool {
         let (Some(a), Some(b)) = (self.selection_anchor, self.selection_head) else {
             return false;
@@ -6516,14 +6579,9 @@ impl App {
                 return false;
             }
         }
-        let tail = self.files[self.selected_file].lines[end.0][end.1..].to_string();
-        self.files[self.selected_file].lines[start.0].truncate(start.1);
-        self.files[self.selected_file].lines[start.0].push_str(&tail);
-        if end.0 > start.0 {
-            self.files[self.selected_file]
-                .lines
-                .drain(start.0 + 1..=end.0);
-        }
+        // Deleting a selection is one undoable edit in the piece table.
+        self.files[self.selected_file].buffer.delete(start, end);
+        self.files[self.selected_file].sync();
         self.caret_line = start.0;
         self.caret_column = start.1;
         self.selection_anchor = None;
@@ -6559,9 +6617,13 @@ impl App {
         }
         if parts.len() == 1 {
             let start = self.caret_column;
-            self.files[self.selected_file].lines[self.caret_line]
-                .insert_str(self.caret_column, &parts[0]);
+            self.files[self.selected_file].buffer.insert(
+                self.caret_line,
+                self.caret_column,
+                &parts[0],
+            );
             self.caret_column += parts[0].len();
+            self.files[self.selected_file].sync();
             self.note_edit(
                 motion_core::EditKind::Paste,
                 self.caret_line,
@@ -6569,17 +6631,15 @@ impl App {
                 self.caret_column,
             );
         } else {
-            let tail =
-                self.files[self.selected_file].lines[self.caret_line].split_off(self.caret_column);
-            self.files[self.selected_file].lines[self.caret_line].push_str(&parts[0]);
-            for (offset, part) in parts.iter().enumerate().skip(1) {
-                self.files[self.selected_file]
-                    .lines
-                    .insert(self.caret_line + offset, part.clone());
-            }
+            // A multiline paste is one edit, so undo takes it back in one step.
+            self.files[self.selected_file].buffer.insert(
+                self.caret_line,
+                self.caret_column,
+                &self.clipboard.clone(),
+            );
             self.caret_line += parts.len() - 1;
             self.caret_column = parts.last().map(|part| part.len()).unwrap_or(0);
-            self.files[self.selected_file].lines[self.caret_line].push_str(&tail);
+            self.files[self.selected_file].sync();
             self.note_edit(
                 motion_core::EditKind::Paste,
                 self.caret_line,
@@ -6680,11 +6740,8 @@ impl App {
                     return;
                 }
                 let pack_index = self.language_pack_index_for_file(&name);
-                self.files.push(FileBuffer {
-                    name: name.clone(),
-                    path,
-                    lines: vec![String::new()],
-                });
+                self.files
+                    .push(FileBuffer::new(name.clone(), path, vec![String::new()]));
                 self.selected_file = self.files.len() - 1;
                 self.caret_line = 0;
                 self.caret_column = 0;
@@ -6812,15 +6869,15 @@ impl App {
         self.folder_tree_motion.clear();
         self.collapsed_folders.clear();
         self.workspace_search.clear();
-        self.files = vec![FileBuffer {
-            name: file_name,
-            path: file_path,
-            lines: content
+        self.files = vec![FileBuffer::new(
+            file_name,
+            file_path,
+            content
                 .lines()
                 .map(str::to_string)
                 .chain(std::iter::once(String::new()))
                 .collect(),
-        }];
+        )];
         self.selected_file = 0;
         self.caret_line = 0;
         self.caret_column = 0;
@@ -7183,19 +7240,23 @@ impl App {
         if self.edit_menu_open {
             let menu_x = s(207);
             let menu_y = s(43);
-            if x >= menu_x && x <= menu_x + s(260) && y >= menu_y && y <= menu_y + s(190) {
-                let index = ((y - menu_y - s(17)) / s(27).max(1)).clamp(0, 5);
+            // Eight rows now, so the region has to match the panel it opens.
+            if x >= menu_x && x <= menu_x + s(260) && y >= menu_y && y <= menu_y + s(244) {
+                // The rows are the labels the menu draws, in the same order.
+                let index = ((y - menu_y - s(17)) / s(27).max(1)).clamp(0, 7);
                 match index {
-                    0 => self.save_current_file(),
-                    1 => {
+                    0 => self.undo_edit(),
+                    1 => self.redo_edit(),
+                    2 => self.save_current_file(),
+                    3 => {
                         let last = self.files[self.selected_file].lines.len() - 1;
                         self.selection_anchor = Some((0, 0));
                         self.selection_head =
                             Some((last, self.files[self.selected_file].lines[last].len()));
                     }
-                    2 => self.copy_selection(),
-                    3 => self.paste_clipboard(),
-                    4 => {
+                    4 => self.copy_selection(),
+                    5 => self.paste_clipboard(),
+                    6 => {
                         self.code_zoom = (self.code_zoom + 1).min(8);
                         self.reload_code_font();
                     }
@@ -7742,6 +7803,21 @@ impl App {
         {
             return true;
         }
+        // Ctrl+Z undoes and Ctrl+Y redoes, the keys the other backends use.
+        if control && self.editor_focused {
+            if keysym == ('Z' as c_ulong | 0x20) {
+                if event.state & SHIFT_MASK != 0 {
+                    self.redo_edit();
+                } else {
+                    self.undo_edit();
+                }
+                return true;
+            }
+            if keysym == ('Y' as c_ulong | 0x20) {
+                self.redo_edit();
+                return true;
+            }
+        }
         if control && event.state & SHIFT_MASK != 0 && keysym == ('I' as c_ulong | 0x20) {
             self.toggle_ai();
             if self.ai_open {
@@ -8103,16 +8179,25 @@ impl App {
                         .map(|(start, _)| start)
                         .unwrap_or(0);
                     if self.caret_column > lower_bound {
-                        let line = &mut self.files[self.selected_file].lines[self.caret_line];
-                        let previous = previous_char_boundary(line, self.caret_column);
-                        line.replace_range(previous..self.caret_column, "");
+                        let line = self.files[self.selected_file].lines[self.caret_line].clone();
+                        let previous = previous_char_boundary(&line, self.caret_column);
+                        self.files[self.selected_file].buffer.delete(
+                            (self.caret_line, previous),
+                            (self.caret_line, self.caret_column),
+                        );
                         self.caret_column = previous;
+                        self.files[self.selected_file].sync();
                     } else if lower_bound == 0 && self.caret_line > 0 {
-                        let current = self.files[self.selected_file].lines.remove(self.caret_line);
+                        // Joining with the line above is one undoable edit.
+                        let previous_line_length =
+                            self.files[self.selected_file].lines[self.caret_line - 1].len();
+                        self.files[self.selected_file].buffer.delete(
+                            (self.caret_line - 1, previous_line_length),
+                            (self.caret_line, 0),
+                        );
                         self.caret_line -= 1;
-                        self.caret_column =
-                            self.files[self.selected_file].lines[self.caret_line].len();
-                        self.files[self.selected_file].lines[self.caret_line].push_str(&current);
+                        self.caret_column = previous_line_length;
+                        self.files[self.selected_file].sync();
                     }
                     self.note_edit(
                         motion_core::EditKind::Delete,
@@ -8163,13 +8248,14 @@ impl App {
                     return true;
                 }
                 self.delete_selection();
-                let tail = self.files[self.selected_file].lines[self.caret_line]
-                    .split_off(self.caret_column);
+                self.files[self.selected_file].buffer.insert(
+                    self.caret_line,
+                    self.caret_column,
+                    "\n",
+                );
                 self.caret_line += 1;
                 self.caret_column = 0;
-                self.files[self.selected_file]
-                    .lines
-                    .insert(self.caret_line, tail);
+                self.files[self.selected_file].sync();
             }
             LEFT_KEYSYM => {
                 let lower_bound = self
@@ -8246,9 +8332,15 @@ impl App {
                     self.delete_selection();
                     let line = self.caret_line;
                     let start = self.caret_column;
-                    self.files[self.selected_file].lines[self.caret_line]
-                        .insert_str(self.caret_column, input);
+                    // The edit goes into the piece table so it can be undone,
+                    // and the lines are read back out of it.
+                    self.files[self.selected_file].buffer.insert(
+                        self.caret_line,
+                        self.caret_column,
+                        input,
+                    );
                     self.caret_column += input.len();
+                    self.files[self.selected_file].sync();
                     let kind = if input.chars().count() > 1 {
                         motion_core::EditKind::Paste
                     } else {
@@ -8507,10 +8599,12 @@ fn initial_files() -> Vec<FileBuffer> {
     ];
     sources
         .iter()
-        .map(|(name, lines)| FileBuffer {
-            name: (*name).into(),
-            path: PathBuf::from(name),
-            lines: lines.iter().map(|line| line.to_string()).collect(),
+        .map(|(name, lines)| {
+            FileBuffer::new(
+                (*name).into(),
+                PathBuf::from(name),
+                lines.iter().map(|line| line.to_string()).collect(),
+            )
         })
         .collect()
 }

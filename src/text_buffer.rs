@@ -921,4 +921,67 @@ mod tests {
         assert!(buffer.redo());
         assert_eq!(buffer.to_lines(), lines(&["fn start() {", "}"]));
     }
+
+    #[test]
+    fn the_linux_editor_buffer_keeps_the_lines_and_the_history_in_step() {
+        // The Linux editor edits through the piece table now, so the lines it
+        // draws and the history it undoes have to come from the same place.
+        let mut buffer = TextBuffer::from_lines(&["alpha".to_string()]);
+        let mut lines = buffer.to_lines();
+        assert_eq!(lines, ["alpha"]);
+
+        // Typing at the end, then a newline, then more text.
+        buffer.insert(0, 5, " one");
+        lines = buffer.to_lines();
+        assert_eq!(lines, ["alpha one"]);
+        buffer.insert(0, 9, "\n");
+        buffer.insert(1, 0, "second");
+        lines = buffer.to_lines();
+        assert_eq!(lines, ["alpha one", "second"]);
+
+        // Deleting a selection that spans the line break, the way the editor
+        // does: from the space after "alpha" to the end of "second".
+        buffer.delete((0, 5), (1, 6));
+        lines = buffer.to_lines();
+        assert_eq!(lines, ["alpha"], "what is left of the first line");
+
+        // Undo walks back through every edit, and the lines follow.
+        assert!(buffer.undo());
+        assert_eq!(buffer.to_lines(), ["alpha one", "second"]);
+        // A trailing newline does not add a line to the list, so the step that
+        // undoes the text typed on the second line leaves the newline behind
+        // and the document reads as one line.
+        assert!(buffer.undo(), "the text typed on the second line");
+        assert_eq!(buffer.to_lines(), ["alpha one"]);
+        assert!(buffer.undo(), "the line break");
+        assert_eq!(buffer.to_lines(), ["alpha one"]);
+        assert!(buffer.undo(), "the text typed on the first line");
+        assert_eq!(buffer.to_lines(), ["alpha"]);
+        assert!(!buffer.undo(), "the history is empty");
+
+        // Redo walks forward again, and the last step re-applies the delete,
+        // so a redo of everything lands back where the edits left it.
+        assert!(buffer.redo());
+        assert_eq!(buffer.to_lines(), ["alpha one"]);
+        assert!(buffer.redo());
+        assert_eq!(buffer.to_lines(), ["alpha one"]);
+        assert!(buffer.redo());
+        assert_eq!(buffer.to_lines(), ["alpha one", "second"]);
+        assert!(buffer.redo(), "the delete is redone too");
+        assert_eq!(buffer.to_lines(), ["alpha"]);
+    }
+
+    #[test]
+    fn a_multiline_paste_is_one_undo_step() {
+        // The editor pastes several lines at once; undo has to take the whole
+        // paste back, not one character of it.
+        let mut buffer = TextBuffer::from_lines(&["head".to_string()]);
+        buffer.begin_group();
+        buffer.insert(0, 4, "\nfirst");
+        buffer.insert(1, 5, "\nsecond");
+        buffer.end_group();
+        assert_eq!(buffer.to_lines(), ["head", "first", "second"]);
+        assert!(buffer.undo());
+        assert_eq!(buffer.to_lines(), ["head"], "the whole paste comes back");
+    }
 }
