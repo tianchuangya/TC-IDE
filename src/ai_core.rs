@@ -842,13 +842,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         for chunk in ["Hel", "lo ", "there"]:
             payload = json.dumps({"choices": [{"delta": {"content": chunk}}]})
-            self.wfile.write(("data: " + payload + "
-
-").encode("utf-8"))
+            self.wfile.write(("data: " + payload + "\n\n").encode("utf-8"))
             self.wfile.flush()
-        self.wfile.write(b"data: [DONE]
-
-")
+        self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
     def log_message(self, *args):
@@ -877,21 +873,28 @@ server.serve_forever()
         let mut server = std::process::Command::new(python)
             .arg(&script_path)
             .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("start fake server");
-        let port = {
+        let (port_line, bytes_read) = {
             use std::io::{BufRead, BufReader};
             let stdout = server.stdout.take().expect("stdout");
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
-            let _ = reader.read_line(&mut line);
-            line.trim().to_string()
+            let bytes_read = reader.read_line(&mut line).expect("read fake server port");
+            (line, bytes_read)
         };
-        if port.is_empty() {
-            let _ = server.kill();
-            let _ = server.wait();
-            return;
+        if bytes_read == 0 {
+            let output = server.wait_with_output().expect("wait for fake server");
+            panic!(
+                "fake server exited before reporting its port: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
         }
+        let port = port_line
+            .trim()
+            .parse::<u16>()
+            .expect("fake server printed an invalid port");
 
         let settings = AiSettings {
             endpoint: format!("http://127.0.0.1:{port}/v1"),

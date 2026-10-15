@@ -3675,8 +3675,8 @@ fn self_check() -> i32 {
     // cannot exist is not.
     report(
         "the tool probe looks at the real machine",
-        lsp_core::executable_available("sh")
-            && !lsp_core::executable_available("tc-ide-no-such-tool"),
+        lsp_core::executable_available("/bin/sh")
+            && !lsp_core::executable_available("/no/such/tc-ide-tool"),
         &mut failures,
     );
     let format = workspace_core::format_command("Rust", "main.rs");
