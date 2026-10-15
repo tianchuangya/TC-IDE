@@ -1060,3 +1060,93 @@ mod tests {
         assert_ne!(Palette::dark().keyword, Palette::light().keyword);
     }
 }
+
+/// Text of one line that fits between two columns of the code area.
+///
+/// The macOS backend draws its code column through this, the other two have
+/// their own clipping, so it is allowed to be unused on Linux and Windows.
+#[allow(dead_code)]
+///
+/// A long line must not be drawn over the panel beside it, and every backend
+/// has to cut it at the same place, so the rule lives here: take the columns
+/// from the first visible one up to the last that still fits, and hand back
+/// what to draw along with the column it starts at. A line that is entirely
+/// past the right edge returns nothing.
+pub fn visible_slice(line: &str, first_column: usize, columns: usize) -> Option<(usize, String)> {
+    if columns == 0 {
+        return None;
+    }
+    let characters = line.chars().count();
+    if first_column >= characters {
+        return None;
+    }
+    let last = (first_column + columns).min(characters);
+    Some((
+        first_column,
+        line.chars()
+            .skip(first_column)
+            .take(last - first_column)
+            .collect(),
+    ))
+}
+
+/// Whether a line is wider than the code area, so the backend can say so.
+#[allow(dead_code)]
+pub fn line_overflows(line: &str, first_column: usize, columns: usize) -> bool {
+    line.chars().count() > first_column + columns
+}
+
+#[cfg(test)]
+mod clipping_tests {
+    use super::*;
+
+    #[test]
+    fn a_line_is_cut_where_the_code_area_ends() {
+        // A short line is handed back whole.
+        assert_eq!(
+            visible_slice("hello", 0, 80),
+            Some((0, "hello".to_string()))
+        );
+        // A line wider than the area is cut at the last column that fits.
+        assert_eq!(
+            visible_slice("abcdefghij", 0, 4),
+            Some((0, "abcd".to_string()))
+        );
+        // Scrolled right, the cut follows the view.
+        assert_eq!(
+            visible_slice("abcdefghij", 3, 4),
+            Some((3, "defg".to_string()))
+        );
+        // The end of the line is not padded.
+        assert_eq!(visible_slice("abc", 1, 40), Some((1, "bc".to_string())));
+
+        // Nothing to draw when the line is past the edge or out of columns.
+        assert_eq!(visible_slice("abc", 3, 40), None);
+        assert_eq!(visible_slice("abc", 99, 40), None);
+        assert_eq!(visible_slice("abc", 0, 0), None);
+        assert_eq!(visible_slice("", 0, 40), None);
+
+        // What comes back always fits in the columns it was given.
+        for width in 1..12usize {
+            for first in 0..12usize {
+                if let Some((start, text)) = visible_slice("abcdefghijkl", first, width) {
+                    assert_eq!(start, first);
+                    assert!(
+                        text.chars().count() <= width,
+                        "{text:?} does not fit in {width}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overflow_is_reported_only_when_the_line_is_cut() {
+        assert!(!line_overflows("abc", 0, 10));
+        assert!(!line_overflows("abcdefghij", 0, 10));
+        assert!(line_overflows("abcdefghijk", 0, 10));
+        // Scrolled right, the part already behind the edge no longer counts.
+        assert!(!line_overflows("abcdefghijk", 1, 10));
+        assert!(line_overflows("abcdefghijk", 0, 0));
+    }
+}

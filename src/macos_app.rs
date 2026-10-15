@@ -2768,19 +2768,37 @@ unsafe fn draw_frame(shell: &mut MacShell) {
         }
         // The line is drawn token by token, so keywords, literals and comments
         // come from the shared tokenizer and the shared palette.
-        let mut column = 0usize;
-        for token in editor_core::syntax_tokens(line, &document_name) {
+        // A line longer than the code area is cut at the edge instead of being
+        // drawn over the panel beside it. The slice is shared, so the same
+        // columns disappear here as on the other backends, and the tokens are
+        // taken from the slice so the colours still line up.
+        let columns = ((area.width / cell).floor().max(1.0)) as usize;
+        let Some((first_visible, clipped)) =
+            editor_core::visible_slice(line, scroll_columns, columns)
+        else {
+            continue;
+        };
+        let mut column = first_visible;
+        for token in editor_core::syntax_tokens(&clipped, &document_name) {
             let start = column;
             column += token.text.chars().count();
-            let Some((first, visible)) = visible_token(&token.text, start, scroll_columns) else {
-                continue;
-            };
             draw_text(
-                &visible,
-                MacShell::column_x_with(first, cell),
+                &token.text,
+                MacShell::column_x_with(start - scroll_columns, cell),
                 y,
                 font,
                 token_color(&palette, token.kind),
+                true,
+            );
+        }
+        // A line that had to be cut says so at the edge.
+        if editor_core::line_overflows(line, scroll_columns, columns) {
+            draw_text(
+                "›",
+                MacShell::column_x_with(columns, cell) - 2.0,
+                y,
+                font,
+                palette.muted,
                 true,
             );
         }
@@ -3933,6 +3951,56 @@ fn self_check() -> i32 {
         shell.session.documents().len() == 1 && shell.session.active() == 0,
         &mut failures,
     );
+    // A long line is cut at the code area edge rather than drawn over the panel
+    // beside it, and the tokens are taken from the slice so colours line up.
+    let long_line = "let value = compute_something(alpha, beta, gamma); // a long note";
+    let area_columns = 20usize;
+    let clipped = editor_core::visible_slice(long_line, 0, area_columns);
+    report(
+        "a long line is cut at the code area edge",
+        clipped
+            .as_ref()
+            .map(|(start, text)| *start == 0 && text.chars().count() == area_columns)
+            == Some(true)
+            && editor_core::line_overflows(long_line, 0, area_columns)
+            && !editor_core::line_overflows(long_line, 0, 200),
+        &mut failures,
+    );
+    report(
+        "a scrolled line is cut from the column the view starts at",
+        editor_core::visible_slice(long_line, 4, area_columns)
+            .map(|(start, text)| start == 4 && text.chars().count() == area_columns)
+            == Some(true)
+            && editor_core::visible_slice("short", 9, area_columns).is_none()
+            && editor_core::visible_slice("short", 0, 0).is_none(),
+        &mut failures,
+    );
+    // The token colours survive the cut: the slice of a Rust line still reads
+    // as a keyword followed by an identifier.
+    let kinds = editor_core::syntax_tokens(
+        &clipped
+            .as_ref()
+            .map(|(_, text)| text.clone())
+            .unwrap_or_default(),
+        "main.rs",
+    );
+    report(
+        "the cut line still tokenizes",
+        kinds
+            .first()
+            .map(|token| token.kind == editor_core::TokenKind::Keyword)
+            == Some(true)
+            && kinds
+                .iter()
+                .map(|token| token.text.clone())
+                .collect::<String>()
+                == clipped
+                    .as_ref()
+                    .map(|(_, text)| text.clone())
+                    .unwrap_or_default(),
+        &mut failures,
+    );
+
     // The packaging panel drives the shared macOS packaging flow.
     shell.apply(MacCommand::TogglePackaging);
     report(
