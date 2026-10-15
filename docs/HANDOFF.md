@@ -248,9 +248,16 @@ Windows 特有逻辑的本地验证方式已补齐：`cargo check --all-targets 
    诊断同理：数据已在 `lsp_diagnostics`，缺独立面板。
 6. **AI 会话**：面板、流式回答、最近 12 轮上下文与按项目的历史持久化都已完成（`Ctrl+Shift+A`）；剩下的是让推断边变成真正的模型推断，而不是“无调用语法”的启发式。
 7. **关系图**：增量索引已完成；下一步可以是把 `graph_core` 的层级细节与聚类做得更细（按视口密度切换层级）。
-8. **视觉细节**：悬停高亮与完整中文文案已完成；仍缺文件树行位置弹簧、多字符粘贴/撤销动画、
-   背景图可视化裁剪框、按钮按下/禁用/键盘焦点状态与浅色主题对比度检查。
-9. **macOS 原生后端**：Cocoa/CoreText/Metal、NSPasteboard、NSOpenPanel、PTY、NSWorkspace。
+8. **视觉细节**：悬停高亮、完整中文文案、文件树行位置弹簧（`motion_core::RowShift`，Windows 项目树已接入）、
+   多字符粘贴/撤销动画（`motion_core::EditPulses`，Linux 与 Windows 编辑器都已接入）、
+   背景图可视化裁剪框（Linux 与 Windows 设置面板，走共享 `background_core::handle_at`/`drag_crop`）、
+   按钮按下/禁用/键盘焦点状态（共享 `theme_core::ControlState` + Windows 设置浮层的 Tab 走查与焦点环）
+   与浅色主题对比度检查都已完成。**剩下的只有"观感"本身**：这些状态的视觉效果要由人在实机上确认，
+   本机（Linux + Wine）只能验证逻辑与几何是否正确。
+9. **macOS 原生后端**：Cocoa 窗口与绘制、`NSPasteboard`、`NSOpenPanel`、PTY 终端、`NSWorkspace`、
+   菜单栏、标签栏、关系图、设置、扩展与打包面板都已完成（见第 5 节）。
+   **仍缺 Metal 渲染与直接 CoreText 排版**；这两项只能在 macOS 真机上确认观感，
+   本机连 macOS 二进制都无法链接（需要 SDK，见 `docs/KNOWN-ISSUES.md`）。
 10. **架构收尾**：`windows_app.rs` 的模块拆分与绘制区域拆分已完成（见 P2 条目），
     Linux 已接入会话恢复与运行时缓存清单；剩余的是下沉偏好设置/项目模板/打包命令的重复实现。
 
