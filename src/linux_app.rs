@@ -709,6 +709,10 @@ struct App {
     breakpoints: dap_core::Breakpoints,
     debug_session: Option<dap_core::DebugSession>,
     debug_state: dap_core::DebugState,
+    /// Whether the call stack and scope panel is shown.
+    debug_panel_open: bool,
+    /// Stack frame the panel highlights.
+    debug_frame: usize,
     debug_stop_seen: String,
     graph_zoom: f32,
     session: session_core::Session,
@@ -2412,6 +2416,115 @@ impl App {
         }
     }
 
+    /// Rows the debug panel would show right now.
+    fn debug_panel_rows(&self) -> Vec<dap_core::DebugRow> {
+        dap_core::debug_rows(&self.debug_state, self.debug_frame)
+    }
+
+    /// Rectangle of the debug panel, on the left above the project tree.
+    fn debug_panel_bounds(&self) -> (i32, i32, i32, i32) {
+        let s = |v: i32| (v as f32 * self.scale()).round() as i32;
+        let width = (self.width as f32 * 0.17) as i32 - s(8);
+        let top = s(52);
+        let height = s(240);
+        (s(4), top, width, height)
+    }
+
+    /// Show or hide the debug panel.
+    fn toggle_debug_panel(&mut self) {
+        self.debug_panel_open = !self.debug_panel_open;
+        self.status_message = if self.debug_panel_open {
+            self.tr("Debug panel shown", "已显示调试面板").into()
+        } else {
+            self.tr("Debug panel hidden", "已隐藏调试面板").into()
+        };
+    }
+
+    /// Move the selected stack frame, which the panel highlights.
+    fn step_debug_frame(&mut self, delta: i32) {
+        let count = self.debug_state.frames.len() as i32;
+        if count == 0 {
+            return;
+        }
+        self.debug_frame = (self.debug_frame as i32 + delta).clamp(0, count - 1) as usize;
+        if let Some(frame) = self.debug_state.frames.get(self.debug_frame) {
+            self.status_message = format!("{}:{}", frame.name, frame.line);
+        }
+    }
+
+    /// Draw the call stack, the scopes and the variables of the current stop.
+    ///
+    /// The rows come from the shared model, so the panel shows the same thing
+    /// on every backend and the layout is covered by tests that do not need a
+    /// window.
+    unsafe fn draw_debug_panel(&self) {
+        if !self.debug_panel_open {
+            return;
+        }
+        let s = |v| self.s(v);
+        let (x, y, w, h) = self.debug_panel_bounds();
+        self.rect(self.colors.panel, x, y, w, h);
+        self.outline(self.colors.line, x, y, w, h);
+        self.text(
+            self.colors.muted,
+            x + s(10),
+            y + s(18),
+            self.tr("DEBUG", "调试"),
+        );
+
+        let rows = self.debug_panel_rows();
+        let capacity = ((h - s(34)) / s(20)).max(1) as usize;
+        let (shown, hidden) = dap_core::visible_debug_rows(&rows, capacity);
+        for (index, row) in shown.iter().enumerate() {
+            let row_y = y + s(40 + index as i32 * 20);
+            match row {
+                dap_core::DebugRow::Heading(label) => {
+                    self.text(self.colors.muted, x + s(10), row_y, label);
+                }
+                dap_core::DebugRow::Frame {
+                    label,
+                    detail,
+                    selected,
+                    ..
+                } => {
+                    if *selected {
+                        self.rect(self.colors.accent, x + s(4), row_y - s(14), w - s(8), s(19));
+                    }
+                    self.text(
+                        if *selected {
+                            self.colors.bright
+                        } else {
+                            self.colors.text
+                        },
+                        x + s(14),
+                        row_y,
+                        label,
+                    );
+                    self.text(self.colors.muted, x + w - s(90), row_y, detail);
+                }
+                dap_core::DebugRow::Scope { label, detail } => {
+                    self.text(self.colors.text, x + s(18), row_y, label);
+                    self.text(self.colors.muted, x + w - s(80), row_y, detail);
+                }
+                dap_core::DebugRow::Variable { name, value } => {
+                    self.text(self.colors.keyword, x + s(24), row_y, name);
+                    self.text(self.colors.literal, x + s(110), row_y, value);
+                }
+                dap_core::DebugRow::Empty(message) => {
+                    self.text(self.colors.muted, x + s(14), row_y, message);
+                }
+            }
+        }
+        if hidden > 0 {
+            self.text(
+                self.colors.muted,
+                x + s(10),
+                y + h - s(8),
+                &format!("{} +{hidden}", self.tr("More", "更多")),
+            );
+        }
+    }
+
     fn graph_bounds(&self) -> (i32, i32, i32, i32) {
         let left = self.graph_left();
         (
@@ -2812,6 +2925,7 @@ impl App {
         self.draw_header();
         self.draw_workspace();
         self.draw_editor();
+        self.draw_debug_panel();
         if self.graph_motion.value > 0.08 {
             self.draw_graph();
         }
@@ -3471,7 +3585,8 @@ impl App {
         let x = s(302);
         let y = s(43) + self.overlay_offset(self.view_menu_motion);
         let w = s(280);
-        let h = s(116);
+        // One row per panel, plus the heading and the padding.
+        let h = s(51 + 36 * 3);
         self.floating_panel(x, y, w, h);
         self.text(
             self.colors.muted,
@@ -3482,6 +3597,7 @@ impl App {
         for (index, (label, enabled)) in [
             (self.tr("Call hierarchy", "调用层级"), self.graph_visible),
             (self.tr("Terminal", "终端"), self.terminal_open),
+            (self.tr("Debug panel", "调试面板"), self.debug_panel_open),
         ]
         .iter()
         .enumerate()
@@ -5099,22 +5215,57 @@ impl App {
                         file: Some("/tmp/tc-ide-preview/main.cpp".into()),
                         line: Some(4),
                     }),
-                    frames: vec![dap_core::StackFrame {
-                        id: 1,
-                        name: "main".into(),
-                        file: Some("/tmp/tc-ide-preview/main.cpp".into()),
-                        line: 4,
-                        column: 17,
+                    // A realistic stop: more than one frame, a scope and a
+                    // long value, so the panel shows its sections and its
+                    // shortening.
+                    frames: vec![
+                        dap_core::StackFrame {
+                            id: 1,
+                            name: "main".into(),
+                            file: Some("/tmp/tc-ide-preview/main.cpp".into()),
+                            line: 4,
+                            column: 17,
+                        },
+                        dap_core::StackFrame {
+                            id: 2,
+                            name: "render".into(),
+                            file: Some("/tmp/tc-ide-preview/render.cpp".into()),
+                            line: 118,
+                            column: 9,
+                        },
+                        dap_core::StackFrame {
+                            id: 3,
+                            name: "std::__invoke".into(),
+                            file: None,
+                            line: 0,
+                            column: 0,
+                        },
+                    ],
+                    scopes: vec![dap_core::Scope {
+                        name: "Locals".into(),
+                        reference: 7,
+                        expensive: false,
                     }],
-                    scopes: vec![],
-                    variables: vec![dap_core::Variable {
-                        name: "count".into(),
-                        value: "42".into(),
-                        kind: "int".into(),
-                    }],
+                    variables: vec![
+                        dap_core::Variable {
+                            name: "count".into(),
+                            value: "42".into(),
+                            kind: "int".into(),
+                        },
+                        dap_core::Variable {
+                            name: "frame".into(),
+                            value: "{width: 1440, height: 900, scale: 2.0, title: \"main window\", visible: true}"
+                                .into(),
+                            kind: "struct".into(),
+                        },
+                    ],
                     terminated: false,
                     output: vec![],
                 };
+                // The panel is part of this scene, so a frame covers both the
+                // inline labels and the call stack panel.
+                self.debug_panel_open = true;
+                self.debug_frame = 0;
                 true
             }
             "packaging" => {
@@ -6297,9 +6448,9 @@ impl App {
                 && x >= menu_x
                 && x <= menu_x + s(280)
                 && y >= menu_y + s(29)
-                && y <= menu_y + s(105)
+                && y <= menu_y + s(51 + 36 * 3) - s(11)
             {
-                let index = ((y - menu_y - s(29)) / s(36).max(1)).clamp(0, 1);
+                let index = ((y - menu_y - s(29)) / s(36).max(1)).clamp(0, 2);
                 if index == 0 {
                     self.graph_visible = !self.graph_visible;
                     self.status_message = self
@@ -6316,9 +6467,11 @@ impl App {
                             },
                         )
                         .into();
-                } else {
+                } else if index == 1 {
                     self.terminal_open = !self.terminal_open;
                     self.terminal_focused = self.terminal_open;
+                } else {
+                    self.toggle_debug_panel();
                 }
                 return;
             }
@@ -7069,6 +7222,13 @@ impl App {
                     .settings_focus
                     .unwrap_or(SettingsControl::LanguageEnglish);
                 self.activate_settings_control(focused);
+                return true;
+            }
+            if self.debug_panel_open
+                && self.debug_state.stopped.is_some()
+                && (keysym == UP_KEYSYM || keysym == DOWN_KEYSYM)
+            {
+                self.step_debug_frame(if keysym == UP_KEYSYM { -1 } else { 1 });
                 return true;
             }
             if keysym == ESCAPE_KEYSYM && self.settings_focus.is_some() {
@@ -8636,6 +8796,8 @@ pub fn run() {
             breakpoints: dap_core::Breakpoints::new(),
             debug_session: None,
             debug_state: dap_core::DebugState::default(),
+            debug_panel_open: false,
+            debug_frame: 0,
             debug_stop_seen: String::new(),
             graph_zoom: 1.0,
             session: session_core::Session::default(),

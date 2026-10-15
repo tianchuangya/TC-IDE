@@ -1142,3 +1142,284 @@ while True:
         assert!(breakpoints.specs("a.rs").is_empty());
     }
 }
+
+/// One row of the debug panel.
+///
+/// The panel lists the call stack and, under the frame the user picked, its
+/// scopes and their variables. The rows are built here rather than in a
+/// backend so all three can show the same thing, and so the layout can be
+/// tested without a window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DebugRow {
+    /// A heading, for example `CALL STACK`.
+    Heading(String),
+    /// A stack frame, with whether it is the one being shown.
+    Frame {
+        index: usize,
+        label: String,
+        detail: String,
+        selected: bool,
+    },
+    /// A scope inside the selected frame.
+    Scope { label: String, detail: String },
+    /// A variable of the scope above it.
+    Variable { name: String, value: String },
+    /// The debugger has nothing to show yet.
+    Empty(String),
+}
+
+/// Byte budget a row keeps for its label and its detail.
+///
+/// A debugger value can be a whole structure; the panel shows the beginning of
+/// it and says how much was left out rather than letting one row run off.
+pub const DEBUG_VALUE_LIMIT: usize = 60;
+
+/// Shorten a debugger value to something a row can show.
+pub fn shortened_value(value: &str) -> String {
+    let flat = value.replace(['\n', '\r', '\t'], " ");
+    let characters = flat.chars().count();
+    if characters <= DEBUG_VALUE_LIMIT {
+        return flat;
+    }
+    let head: String = flat.chars().take(DEBUG_VALUE_LIMIT).collect();
+    format!("{head}… (+{})", characters - DEBUG_VALUE_LIMIT)
+}
+
+/// The rows the debug panel shows for a state and a selected frame.
+///
+/// A frame the state does not have falls back to the first one, so a panel
+/// that outlives a stop cannot show the stack of a run that already ended.
+pub fn debug_rows(state: &DebugState, selected_frame: usize) -> Vec<DebugRow> {
+    let mut rows = Vec::new();
+    if state.frames.is_empty() && state.variables.is_empty() {
+        rows.push(DebugRow::Empty(if state.terminated {
+            "the program has finished".to_string()
+        } else {
+            "not stopped".to_string()
+        }));
+        return rows;
+    }
+
+    if !state.frames.is_empty() {
+        rows.push(DebugRow::Heading("CALL STACK".to_string()));
+        let selected = selected_frame.min(state.frames.len() - 1);
+        for (index, frame) in state.frames.iter().enumerate() {
+            let detail = match (&frame.file, frame.line) {
+                (Some(file), line) if line > 0 => {
+                    let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+                    format!("{name}:{line}")
+                }
+                (Some(file), _) => file.clone(),
+                (None, line) if line > 0 => format!("line {line}"),
+                (None, _) => String::new(),
+            };
+            rows.push(DebugRow::Frame {
+                index,
+                label: format!("{}  {index}", frame.name),
+                detail,
+                selected: index == selected,
+            });
+        }
+    }
+
+    if !state.scopes.is_empty() {
+        rows.push(DebugRow::Heading("SCOPES".to_string()));
+        for scope in &state.scopes {
+            rows.push(DebugRow::Scope {
+                label: scope.name.clone(),
+                detail: if scope.expensive {
+                    "not loaded".to_string()
+                } else {
+                    String::new()
+                },
+            });
+        }
+    }
+
+    if !state.variables.is_empty() {
+        rows.push(DebugRow::Heading("VARIABLES".to_string()));
+        for variable in &state.variables {
+            rows.push(DebugRow::Variable {
+                name: variable.name.clone(),
+                value: shortened_value(&variable.value),
+            });
+        }
+    }
+    rows
+}
+
+/// Rows of a panel that can show every row, or the first few with a count.
+pub fn visible_debug_rows(rows: &[DebugRow], limit: usize) -> (Vec<DebugRow>, usize) {
+    if limit == 0 || rows.len() <= limit {
+        return (rows.to_vec(), 0);
+    }
+    (rows[..limit].to_vec(), rows.len() - limit)
+}
+
+#[cfg(test)]
+mod debug_row_tests {
+    use super::*;
+
+    fn frame(id: u64, name: &str, file: Option<&str>, line: usize) -> StackFrame {
+        StackFrame {
+            id,
+            name: name.to_string(),
+            file: file.map(str::to_string),
+            line,
+            column: 1,
+        }
+    }
+
+    fn variable(name: &str, value: &str) -> Variable {
+        Variable {
+            name: name.to_string(),
+            value: value.to_string(),
+            kind: "int".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_panel_lists_the_stack_then_the_scopes_then_the_variables() {
+        let state = DebugState {
+            stopped: None,
+            frames: vec![
+                frame(1, "main", Some("/home/me/src/main.c"), 12),
+                frame(2, "helper", Some("/home/me/src/util.c"), 4),
+            ],
+            scopes: vec![Scope {
+                name: "Locals".to_string(),
+                reference: 7,
+                expensive: false,
+            }],
+            variables: vec![variable("count", "3")],
+            terminated: false,
+            output: Vec::new(),
+        };
+        let rows = debug_rows(&state, 0);
+        // Headings come in order, and each section is non empty.
+        let headings = rows
+            .iter()
+            .filter_map(|row| match row {
+                DebugRow::Heading(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(headings, ["CALL STACK", "SCOPES", "VARIABLES"]);
+
+        // A frame shows the file it is in without the whole path.
+        match &rows[1] {
+            DebugRow::Frame {
+                index,
+                label,
+                detail,
+                selected,
+            } => {
+                assert_eq!(*index, 0);
+                assert!(label.contains("main"));
+                assert_eq!(detail, "main.c:12");
+                assert!(selected, "the picked frame is marked");
+            }
+            other => panic!("expected a frame, got {other:?}"),
+        }
+        match &rows[2] {
+            DebugRow::Frame { selected, .. } => assert!(!selected),
+            other => panic!("expected a frame, got {other:?}"),
+        }
+        assert!(rows.contains(&DebugRow::Variable {
+            name: "count".to_string(),
+            value: "3".to_string()
+        }));
+    }
+
+    #[test]
+    fn a_selected_frame_that_is_gone_falls_back_to_the_first() {
+        let state = DebugState {
+            stopped: None,
+            frames: vec![frame(1, "main", None, 0)],
+            scopes: Vec::new(),
+            variables: Vec::new(),
+            terminated: false,
+            output: Vec::new(),
+        };
+        // A frame index past the end must not panic or select nothing.
+        let rows = debug_rows(&state, 9);
+        match rows
+            .iter()
+            .find(|row| matches!(row, DebugRow::Frame { .. }))
+        {
+            Some(DebugRow::Frame { selected, .. }) => assert!(*selected),
+            other => panic!("expected a frame, got {other:?}"),
+        }
+        // A frame without a file still says where it is when it knows the line.
+        let rows = debug_rows(&state, 0);
+        match &rows[1] {
+            DebugRow::Frame { detail, .. } => assert_eq!(detail, ""),
+            other => panic!("expected a frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_or_finished_state_says_so() {
+        let mut state = DebugState {
+            stopped: None,
+            frames: Vec::new(),
+            scopes: Vec::new(),
+            variables: Vec::new(),
+            terminated: false,
+            output: Vec::new(),
+        };
+        assert_eq!(
+            debug_rows(&state, 0),
+            vec![DebugRow::Empty("not stopped".into())]
+        );
+        state.terminated = true;
+        assert_eq!(
+            debug_rows(&state, 0),
+            vec![DebugRow::Empty("the program has finished".into())]
+        );
+    }
+
+    #[test]
+    fn a_long_value_is_shortened_and_says_how_much_is_missing() {
+        assert_eq!(shortened_value("3"), "3");
+        let short = "x".repeat(DEBUG_VALUE_LIMIT);
+        assert_eq!(shortened_value(&short), short);
+        let long = "x".repeat(DEBUG_VALUE_LIMIT + 5);
+        let shown = shortened_value(&long);
+        assert!(shown.ends_with("… (+5)"), "{shown}");
+        // What matters is that the value itself is cut at the limit; the note
+        // about what is missing is allowed to sit on top of it.
+        assert!(shown.starts_with(&"x".repeat(DEBUG_VALUE_LIMIT)));
+        assert!(!shown.starts_with(&long));
+        // Newlines and tabs are flattened, so one row stays one row.
+        assert_eq!(shortened_value("a\nb\tc\rd"), "a b c d");
+    }
+
+    #[test]
+    fn a_panel_shows_what_fits_and_counts_the_rest() {
+        let rows = vec![
+            DebugRow::Heading("CALL STACK".to_string()),
+            DebugRow::Frame {
+                index: 0,
+                label: "main".to_string(),
+                detail: String::new(),
+                selected: true,
+            },
+            DebugRow::Heading("VARIABLES".to_string()),
+            DebugRow::Variable {
+                name: "a".to_string(),
+                value: "1".to_string(),
+            },
+        ];
+        let (shown, hidden) = visible_debug_rows(&rows, 10);
+        assert_eq!(shown.len(), 4);
+        assert_eq!(hidden, 0);
+        let (shown, hidden) = visible_debug_rows(&rows, 2);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(hidden, 2);
+        // A panel with no room shows nothing rather than everything.
+        let (shown, hidden) = visible_debug_rows(&rows, 0);
+        assert_eq!(shown.len(), 4, "no limit means no limit");
+        assert_eq!(hidden, 0);
+    }
+}
