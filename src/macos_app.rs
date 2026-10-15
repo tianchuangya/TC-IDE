@@ -935,13 +935,24 @@ fn self_check() -> i32 {
         &mut failures,
     );
     shell.viewport_for_checks();
+    // The document is ["oneX", "tw"], so the second line only has two columns.
     shell.click_at(
-        GUTTER_WIDTH + TEXT_CELL * 3.5,
+        GUTTER_WIDTH + TEXT_CELL * 1.5,
         shell.header_height() + shell.line_step() * 1.5,
     );
     report(
         "a click lands on the row and column it points at",
-        shell.session.caret() == (1, 3),
+        shell.session.caret() == (1, 1),
+        &mut failures,
+    );
+    // A click past the end of a short line stops at the line end.
+    shell.click_at(
+        GUTTER_WIDTH + TEXT_CELL * 40.0,
+        shell.header_height() + shell.line_step() * 1.5,
+    );
+    report(
+        "a click past the line end stops at the line end",
+        shell.session.caret() == (1, 2),
         &mut failures,
     );
     report(
@@ -966,6 +977,17 @@ fn self_check() -> i32 {
         is_printable_key(8, false) && !is_printable_key(51, false) && !is_printable_key(0, true),
         &mut failures,
     );
+
+    // The editing itself is checked once, in the shared session, where the same
+    // assertions run on every platform instead of only on the macOS runner.
+    for failure in editor_session::state_check(editor_session::ClickMetrics {
+        gutter: GUTTER_WIDTH,
+        cell: TEXT_CELL,
+        line_step: shell.line_step(),
+        header: shell.header_height(),
+    }) {
+        report(&failure, false, &mut failures);
+    }
 
     println!(
         "TC-IDE macOS self check: {checks} checks, {} failed",

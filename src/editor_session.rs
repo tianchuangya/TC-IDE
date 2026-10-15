@@ -521,6 +521,122 @@ impl EditorSession {
     }
 }
 
+/// The metric a click is mapped through, so a check can use the same numbers a
+/// backend uses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClickMetrics {
+    pub gutter: f64,
+    pub cell: f64,
+    pub line_step: f64,
+    pub header: f64,
+}
+
+/// Assertions about the session that every backend can run.
+///
+/// The macOS `--self-check` runs this on the runner, and a unit test runs it
+/// here, so the same expectations are checked in both places and a failure shows
+/// up in a second instead of on a machine nobody can read the log of.
+pub fn state_check(metrics: ClickMetrics) -> Vec<String> {
+    let mut failures = Vec::new();
+    let mut check = |name: &str, ok: bool| {
+        if !ok {
+            failures.push(name.to_string());
+        }
+    };
+
+    let mut session = EditorSession::new(Document::from_lines("check.rs", None, Vec::new()));
+    session.replace_all("one\ntwo");
+    check(
+        "a scratch document holds its lines",
+        session.document().lines == ["one", "two"] && session.caret() == (1, 3),
+    );
+
+    session.backspace();
+    check(
+        "backspace removes a character",
+        session.document().lines == ["one", "tw"],
+    );
+
+    session.move_caret(-1, 0);
+    session.move_to_line_end(true);
+    session.insert_text("X");
+    check(
+        "the caret moves between lines",
+        session.document().lines == ["oneX", "tw"],
+    );
+    check("an edit marks the document dirty", session.dirty());
+
+    // A click inside the second line lands on column one of it.
+    session.viewport = Viewport::new(20, 80);
+    let line = session.line_at(
+        metrics.header + metrics.line_step * 1.5,
+        metrics.header,
+        metrics.line_step,
+    );
+    let column = session.column_at(
+        metrics.gutter + metrics.cell * 1.5,
+        metrics.gutter,
+        metrics.cell,
+        line,
+    );
+    check("a click maps to the row it points at", line == 1);
+    check("a click maps to the column it points at", column == 1);
+    session.set_caret(line, column);
+    check("the caret follows the click", session.caret() == (1, 1));
+
+    // A click past the end of a short line stops at the line end.
+    let far = session.column_at(
+        metrics.gutter + metrics.cell * 40.0,
+        metrics.gutter,
+        metrics.cell,
+        line,
+    );
+    session.set_caret(line, far);
+    check(
+        "a click past the line end stops at the line end",
+        session.caret() == (1, 2),
+    );
+
+    // Select all then type replaces the document.
+    session.select_all();
+    session.insert_text("done");
+    check(
+        "typing over a selection replaces it",
+        session.document().lines == ["done"] && session.caret() == (0, 4),
+    );
+    check(
+        "the edit is reported for a highlight",
+        matches!(
+            session.last_edit,
+            Some(EditRecord {
+                kind: EditKind::Replace,
+                line: 0,
+                start: 0,
+                end: 4,
+            })
+        ),
+    );
+
+    // Tabs keep their own caret and their own dirty mark.
+    session.add_document(Document::from_lines("second.rs", None, vec!["two".into()]));
+    session.insert_text("!");
+    // Both documents carry an edit by now, so both show the dirty mark.
+    check(
+        "a second document is a tab",
+        session.titles() == ["check.rs •", "second.rs •"],
+    );
+    check(
+        "switching documents works",
+        session.activate(0) && session.caret() == (0, 4),
+    );
+    check(
+        "a document keeps its own text",
+        session.activate(1) && session.document().lines == ["!two"],
+    );
+
+    failures
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -758,5 +874,18 @@ mod tests {
         assert!(unsaved.save().is_err());
         assert!(unsaved.dirty(), "a failed save keeps the dirty mark");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_shared_state_check_passes_where_it_runs() {
+        // The macOS runner runs exactly this through `--self-check`; running it
+        // here as well means a change is caught in a second, not in four minutes.
+        let failures = state_check(ClickMetrics {
+            gutter: 54.0,
+            cell: 7.4,
+            line_step: 18.0,
+            header: 46.0,
+        });
+        assert!(failures.is_empty(), "{failures:?}");
     }
 }
