@@ -76,6 +76,10 @@
 
 ### macOS 后端
 
+- 终端：`forkpty` 起真正的 shell，输出经共享 `TerminalParser`/`TerminalView` 画成底部抽屉（`⌘J` 开关、
+  PageUp/PageDown 翻历史、共享弹簧动画），键盘在终端聚焦时整键转发（`terminal_core::key_sequence`），
+  窗口尺寸变化用 `ioctl(TIOCSWINSZ)` 同步；`terminal_core` 新增 `TerminalKey`/`key_sequence` 与
+  `Utf8Chunker`（跨读边界不拆字符），后者的单元测试与平台上无关，两个后端都可复用。
 - 标签栏：标题栏画出所有打开的文档（活动标签高亮、脏标记），点击切换、`⌘⇧]`/`⌘⇧[` 循环切换、`⌘W` 关闭，
   菜单里同样有这些项；命中测试与绘制共用同一份几何。
 - 剪贴板、打开面板与菜单栏：`NSPasteboard` 复制/剪切/粘贴、`NSOpenPanel` 打开文件（新标签）与打开文件夹、

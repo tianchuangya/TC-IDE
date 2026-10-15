@@ -16,13 +16,18 @@
 #![allow(dead_code)] // The panels and the pasteboard land on top of this.
 
 use std::cell::RefCell;
-use std::ffi::{c_char, c_double, c_long, c_void, CString};
+use std::ffi::{c_char, c_double, c_int, c_long, c_void, CString};
 use std::path::PathBuf;
 use std::ptr;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::editor_core;
 use crate::editor_session;
+use crate::motion_core;
+use crate::terminal_core::{
+    self, TerminalKey, TerminalParser, TerminalView, TerminalViewport, Utf8Chunker,
+};
 use crate::text_buffer;
 use crate::theme_core;
 use crate::workspace_core;
@@ -492,6 +497,7 @@ unsafe fn measure_cell(size: f64) -> Option<f64> {
 /// # Safety
 /// Call on the main thread.
 unsafe fn quit_application() {
+    with_shell(|shell| shell.stop_terminal());
     let application = msg_id(class("NSApplication"), "sharedApplication");
     if !application.is_null() {
         msg_void_id(application, "terminate:", ptr::null_mut());
@@ -515,6 +521,365 @@ unsafe fn msg_usize_index(receiver: Id, selector: &str, index: usize) -> Id {
     let send: extern "C" fn(Id, Sel, usize) -> Id =
         std::mem::transmute(objc_msgSend as *const c_void);
     send(receiver, selector_name(selector), index)
+}
+
+// ---------------------------------------------------------------------------
+// Pseudo terminal
+// ---------------------------------------------------------------------------
+
+/// A window size for the pseudo terminal, as `winsize` in C.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Winsize {
+    rows: u16,
+    columns: u16,
+    x_pixels: u16,
+    y_pixels: u16,
+}
+
+/// `TIOCSWINSZ` on macOS: set the window size of a terminal.
+const TIOCSWINSZ: std::os::raw::c_ulong = 0x8008_7467;
+/// Signal sent to the shell when the terminal is closed.
+const SIGHUP: c_int = 1;
+/// `waitpid` option that does not block.
+const WNOHANG: c_int = 1;
+
+extern "C" {
+    fn forkpty(
+        master: *mut c_int,
+        name: *mut c_char,
+        termios: *const c_void,
+        size: *const Winsize,
+    ) -> c_int;
+    fn execvp(program: *const c_char, arguments: *const *const c_char) -> c_int;
+    fn _exit(status: c_int) -> !;
+    fn dup(fd: c_int) -> c_int;
+    fn close(fd: c_int) -> c_int;
+    fn read(fd: c_int, buffer: *mut c_void, count: usize) -> isize;
+    fn write(fd: c_int, buffer: *const c_void, count: usize) -> isize;
+    fn ioctl(fd: c_int, request: std::os::raw::c_ulong, ...) -> c_int;
+    fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+    fn kill(pid: c_int, signal: c_int) -> c_int;
+}
+
+/// Write to a file descriptor, retrying a short write.
+///
+/// # Safety
+/// The descriptor has to be open for writing.
+unsafe fn pty_write(fd: c_int, bytes: &[u8]) -> isize {
+    let mut written = 0usize;
+    while written < bytes.len() {
+        let count = unsafe {
+            write(
+                fd,
+                bytes[written..].as_ptr() as *const c_void,
+                bytes.len() - written,
+            )
+        };
+        if count <= 0 {
+            return if written == 0 {
+                count
+            } else {
+                written as isize
+            };
+        }
+        written += count as usize;
+    }
+    written as isize
+}
+
+/// The shell a new terminal starts, from `$SHELL`.
+fn default_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+}
+
+/// A running shell on a pseudo terminal.
+struct Pty {
+    master: c_int,
+    child: c_int,
+    receiver: std::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+impl Pty {
+    /// Start a shell with the given window size.
+    fn spawn(rows: u16, columns: u16) -> Result<Self, String> {
+        let shell = default_shell();
+        let size = Winsize {
+            rows: rows.max(2),
+            columns: columns.max(8),
+            ..Winsize::default()
+        };
+        let mut master: c_int = -1;
+        let pid = unsafe {
+            forkpty(
+                &mut master,
+                ptr::null_mut(),
+                ptr::null(),
+                &size as *const Winsize,
+            )
+        };
+        if pid < 0 {
+            return Err("Could not start a pseudo terminal".into());
+        }
+        if pid == 0 {
+            // The child: replace the process with the shell. Nothing else may
+            // run here, which is why the call never returns on success.
+            let program = CString::new(shell.clone()).unwrap_or_default();
+            let arguments = [program.as_ptr(), ptr::null()];
+            unsafe {
+                execvp(program.as_ptr(), arguments.as_ptr());
+                _exit(127);
+            }
+        }
+        // The parent reads on a duplicate, so the shell can be written to and
+        // resized while the reader blocks on its own descriptor.
+        let reader_fd = unsafe { dup(master) };
+        if reader_fd < 0 {
+            unsafe {
+                let _ = close(master);
+                let _ = kill(pid, SIGHUP);
+            }
+            return Err("Could not duplicate the terminal descriptor".into());
+        }
+        let (sender, receiver) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buffer = vec![0u8; 4096];
+            loop {
+                let count =
+                    unsafe { read(reader_fd, buffer.as_mut_ptr() as *mut c_void, buffer.len()) };
+                if count <= 0 {
+                    break;
+                }
+                let chunk = buffer[..count as usize].to_vec();
+                if sender.send(chunk).is_err() {
+                    break;
+                }
+            }
+            unsafe {
+                let _ = close(reader_fd);
+            }
+        });
+        Ok(Self {
+            master,
+            child: pid,
+            receiver,
+        })
+    }
+
+    /// Everything the shell has written since the last call.
+    fn drain(&self) -> Vec<Vec<u8>> {
+        let mut chunks = Vec::new();
+        while let Ok(chunk) = self.receiver.try_recv() {
+            chunks.push(chunk);
+        }
+        chunks
+    }
+
+    /// Send keystrokes to the shell.
+    fn send(&self, text: &str) {
+        if self.master < 0 || text.is_empty() {
+            return;
+        }
+        unsafe {
+            pty_write(self.master, text.as_bytes());
+        }
+    }
+
+    /// Tell the shell how large the terminal is.
+    fn resize(&self, rows: u16, columns: u16) {
+        if self.master < 0 {
+            return;
+        }
+        let size = Winsize {
+            rows: rows.max(2),
+            columns: columns.max(8),
+            ..Winsize::default()
+        };
+        unsafe {
+            ioctl(self.master, TIOCSWINSZ, &size as *const Winsize);
+        }
+    }
+
+    /// Whether the shell is still running.
+    fn is_running(&self) -> bool {
+        if self.child <= 0 {
+            return false;
+        }
+        let mut status: c_int = 0;
+        let result = unsafe { waitpid(self.child, &mut status, WNOHANG) };
+        // `waitpid` returns the child when it has just exited and 0 while it runs.
+        result == 0
+    }
+
+    /// Stop the shell and release the descriptors.
+    fn close(&mut self) {
+        if self.master >= 0 {
+            unsafe {
+                let _ = close(self.master);
+            }
+            self.master = -1;
+        }
+        if self.child > 0 {
+            unsafe {
+                let _ = kill(self.child, SIGHUP);
+                let mut status: c_int = 0;
+                let _ = waitpid(self.child, &mut status, 0);
+            }
+            self.child = -1;
+        }
+    }
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// The terminal panel: the shell, its parsed output and the scroll position.
+struct TerminalState {
+    pty: Pty,
+    parser: TerminalParser,
+    /// What the parser last published, which is what the panel draws.
+    view: Arc<Mutex<TerminalView>>,
+    viewport: TerminalViewport,
+    chunker: Utf8Chunker,
+    /// Rows the view is scrolled back from the newest output.
+    scroll: usize,
+    columns: u16,
+    rows: u16,
+    open: bool,
+    /// Drawer animation, from the shared spring.
+    motion: f32,
+    velocity: f32,
+}
+
+impl TerminalState {
+    /// Start a shell sized to the grid the panel would use.
+    fn start(rows: u16, columns: u16) -> Result<Self, String> {
+        Ok(Self {
+            pty: Pty::spawn(rows, columns)?,
+            parser: TerminalParser::new(),
+            view: Arc::new(Mutex::new(TerminalView::default())),
+            viewport: TerminalViewport::default(),
+            chunker: Utf8Chunker::new(),
+            scroll: 0,
+            columns,
+            rows,
+            open: true,
+            motion: 0.0,
+            velocity: 0.0,
+        })
+    }
+
+    /// Feed everything the shell wrote into the parser.
+    fn pump(&mut self) {
+        let mut fed = false;
+        for chunk in self.pty.drain() {
+            let text = self.chunker.push(&chunk);
+            if !text.is_empty() {
+                self.parser.feed(&text);
+                fed = true;
+            }
+        }
+        if fed {
+            self.parser.publish(&self.view);
+        }
+    }
+
+    /// Pump the shell until its output contains a marker, or time runs out.
+    fn wait_for(&mut self, marker: &str, timeout: std::time::Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            self.pump();
+            if self.lines().iter().any(|line| line.contains(marker)) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// Lines the panel draws, newest last.
+    fn lines(&self) -> Vec<String> {
+        let Ok(view) = self.view.lock() else {
+            return Vec::new();
+        };
+        let mut lines = view.lines.clone();
+        if !view.current.is_empty() {
+            lines.push(view.current.clone());
+        }
+        lines
+    }
+
+    /// Lines the panel shows, honouring the scroll position.
+    fn visible_lines(&self) -> Vec<String> {
+        let lines = self.lines();
+        let rows = self.rows as usize;
+        if self.scroll == 0 {
+            let start = lines.len().saturating_sub(rows);
+            return lines[start..].to_vec();
+        }
+        let end = lines.len().saturating_sub(self.scroll);
+        let start = end.saturating_sub(rows);
+        lines[start..end].to_vec()
+    }
+
+    /// Scroll the view: a positive number walks back into the history.
+    fn scroll_by(&mut self, rows: i32) {
+        let count = self.lines().len();
+        let visible = (self.rows as usize).max(1);
+        let maximum = count.saturating_sub(visible);
+        self.scroll = (self.scroll as i32 + rows).clamp(0, maximum as i32) as usize;
+    }
+
+    /// Go back to the newest output.
+    fn scroll_to_bottom(&mut self) {
+        self.scroll = 0;
+    }
+
+    /// Resize the shell when the grid changes.
+    fn ensure_size(&mut self, rows: u16, columns: u16) {
+        if rows == self.rows && columns == self.columns {
+            return;
+        }
+        self.rows = rows;
+        self.columns = columns;
+        self.pty.resize(rows, columns);
+    }
+
+    /// Step the drawer animation.
+    fn tick(&mut self, dt: f32) {
+        let target = if self.open { 1.0 } else { 0.0 };
+        motion_core::step(
+            &mut self.motion,
+            &mut self.velocity,
+            target,
+            dt,
+            motion_core::DRAWER,
+        );
+    }
+}
+
+/// A key that belongs to the terminal rather than the editor.
+///
+/// The macOS key codes are the ones `keyDown:` reports, and the terminal sends
+/// the fixed byte sequences of the shared terminal core.
+fn terminal_key(key_code: u16) -> Option<TerminalKey> {
+    match key_code {
+        126 => Some(TerminalKey::Up),
+        125 => Some(TerminalKey::Down),
+        124 => Some(TerminalKey::Right),
+        123 => Some(TerminalKey::Left),
+        115 => Some(TerminalKey::Home),
+        119 => Some(TerminalKey::End),
+        117 => Some(TerminalKey::Delete),
+        51 => Some(TerminalKey::Backspace),
+        36 | 76 => Some(TerminalKey::Enter),
+        48 => Some(TerminalKey::Tab),
+        53 => Some(TerminalKey::Escape),
+        _ => None,
+    }
 }
 
 /// Index of the tab a point of the header is over.
@@ -560,6 +925,7 @@ enum MacCommand {
     NextTab,
     PreviousTab,
     CloseTab,
+    ToggleTerminal,
 }
 
 /// Map a key code and modifiers to an editor command.
@@ -595,6 +961,8 @@ fn key_command(key_code: u16, command: bool, shift: bool) -> Option<MacCommand> 
         30 if command && shift => Some(MacCommand::NextTab),
         33 if command && shift => Some(MacCommand::PreviousTab),
         13 if command => Some(MacCommand::CloseTab),
+        // ⌘J shows or hides the terminal drawer.
+        38 if command => Some(MacCommand::ToggleTerminal),
         _ => None,
     }
 }
@@ -618,6 +986,7 @@ fn command_for_menu_action(action: &str) -> Option<MacCommand> {
         "tcNextTab:" => Some(MacCommand::NextTab),
         "tcPreviousTab:" => Some(MacCommand::PreviousTab),
         "tcCloseTab:" => Some(MacCommand::CloseTab),
+        "tcToggleTerminal:" => Some(MacCommand::ToggleTerminal),
         _ => None,
     }
 }
@@ -638,6 +1007,10 @@ struct MacShell {
     palette: theme_core::Palette,
     status: String,
     started: Instant,
+    /// The terminal drawer, once a shell has been started.
+    terminal: Option<TerminalState>,
+    /// Whether keystrokes go to the shell instead of the document.
+    terminal_focused: bool,
     /// Cell width AppKit measured for the current font size.
     measured_cell: Option<f64>,
     measured_cell_size: f64,
@@ -664,6 +1037,8 @@ impl MacShell {
             preferences,
             status: "Ready".into(),
             started: Instant::now(),
+            terminal: None,
+            terminal_focused: false,
             measured_cell: None,
             measured_cell_size: 0.0,
             window: ptr::null_mut(),
@@ -780,6 +1155,7 @@ impl MacShell {
             MacCommand::NextTab => self.step_tab(1),
             MacCommand::PreviousTab => self.step_tab(-1),
             MacCommand::CloseTab => self.close_tab(),
+            MacCommand::ToggleTerminal => self.toggle_terminal(),
         }
     }
 
@@ -819,6 +1195,125 @@ impl MacShell {
             return None;
         }
         tab_index_at(x, self.session.documents().len(), self.tab_width())
+    }
+
+    /// Step everything that moves in one frame and collect what the shell wrote.
+    fn tick(&mut self) {
+        self.session.tick();
+        // The geometry is read before the terminal is borrowed, so the shell can
+        // be asked for its metrics while the drawer is stepped.
+        let cell = self.measured_cell.unwrap_or(TEXT_CELL).max(1.0);
+        let step = self.line_step().max(1.0);
+        let (width, height) = (self.view_width() as f32, self.view_height() as f32);
+        let progress = self
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.motion)
+            .unwrap_or(0.0);
+        let panel =
+            terminal_core::panel_metrics(width, height, (width / 1280.0).max(0.8), progress);
+        let rows = (((panel.body_bottom - panel.body_top) as f64 / step).floor() as i64)
+            .clamp(2, 200) as u16;
+        let columns = (((panel.body_right - panel.body_left) as f64 / cell).floor() as i64)
+            .clamp(8, 400) as u16;
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.pump();
+            terminal.tick(1.0 / 60.0);
+            terminal.ensure_size(rows, columns);
+        }
+    }
+
+    /// Scroll the terminal view, without sending anything to the shell.
+    fn scroll_terminal(&mut self, rows: i32) -> bool {
+        let Some(terminal) = self.terminal.as_mut() else {
+            return false;
+        };
+        if !terminal.open {
+            return false;
+        }
+        terminal.scroll_by(rows);
+        true
+    }
+
+    /// Show or hide the terminal drawer, starting a shell the first time.
+    fn toggle_terminal(&mut self) {
+        if let Some(terminal) = self.terminal.as_mut() {
+            terminal.open = !terminal.open;
+            let open = terminal.open;
+            self.status = if open {
+                "Terminal shown".into()
+            } else {
+                "Terminal hidden".into()
+            };
+            return;
+        }
+        let (rows, columns) = self.terminal_grid();
+        match TerminalState::start(rows, columns) {
+            Ok(terminal) => {
+                self.terminal = Some(terminal);
+                self.terminal_focused = true;
+                self.status = format!("Terminal started with {}", default_shell());
+            }
+            Err(message) => self.status = message,
+        }
+    }
+
+    /// Stop the shell, for example when the window closes.
+    fn stop_terminal(&mut self) {
+        if let Some(mut terminal) = self.terminal.take() {
+            terminal.pty.close();
+        }
+        self.terminal_focused = false;
+    }
+
+    /// The grid the terminal panel would use at the current size.
+    fn terminal_grid(&self) -> (u16, u16) {
+        let panel = terminal_core::panel_metrics(
+            self.view_width() as f32,
+            self.view_height() as f32,
+            (self.view_width() / 1280.0).max(0.8) as f32,
+            1.0,
+        );
+        let cell = self.measured_cell.unwrap_or(TEXT_CELL).max(1.0);
+        let step = self.line_step().max(1.0);
+        // The panel metrics are f32 and the geometry here is f64.
+        let rows = (((panel.body_bottom - panel.body_top) as f64 / step).floor() as i64)
+            .clamp(2, 200) as u16;
+        let columns = (((panel.body_right - panel.body_left) as f64 / cell).floor() as i64)
+            .clamp(8, 400) as u16;
+        (rows, columns)
+    }
+
+    /// Type into the focused terminal instead of the document.
+    fn terminal_insert(&mut self, text: &str) -> bool {
+        if !self.terminal_focused {
+            return false;
+        }
+        let Some(terminal) = self.terminal.as_mut() else {
+            return false;
+        };
+        terminal.pty.send(text);
+        terminal.scroll_to_bottom();
+        true
+    }
+
+    /// Send a key the terminal has a fixed sequence for.
+    fn terminal_send_key(&mut self, key_code: u16) -> bool {
+        if !self.terminal_focused {
+            return false;
+        }
+        let Some(key) = terminal_key(key_code) else {
+            return false;
+        };
+        let Some(sequence) = terminal_core::key_sequence(key) else {
+            return false;
+        };
+        let Some(terminal) = self.terminal.as_mut() else {
+            return false;
+        };
+        terminal.pty.send(sequence);
+        terminal.scroll_to_bottom();
+        true
     }
 
     /// Copy the selection to the system pasteboard.
@@ -1138,6 +1633,58 @@ unsafe fn draw_frame(shell: &mut MacShell) {
         }
     }
 
+    // The terminal drawer sits above the status bar.
+    if let Some(terminal) = shell.terminal.as_mut() {
+        let progress = terminal.motion.clamp(0.0, 1.0);
+        if progress > 0.01 {
+            let panel = terminal_core::panel_metrics(
+                width as f32,
+                height as f32,
+                (width / 1280.0).max(0.8) as f32,
+                progress,
+            );
+            let body_top = panel.body_top as f64;
+            let body_bottom = panel.body_bottom as f64;
+            fill_rect(
+                CGRect::new(0.0, body_top, width, (body_bottom - body_top).max(0.0)),
+                palette.panel,
+                1.0,
+            );
+            fill_rect(CGRect::new(0.0, body_top, width, 1.0), palette.border, 1.0);
+            let rows = ((body_bottom - body_top) / step).floor().max(1.0) as usize;
+            let visible = terminal.visible_lines();
+            let first = visible.len().saturating_sub(rows);
+            for (row, line) in visible[first..].iter().enumerate() {
+                draw_text(
+                    line,
+                    panel.body_left as f64,
+                    body_top + row as f64 * step,
+                    font,
+                    palette.text,
+                    true,
+                );
+            }
+            // A header row naming the shell and the scroll position.
+            let title = if terminal.scroll == 0 {
+                format!("TERMINAL  ·  {}", default_shell())
+            } else {
+                format!("TERMINAL  ·  scrolled back {} line(s)", terminal.scroll)
+            };
+            draw_text(
+                &title,
+                panel.body_left as f64,
+                body_top - 16.0,
+                12.0,
+                if shell.terminal_focused {
+                    palette.accent
+                } else {
+                    palette.muted
+                },
+                false,
+            );
+        }
+    }
+
     let status_line = format!(
         "{}  ·  {} · ln {}{}",
         shell.status,
@@ -1179,9 +1726,24 @@ unsafe extern "C" fn editor_key_down(_view: Id, _selector: Sel, event: Id) {
     let modifiers = msg_usize(event, "modifierFlags") as u64;
     let command = modifiers & COMMAND_MASK != 0;
     let shift = modifiers & SHIFT_MASK != 0;
-    if let Some(command) = key_command(key_code, command, shift) {
-        with_shell(|shell| shell.apply(command));
-    }
+    with_shell(|shell| {
+        // The shell owns the keys while the terminal has focus, except for the
+        // command shortcuts that open and close panels.
+        if shell.terminal_focused && !command && shell.terminal_send_key(key_code) {
+            return;
+        }
+        // Page up walks back into the scrollback, page down comes forward.
+        if !command
+            && matches!(key_code, 116 | 121)
+            && shell.scroll_terminal(if key_code == 116 { 5 } else { -5 })
+        {
+            return;
+        }
+
+        if let Some(command) = key_command(key_code, command, shift) {
+            shell.apply(command);
+        }
+    });
 }
 
 /// `insertText:` of the editor view, which is also how an IME commits text.
@@ -1195,7 +1757,12 @@ unsafe extern "C" fn editor_insert_text(_view: Id, _selector: Sel, text: Id) {
     let value = std::ffi::CStr::from_ptr(bytes)
         .to_string_lossy()
         .into_owned();
-    with_shell(|shell| shell.session.insert_text(&value));
+    with_shell(|shell| {
+        // Typing goes to the shell while the terminal has focus.
+        if !shell.terminal_insert(&value) {
+            shell.session.insert_text(&value);
+        }
+    });
 }
 
 /// `mouseDown:` of the editor view: place the caret.
@@ -1397,7 +1964,7 @@ unsafe fn register_editor_view() {
 /// `tick:` of the frame timer: step the shared motion and redraw.
 unsafe extern "C" fn timer_tick(_target: Id, _selector: Sel) {
     let view = with_shell(|shell| {
-        shell.session.tick();
+        shell.tick();
         shell.view
     });
     if !view.is_null() {
@@ -1678,6 +2245,56 @@ fn self_check() -> i32 {
         &mut failures,
     );
     report(
+        "the terminal keys are mapped to their sequences",
+        terminal_key(126) == Some(TerminalKey::Up)
+            && terminal_key(125) == Some(TerminalKey::Down)
+            && terminal_key(124) == Some(TerminalKey::Right)
+            && terminal_key(123) == Some(TerminalKey::Left)
+            && terminal_key(115) == Some(TerminalKey::Home)
+            && terminal_key(119) == Some(TerminalKey::End)
+            && terminal_key(117) == Some(TerminalKey::Delete)
+            && terminal_key(51) == Some(TerminalKey::Backspace)
+            && terminal_key(36) == Some(TerminalKey::Enter)
+            && terminal_key(48) == Some(TerminalKey::Tab)
+            && terminal_key(53) == Some(TerminalKey::Escape)
+            && terminal_key(8).is_none(),
+        &mut failures,
+    );
+    report(
+        "the terminal shortcut shows the drawer",
+        key_command(38, true, false) == Some(MacCommand::ToggleTerminal)
+            && command_for_menu_action("tcToggleTerminal:") == Some(MacCommand::ToggleTerminal),
+        &mut failures,
+    );
+    // A shell really runs on a pseudo terminal, and its output is parsed.
+    let grid = shell.terminal_grid();
+    report(
+        "the terminal grid is usable",
+        grid.0 >= 2 && grid.1 >= 8,
+        &mut failures,
+    );
+    match TerminalState::start(grid.0.min(24), grid.1.min(80)) {
+        Ok(mut terminal) => {
+            terminal.pty.send("printf 'tc-ide-pty-ready\\n'\n");
+            let seen = terminal.wait_for("tc-ide-pty-ready", std::time::Duration::from_secs(15));
+            report("a shell runs on a pseudo terminal", seen, &mut failures);
+            let before = terminal.lines().len();
+            terminal.pty.send("printf 'second-marker\\n'\n");
+            let second = terminal.wait_for("second-marker", std::time::Duration::from_secs(15));
+            report(
+                "the shell keeps answering after the first command",
+                second && terminal.lines().len() > before,
+                &mut failures,
+            );
+            terminal.pty.close();
+        }
+        Err(message) => report(
+            &format!("the terminal did not start: {message}"),
+            false,
+            &mut failures,
+        ),
+    }
+    report(
         "a column is placed with the measured cell width",
         (MacShell::column_x_with(4, 8.0) - (GUTTER_WIDTH + 32.0)).abs() < 1.0e-9,
         &mut failures,
@@ -1870,6 +2487,58 @@ mod tests {
             1,
             "the last tab stays open"
         );
+    }
+
+    #[test]
+    fn the_terminal_keys_are_mapped() {
+        assert_eq!(terminal_key(126), Some(TerminalKey::Up));
+        assert_eq!(terminal_key(125), Some(TerminalKey::Down));
+        assert_eq!(terminal_key(124), Some(TerminalKey::Right));
+        assert_eq!(terminal_key(123), Some(TerminalKey::Left));
+        assert_eq!(terminal_key(115), Some(TerminalKey::Home));
+        assert_eq!(terminal_key(119), Some(TerminalKey::End));
+        assert_eq!(terminal_key(117), Some(TerminalKey::Delete));
+        assert_eq!(terminal_key(51), Some(TerminalKey::Backspace));
+        assert_eq!(terminal_key(36), Some(TerminalKey::Enter));
+        assert_eq!(terminal_key(76), Some(TerminalKey::Enter));
+        assert_eq!(terminal_key(48), Some(TerminalKey::Tab));
+        assert_eq!(terminal_key(53), Some(TerminalKey::Escape));
+        // A letter belongs to the shell as text, not as a sequence.
+        assert_eq!(terminal_key(8), None);
+        assert_eq!(terminal_key(0), None);
+    }
+
+    #[test]
+    fn a_shell_runs_and_its_output_is_parsed() {
+        let mut terminal = TerminalState::start(20, 80).expect("a pseudo terminal");
+        terminal.pty.send("printf 'tc-ide-test-ready\\n'\n");
+        assert!(
+            terminal.wait_for("tc-ide-test-ready", std::time::Duration::from_secs(15)),
+            "the shell should answer: {:?}",
+            terminal.lines()
+        );
+        terminal.pty.close();
+        assert!(!terminal.pty.is_running(), "the shell is stopped again");
+    }
+
+    #[test]
+    fn the_terminal_scrolls_back_through_its_output() {
+        let mut terminal = TerminalState::start(20, 80).expect("a pseudo terminal");
+        terminal.parser.feed("one\ntwo\nthree\nfour\nfive\n");
+        terminal.parser.publish(&terminal.view);
+        terminal.rows = 2;
+        assert_eq!(terminal.visible_lines(), ["four", "five"]);
+        terminal.scroll_by(1);
+        assert_eq!(terminal.visible_lines(), ["three", "four"]);
+        terminal.scroll_by(1);
+        assert_eq!(terminal.visible_lines(), ["two", "three"]);
+        terminal.scroll_by(-5);
+        assert_eq!(
+            terminal.visible_lines(),
+            ["four", "five"],
+            "scrolling clamps"
+        );
+        terminal.pty.close();
     }
 
     #[test]

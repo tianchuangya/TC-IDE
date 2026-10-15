@@ -838,3 +838,157 @@ mod tests {
         assert_eq!(column_for_cells("", 3), 0);
     }
 }
+
+/// A key whose terminal encoding is a fixed escape sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalKey {
+    Up,
+    Down,
+    Right,
+    Left,
+    Home,
+    End,
+    Delete,
+    Tab,
+    Backspace,
+    Enter,
+    Escape,
+}
+
+/// Bytes a key sends to the shell, when it has a fixed encoding.
+///
+/// A printable key is not here: it goes through the text input path so an input
+/// method can compose it first.
+pub fn key_sequence(key: TerminalKey) -> Option<&'static str> {
+    match key {
+        TerminalKey::Up => Some("\u{1b}[A"),
+        TerminalKey::Down => Some("\u{1b}[B"),
+        TerminalKey::Right => Some("\u{1b}[C"),
+        TerminalKey::Left => Some("\u{1b}[D"),
+        TerminalKey::Home => Some("\u{1b}[H"),
+        TerminalKey::End => Some("\u{1b}[F"),
+        TerminalKey::Delete => Some("\u{1b}[3~"),
+        TerminalKey::Tab => Some("\t"),
+        TerminalKey::Backspace => Some("\u{8}"),
+        TerminalKey::Enter => Some("\r"),
+        TerminalKey::Escape => Some("\u{1b}"),
+    }
+}
+
+/// Decodes a byte stream into text without splitting a character.
+///
+/// A read from a pseudo terminal can end in the middle of a multi byte
+/// character; decoding each chunk on its own would turn the tail into a
+/// replacement character and lose the accent or the CJK glyph that follows.
+#[derive(Clone, Debug, Default)]
+pub struct Utf8Chunker {
+    pending: Vec<u8>,
+}
+
+impl Utf8Chunker {
+    /// An empty chunker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Take the next chunk of bytes and return the text it completes.
+    pub fn push(&mut self, bytes: &[u8]) -> String {
+        self.pending.extend_from_slice(bytes);
+        match std::str::from_utf8(&self.pending) {
+            Ok(text) => {
+                let text = text.to_string();
+                self.pending.clear();
+                text
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                let text = String::from_utf8_lossy(&self.pending[..valid]).into_owned();
+                // Keep an incomplete tail for the next read; anything else is
+                // dropped so the stream cannot grow without bound.
+                let incomplete = error.error_len().is_none();
+                let tail = self.pending[valid..].to_vec();
+                self.pending.clear();
+                if incomplete && tail.len() <= 4 {
+                    self.pending = tail;
+                } else if !tail.is_empty() {
+                    return text + &String::from_utf8_lossy(&tail);
+                }
+                text
+            }
+        }
+    }
+
+    /// Bytes waiting for the rest of their character.
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+#[cfg(test)]
+mod key_and_chunk_tests {
+    use super::*;
+
+    #[test]
+    fn the_arrow_keys_send_their_csi_sequences() {
+        assert_eq!(key_sequence(TerminalKey::Up), Some("\u{1b}[A"));
+        assert_eq!(key_sequence(TerminalKey::Down), Some("\u{1b}[B"));
+        assert_eq!(key_sequence(TerminalKey::Right), Some("\u{1b}[C"));
+        assert_eq!(key_sequence(TerminalKey::Left), Some("\u{1b}[D"));
+        assert_eq!(key_sequence(TerminalKey::Home), Some("\u{1b}[H"));
+        assert_eq!(key_sequence(TerminalKey::End), Some("\u{1b}[F"));
+        assert_eq!(key_sequence(TerminalKey::Delete), Some("\u{1b}[3~"));
+        assert_eq!(key_sequence(TerminalKey::Enter), Some("\r"));
+        assert_eq!(key_sequence(TerminalKey::Tab), Some("\t"));
+        assert_eq!(key_sequence(TerminalKey::Escape), Some("\u{1b}"));
+        // Every sequence is non empty and only ASCII control plus brackets.
+        for key in [
+            TerminalKey::Up,
+            TerminalKey::Down,
+            TerminalKey::Right,
+            TerminalKey::Left,
+            TerminalKey::Home,
+            TerminalKey::End,
+            TerminalKey::Delete,
+            TerminalKey::Tab,
+            TerminalKey::Backspace,
+            TerminalKey::Enter,
+            TerminalKey::Escape,
+        ] {
+            let sequence = key_sequence(key).expect("a sequence");
+            assert!(!sequence.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_character_split_across_reads_is_not_lost() {
+        let mut chunker = Utf8Chunker::new();
+        let text = "héllo 你好";
+        let bytes = text.as_bytes();
+        // Feed the stream one byte at a time, as a slow read would.
+        let mut decoded = String::new();
+        for byte in bytes {
+            decoded.push_str(&chunker.push(&[*byte]));
+        }
+        assert_eq!(decoded, text);
+        assert_eq!(chunker.pending_len(), 0);
+
+        // A whole chunk in one go works too.
+        let mut chunker = Utf8Chunker::new();
+        assert_eq!(chunker.push(text.as_bytes()), text);
+        assert_eq!(chunker.push(b""), "");
+
+        // Broken bytes are replaced instead of stalling the stream.
+        let mut chunker = Utf8Chunker::new();
+        let decoded = chunker.push(&[0xff, 0xfe, b'o', b'k']);
+        assert!(decoded.ends_with("ok"), "{decoded:?}");
+        assert_eq!(chunker.pending_len(), 0, "junk must not pile up");
+
+        // A split inside a three byte character is held back.
+        let mut chunker = Utf8Chunker::new();
+        let bytes = "你".as_bytes();
+        assert_eq!(chunker.push(&bytes[..1]), "");
+        assert_eq!(chunker.pending_len(), 1);
+        assert_eq!(chunker.push(&bytes[1..]), "你");
+        assert_eq!(chunker.pending_len(), 0);
+    }
+}
