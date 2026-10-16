@@ -11,7 +11,7 @@
 - 测试：**317 + 3 + 4** 全绿；三目标 clippy 零警告；CI **passing**。
 - 队列：**44 已完成 / 2 部分完成 / 0 未开始**。
 - 两个部分完成项**本机做不到**（需要 Windows 实机 / 一台 Mac），不要试图在 Linux 上「补完」它们。
-- **刚完成的一件事**：Linux 代码视口滚动条与真实 Build/Run 流水线已接通（见 §4.7）。
+- **刚完成的一件事**：项目插件清单、可执行命令与扩展面板已接通（见 §4.8）。
 - **方向已变**：用户明确说不再为 Windows 平台对齐投入时间，**专注新功能**。
 
 ---
@@ -110,6 +110,7 @@ ai-panel  diagnostics  brackets  folding  find  project-find
 graph-callees  relations  background-crop  settings-hover  settings-controls
 syntax-colors
 scrolling
+plugins
 ```
 
 另有 `background` 场景可在源码中使用，但未进入 CI 帧门槛。
@@ -201,6 +202,13 @@ grep -c "palette.control(" src/macos_app.rs        # 1
 - C/C++/Java 的 Run 命令包含“编译 `&&` 运行”，首次运行不再依赖事先存在的二进制；Rust/Go/Python/Node 分别使用 Cargo/Go/Python/npm。
 - `Ctrl+F5` 可直接执行 Run；F5 仍保留为调试。
 - CI 视觉场景 `scrolling` 固定验证长文件视口和滚动条。
+
+### 4.8 项目插件基础
+
+- 共享 `extension_core::parse_plugin_manifest()` 支持 `[plugin]` 和重复的 `[command]` 段。
+- 项目把 `.plugin` 或 `.conf` 清单放在 `.tc-ide/plugins/`；打开项目时会自动扫描。
+- 扩展 → 项目插件中显示版本、描述和命令；用户点击命令后才会在 Run 终端执行，同时写入 Output 汇总。
+- 清单是用户项目的明确配置，TC-IDE 不会自动执行未点击的外部命令。
 
 ---
 

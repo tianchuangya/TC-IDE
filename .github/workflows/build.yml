@@ -73,6 +73,7 @@ jobs:
           xvfb-run -a cargo run -- --render-frame /tmp/tc-pressed.png --render-scene settings-controls
           xvfb-run -a cargo run -- --render-frame /tmp/tc-syntax-colors.png --render-scene syntax-colors
           xvfb-run -a cargo run -- --render-frame /tmp/tc-scrolling.png --render-scene scrolling
+          xvfb-run -a cargo run -- --render-frame /tmp/tc-plugins.png --render-scene plugins
           python3 - <<'PY'
           import os
           import sys
@@ -98,6 +99,7 @@ jobs:
               "/tmp/tc-pressed.png",
               "/tmp/tc-syntax-colors.png",
               "/tmp/tc-scrolling.png",
+              "/tmp/tc-plugins.png",
           ]
           sizes = {path: os.path.getsize(path) for path in frames}
           for path, size in sizes.items():

@@ -65,6 +65,117 @@ pub struct ExtensionSource {
     pub binary: Option<String>,
 }
 
+/// A project-local plugin manifest. Plugins are deliberately data-first: the
+/// manifest advertises commands, while TC-IDE runs them only after the user
+/// clicks a visible command action in the Plugins panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginManifest {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub commands: Vec<PluginCommand>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginCommand {
+    pub id: String,
+    pub label: String,
+    pub command: String,
+}
+
+/// Parse a project plugin manifest from `[plugin]` and repeated `[command]`
+/// sections. Unknown keys are ignored for forward compatibility.
+pub fn parse_plugin_manifest(text: &str) -> Result<PluginManifest, String> {
+    let mut plugin = PluginManifest {
+        id: String::new(),
+        name: String::new(),
+        version: String::new(),
+        description: String::new(),
+        commands: Vec::new(),
+    };
+    let mut command: Option<PluginCommand> = None;
+    let mut section = "";
+    for (line_no, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line == "[plugin]" {
+            if command.is_some() {
+                return Err(format!(
+                    "line {}: command section is incomplete",
+                    line_no + 1
+                ));
+            }
+            section = "plugin";
+            continue;
+        }
+        if line == "[command]" {
+            if let Some(value) = command.take() {
+                finish_plugin_command(value, line_no, &mut plugin.commands)?;
+            }
+            section = "command";
+            command = Some(PluginCommand {
+                id: String::new(),
+                label: String::new(),
+                command: String::new(),
+            });
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(format!("line {}: expected key=value", line_no + 1));
+        };
+        let value = value.trim();
+        match section {
+            "plugin" => match key.trim() {
+                "id" => plugin.id = value.to_string(),
+                "name" => plugin.name = value.to_string(),
+                "version" => plugin.version = value.to_string(),
+                "description" => plugin.description = value.to_string(),
+                _ => {}
+            },
+            "command" => {
+                let Some(current) = command.as_mut() else {
+                    return Err(format!("line {}: command outside section", line_no + 1));
+                };
+                match key.trim() {
+                    "id" => current.id = value.to_string(),
+                    "label" => current.label = value.to_string(),
+                    "command" => current.command = value.to_string(),
+                    _ => {}
+                }
+            }
+            _ => return Err(format!("line {}: value outside a section", line_no + 1)),
+        }
+    }
+    if let Some(value) = command {
+        finish_plugin_command(value, text.lines().count(), &mut plugin.commands)?;
+    }
+    if plugin.id.is_empty() || plugin.name.is_empty() || plugin.version.is_empty() {
+        return Err("plugin requires id, name and version".into());
+    }
+    Ok(plugin)
+}
+
+fn finish_plugin_command(
+    mut command: PluginCommand,
+    line_no: usize,
+    commands: &mut Vec<PluginCommand>,
+) -> Result<(), String> {
+    if command.id.is_empty() || command.command.is_empty() {
+        return Err(format!(
+            "line {}: command requires id and command",
+            line_no + 1
+        ));
+    }
+    if command.label.is_empty() {
+        command.label = command.id.clone();
+    }
+    commands.push(command);
+    Ok(())
+}
+
 impl ExtensionSource {
     /// Whether the catalog entry can be installed as it stands.
     pub fn is_installable(&self) -> bool {
@@ -985,5 +1096,17 @@ mod tests {
         source.url = "http://plain.example.invalid/x.tgz".into();
         assert!(!source.is_installable(), "a download has to be https");
         assert!(install_plan("/cache", &source, Shell::Unix).is_err());
+    }
+
+    #[test]
+    fn project_plugin_manifests_register_commands() {
+        let manifest = parse_plugin_manifest(
+            "[plugin]\nid=preview\nname=Preview Tools\nversion=0.1.0\ndescription=fast preview\n\n[command]\nid=serve\nlabel=Start preview\ncommand=npm run dev\n\n[command]\nid=check\ncommand=cargo check\n",
+        )
+        .expect("manifest");
+        assert_eq!(manifest.id, "preview");
+        assert_eq!(manifest.commands.len(), 2);
+        assert_eq!(manifest.commands[1].label, "check");
+        assert!(parse_plugin_manifest("[plugin]\nid=broken\n").is_err());
     }
 }

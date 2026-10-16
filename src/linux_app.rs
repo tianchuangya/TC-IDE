@@ -932,6 +932,7 @@ struct App {
     settings_open: bool,
     ui_chinese: bool,
     languages: Vec<LanguagePack>,
+    project_plugins: Vec<extension_core::PluginManifest>,
     downloading: Option<(usize, Instant)>,
     extension_scroll: usize,
     extension_category: usize,
@@ -3600,6 +3601,7 @@ impl App {
         self.shutdown_language_server();
         self.project_path = Some(folder.clone());
         self.project_name = name.clone();
+        self.load_project_plugins();
         self.session.open(Some(folder), name.clone());
         self.remember_session();
         self.status_message = format!("{} {name}", self.tr("Opened project", "已打开项目"));
@@ -3644,6 +3646,7 @@ impl App {
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "TC-IDE".into());
+                self.load_project_plugins();
             }
         }
         let restored = self.session.restorable_documents();
@@ -5849,6 +5852,7 @@ impl App {
             self.tr("Debuggers", "调试器"),
             self.tr("Formatters", "格式化"),
             self.tr("AI / Agents", "AI / 智能体"),
+            self.tr("Project Plugins", "项目插件"),
         ];
         for (index, label) in categories.iter().enumerate() {
             let row = y + s(101 + index as i32 * 43);
@@ -6189,6 +6193,61 @@ impl App {
                         "接口地址和模型会保存；API Key 不会写入磁盘。",
                     ),
                 );
+            } else if self.extension_category == 5 {
+                let dx = x + s(195);
+                self.text(
+                    self.colors.bright,
+                    dx,
+                    y + s(108),
+                    self.tr("PROJECT PLUGINS", "项目插件"),
+                );
+                self.text(
+                    self.colors.muted,
+                    dx,
+                    y + s(138),
+                    self.tr(
+                        "Place .plugin or .conf manifests in .tc-ide/plugins",
+                        "将 .plugin 或 .conf 清单放入 .tc-ide/plugins",
+                    ),
+                );
+                if self.project_plugins.is_empty() {
+                    self.text(
+                        self.colors.muted,
+                        dx,
+                        y + s(190),
+                        self.tr("No project plugins discovered", "未发现项目插件"),
+                    );
+                }
+                let mut row = 205;
+                for plugin in &self.project_plugins {
+                    self.rect(self.colors.panel, dx, y + s(row - 25), s(650), s(34));
+                    self.outline(self.colors.line, dx, y + s(row - 25), s(650), s(34));
+                    self.text(
+                        self.colors.bright,
+                        dx + s(12),
+                        y + s(row - 3),
+                        &format!("{}  v{}", plugin.name, plugin.version),
+                    );
+                    self.text(
+                        self.colors.muted,
+                        dx + s(260),
+                        y + s(row - 3),
+                        &plugin.description,
+                    );
+                    row += 45;
+                    for command in &plugin.commands {
+                        self.outline(self.colors.line, dx + s(18), y + s(row - 25), s(270), s(34));
+                        self.text(self.colors.text, dx + s(30), y + s(row - 3), &command.label);
+                        self.text(
+                            self.colors.muted,
+                            dx + s(310),
+                            y + s(row - 3),
+                            &command.command,
+                        );
+                        row += 42;
+                    }
+                    row += 10;
+                }
             } else {
                 let items = if self.extension_category == 2 {
                     ["Native LLDB", "GDB Adapter", "DAP Bridge"]
@@ -6494,6 +6553,30 @@ impl App {
                 .unwrap_or_else(Instant::now)
         };
         match name {
+            "plugins" => {
+                self.extensions_open = true;
+                self.extensions_motion = UiMotion::new(1.0);
+                self.extension_category = 5;
+                self.project_plugins = vec![extension_core::PluginManifest {
+                    id: "preview-tools".into(),
+                    name: "Preview Tools".into(),
+                    version: "0.4.0".into(),
+                    description: "fast local preview and checks".into(),
+                    commands: vec![
+                        extension_core::PluginCommand {
+                            id: "serve".into(),
+                            label: "Start preview".into(),
+                            command: "npm run dev".into(),
+                        },
+                        extension_core::PluginCommand {
+                            id: "check".into(),
+                            label: "Run checks".into(),
+                            command: "npm test".into(),
+                        },
+                    ],
+                }];
+                true
+            }
             "scrolling" => {
                 let mut lines = vec![
                     "#include <iostream>".to_string(),
@@ -8770,6 +8853,34 @@ impl App {
         extension_core::parse_catalog(&content)
     }
 
+    fn load_project_plugins(&mut self) {
+        self.project_plugins.clear();
+        let Some(project) = self.project_path.as_ref() else {
+            return;
+        };
+        let directory = project.join(".tc-ide/plugins");
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_manifest = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| matches!(value, "plugin" | "conf"));
+            if !is_manifest {
+                continue;
+            }
+            if let Ok(text) = fs::read_to_string(&path) {
+                if let Ok(manifest) = extension_core::parse_plugin_manifest(&text) {
+                    self.project_plugins.push(manifest);
+                }
+            }
+        }
+        self.project_plugins
+            .sort_by(|left, right| left.name.cmp(&right.name));
+    }
+
     /// The shell commands are written for.
     fn shell_kind(&self) -> extension_core::Shell {
         extension_core::Shell::Unix
@@ -9232,6 +9343,7 @@ impl App {
         let content = primary.contents.clone();
         self.project_name = name.to_string();
         self.project_path = Some(root.clone());
+        self.load_project_plugins();
         self.folders = folders;
         self.project_tree_expanded = true;
         self.project_tree_amount = 1.0;
@@ -9859,7 +9971,7 @@ impl App {
             let menu_x = self.width - w - s(20);
             let menu_y = s(52);
             if x >= menu_x && x <= menu_x + w && y >= menu_y && y <= menu_y + h {
-                for category in 0..5 {
+                for category in 0..6 {
                     let row = menu_y + s(101 + category as i32 * 43);
                     if x <= menu_x + s(175) && (y - row).abs() < s(19) {
                         self.extension_category = category;
@@ -9914,6 +10026,36 @@ impl App {
                                     .into();
                             }
                             return;
+                        }
+                    } else if self.extension_category == 5 {
+                        let dx = menu_x + s(195);
+                        let mut row = 205;
+                        for plugin in &self.project_plugins {
+                            row += 45;
+                            for command in &plugin.commands {
+                                let hit = x >= dx + s(18)
+                                    && x <= dx + s(288)
+                                    && y >= menu_y + s(row - 25)
+                                    && y <= menu_y + s(row + 9);
+                                if hit {
+                                    let command_line = command.command.clone();
+                                    self.terminal_open = true;
+                                    self.terminal_active = 1.min(self.terminals.len() - 1);
+                                    self.run_in_terminal_to(
+                                        1.min(self.terminals.len() - 1),
+                                        &command_line,
+                                        true,
+                                    );
+                                    self.status_message = format!(
+                                        "{} {}",
+                                        self.tr("Plugin command:", "插件命令："),
+                                        command_line
+                                    );
+                                    return;
+                                }
+                                row += 42;
+                            }
+                            row += 10;
                         }
                     } else {
                         for index in 0..3 {
@@ -12695,6 +12837,7 @@ pub fn run() {
             settings_open: false,
             ui_chinese: preferences.chinese,
             languages: initial_languages(),
+            project_plugins: Vec::new(),
             downloading: None,
             extension_scroll: 0,
             extension_category: 0,
