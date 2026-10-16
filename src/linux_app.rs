@@ -3950,6 +3950,13 @@ impl App {
             s(27),
         );
         self.text(self.colors.text, s(314), s(29), self.tr("View", "查看"));
+        // Keep the primary workflow commands visible in the same menu row as
+        // the preview design: users should not have to open a secondary panel
+        // just to build, run or start a debug session.
+        self.outline(self.colors.line, s(397), s(10), s(72), s(27));
+        self.text(self.colors.text, s(410), s(29), self.tr("Run", "运行"));
+        self.outline(self.colors.line, s(475), s(10), s(72), s(27));
+        self.text(self.colors.text, s(488), s(29), self.tr("Debug", "调试"));
         let path = format!(
             "{}  /  {}",
             self.project_name, self.files[self.selected_file].name
@@ -4768,12 +4775,36 @@ impl App {
             s(38),
         );
         self.line(self.colors.line, 1, (left, s(84)), (right, s(84)));
-        self.text(
-            self.colors.bright,
-            left + s(18),
-            s(71),
-            &self.files[self.selected_file].name,
-        );
+        // File tabs mirror the overall preview: switching files keeps the
+        // editor surface stable while the active tab receives a small accent
+        // lift instead of replacing the title in place.
+        let mut tab_x = left + s(10);
+        for (index, file) in self.files.iter().enumerate().take(6) {
+            let tab_width = self.pango_text_size(&file.name, false).0.max(s(58)) + s(28);
+            if tab_x + tab_width > right - s(180) {
+                break;
+            }
+            if index == self.selected_file {
+                self.rect(self.colors.panel, tab_x, s(49), tab_width, s(32));
+                self.line(
+                    self.colors.accent,
+                    2,
+                    (tab_x, s(82)),
+                    (tab_x + tab_width, s(82)),
+                );
+            }
+            self.text(
+                if index == self.selected_file {
+                    self.colors.bright
+                } else {
+                    self.colors.muted
+                },
+                tab_x + s(12),
+                s(70),
+                &file.name,
+            );
+            tab_x += tab_width + s(2);
+        }
         let debug_x = left + s(174);
         for (index, label) in ["●  BP", "▶  F5", "→  F10", "■  STOP"].iter().enumerate() {
             let bx = debug_x + index as i32 * s(78);
