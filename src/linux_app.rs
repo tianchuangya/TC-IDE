@@ -26,6 +26,7 @@ use crate::package_motion;
 use crate::search_core;
 use crate::session_core;
 use crate::syntax_core;
+use crate::tcide_project;
 use crate::terminal_core;
 use crate::text_buffer;
 use crate::theme_core;
@@ -787,6 +788,8 @@ struct App {
     folders: Vec<String>,
     project_name: String,
     project_path: Option<PathBuf>,
+    /// Human-readable project graph/index shared with AI tools.
+    tcide_project: tcide_project::ProjectDocument,
     project_location: String,
     project_location_focused: bool,
     create_caret: usize,
@@ -3608,6 +3611,7 @@ impl App {
         // new one rather than answers about the old tree.
         self.shutdown_language_server();
         self.project_path = Some(folder.clone());
+        self.tcide_project = tcide_project::load_or_create(&folder);
         self.project_name = name.clone();
         self.load_project_plugins();
         self.session.open(Some(folder), name.clone());
@@ -3650,6 +3654,7 @@ impl App {
         if let Some(project) = self.session.project().cloned() {
             if project.is_dir() {
                 self.project_path = Some(project.clone());
+                self.tcide_project = tcide_project::load_or_create(&project);
                 self.project_name = project
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
@@ -3751,10 +3756,76 @@ impl App {
             }
         }
         self.project_symbols = editor_core::project_symbol_occurrences(&sources);
+        self.sync_tcide_project_document(&sources);
         self.graph_folded.clear();
         self.hovered = None;
         self.hovered_symbol = None;
         self.graph_scroll = 0;
+    }
+
+    fn sync_tcide_project_document(&mut self, sources: &[(String, Vec<String>)]) {
+        let Some(root) = self.project_path.as_deref() else {
+            return;
+        };
+        let mut document = self.tcide_project.clone();
+        document.name = self.project_name.clone();
+        document.root = ".".into();
+        document.files = sources
+            .iter()
+            .map(|(path, _)| tcide_project::ProjectFile {
+                path: path.clone(),
+                language: editor_core::language_for_file(path).to_string(),
+            })
+            .collect();
+        document.symbols = self
+            .project_symbols
+            .iter()
+            .map(|entry| tcide_project::ProjectSymbol {
+                id: format!(
+                    "symbol:{}:{}:{}",
+                    entry.file,
+                    entry.symbol.line + 1,
+                    entry.symbol.name
+                ),
+                file: entry.file.clone(),
+                name: entry.symbol.name.clone(),
+                line: entry.symbol.line + 1,
+                role: match entry.symbol.role {
+                    editor_core::SymbolRole::Declaration => "declaration",
+                    editor_core::SymbolRole::Reference => "reference",
+                }
+                .into(),
+            })
+            .collect();
+        let declarations = document
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.role == "declaration")
+            .map(|symbol| (symbol.name.clone(), symbol.id.clone()))
+            .collect::<BTreeMap<_, _>>();
+        document.relations = document
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.role == "reference")
+            .filter_map(|symbol| {
+                declarations
+                    .get(&symbol.name)
+                    .map(|to| tcide_project::ProjectRelation {
+                        from: symbol.id.clone(),
+                        to: to.clone(),
+                        kind: "reference".into(),
+                        confidence: "indexed".into(),
+                    })
+            })
+            .collect();
+        document.view.folded = self.graph_folded.iter().cloned().collect();
+        document.view.focused_file = self
+            .files
+            .get(self.selected_file)
+            .map(|file| file.name.clone())
+            .unwrap_or_default();
+        self.tcide_project = document;
+        let _ = tcide_project::save(root, &self.tcide_project);
     }
 
     /// Rows the graph panel can show.
@@ -12785,6 +12856,7 @@ pub fn run() {
             folders: vec!["src".into(), "src/editor".into()],
             project_name: "TC-IDE".into(),
             project_path: None,
+            tcide_project: tcide_project::ProjectDocument::default(),
             project_location: "~/TC-IDE-Projects".into(),
             project_location_focused: false,
             create_caret: 0,
