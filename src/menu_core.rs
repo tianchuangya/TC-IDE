@@ -741,3 +741,168 @@ mod cursor_tests {
         assert_eq!(menu_under(&[], 120, 20), None);
     }
 }
+
+/// Width a tab takes, given how wide its name is.
+///
+/// A tab strip needs the same treatment the menu bar got: the drawing and the
+/// hit test have to agree, or a tab's close button ends up beside the tab
+/// rather than on it. The layout is computed here so both read it.
+///
+/// A tab is as wide as its name plus room for the close button, with a floor
+/// so a one character name is still clickable.
+pub fn tab_width(name_width: i32, padding: i32, minimum: i32) -> i32 {
+    (name_width + padding).max(minimum)
+}
+
+/// Width of the close button inside a tab.
+pub fn tab_close_width(inset: i32) -> i32 {
+    // A square the height of the tab's text, so it is easy to hit.
+    (inset * 2).max(14)
+}
+
+/// Which tab a position is on, and whether it hit that tab's close button.
+///
+/// Returning both together is what keeps the two from being decided by
+/// different arithmetic: a click near the right edge of a tab is either the
+/// close button or the tab, never both and never neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TabHit {
+    pub index: usize,
+    /// The pointer was on the close button rather than the tab itself.
+    pub close: bool,
+}
+
+/// Find the tab under a horizontal position.
+///
+/// `tabs` are `(left, width)`, so the caller supplies the geometry it drew
+/// with. Tabs are laid left to right and do not overlap, so the first match
+/// wins; a position in the gap after the last tab hits nothing.
+pub fn tab_at(tabs: &[(i32, i32)], close_width: i32, x: i32) -> Option<TabHit> {
+    tabs.iter().enumerate().find_map(|(index, (left, width))| {
+        if x < *left || x >= left + width {
+            return None;
+        }
+        // The close button is the square at the trailing edge.
+        let close_from = left + width - close_width;
+        Some(TabHit {
+            index,
+            close: x >= close_from,
+        })
+    })
+}
+
+/// Which tab is selected after closing one.
+///
+/// Closing a tab should leave the selection somewhere sensible: the tab that
+/// took its place, or the one before it when the last tab closed, rather than
+/// jumping to the first tab or leaving the index past the end.
+pub fn selection_after_close(closed: usize, count: usize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    let remaining = count - 1;
+    if remaining == 0 {
+        return None;
+    }
+    Some(closed.min(remaining - 1))
+}
+
+#[cfg(test)]
+mod tab_tests {
+    use super::*;
+
+    #[test]
+    fn a_tab_is_as_wide_as_its_name_and_no_narrower_than_its_floor() {
+        // Room for the name plus the close button, so a long name is not
+        // clipped and a one character name is still easy to hit.
+        assert_eq!(tab_width(80, 28, 58), 108);
+        assert_eq!(tab_width(10, 28, 58), 58, "the floor applies");
+        assert_eq!(tab_width(30, 28, 58), 58, "exactly at the floor");
+        assert_eq!(tab_width(31, 28, 58), 59, "just over it");
+        // The close button is at least big enough to hit.
+        assert!(tab_close_width(7) >= 14);
+        assert_eq!(tab_close_width(20), 40);
+    }
+
+    #[test]
+    fn a_hit_tells_the_tab_from_its_close_button() {
+        // Two tabs, the first 100 wide and the second 80.
+        let tabs = [(0, 100), (100, 80)];
+        let close = tab_close_width(7); // 14
+                                        // The middle of the first tab is the tab, not the button.
+        assert_eq!(
+            tab_at(&tabs, close, 40),
+            Some(TabHit {
+                index: 0,
+                close: false
+            })
+        );
+        // Near its trailing edge it is the close button.
+        assert_eq!(
+            tab_at(&tabs, close, 95),
+            Some(TabHit {
+                index: 0,
+                close: true
+            })
+        );
+        // The boundary between two tabs belongs to the second, so the pixels
+        // at the join are never ambiguous.
+        assert_eq!(
+            tab_at(&tabs, close, 100),
+            Some(TabHit {
+                index: 1,
+                close: false
+            })
+        );
+        // And the second tab's own close button.
+        assert_eq!(
+            tab_at(&tabs, close, 170),
+            Some(TabHit {
+                index: 1,
+                close: true
+            })
+        );
+        // Past the last tab there is nothing.
+        assert_eq!(tab_at(&tabs, close, 180), None);
+        assert_eq!(tab_at(&tabs, close, -5), None);
+        assert_eq!(tab_at(&[], close, 40), None);
+    }
+
+    #[test]
+    fn every_pixel_of_a_tab_is_either_the_tab_or_its_button() {
+        // The hit test has to cover the whole tab exactly once, or there is a
+        // dead column where clicking a tab does nothing.
+        let tabs = [(10, 90)];
+        let close = tab_close_width(7);
+        for x in 10..100 {
+            let hit = tab_at(&tabs, close, x);
+            assert!(hit.is_some(), "x={x} hit nothing");
+            assert_eq!(hit.unwrap().index, 0);
+        }
+        // Just outside, nothing.
+        assert_eq!(tab_at(&tabs, close, 9), None);
+        assert_eq!(tab_at(&tabs, close, 100), None);
+    }
+
+    #[test]
+    fn closing_a_tab_leaves_the_selection_somewhere_sensible() {
+        // Closing a middle tab selects the one that took its place.
+        assert_eq!(selection_after_close(1, 5), Some(1));
+        // Closing the last tab falls back to the one before it rather than
+        // leaving the index past the end.
+        assert_eq!(selection_after_close(4, 5), Some(3));
+        // Closing the first selects what is now first.
+        assert_eq!(selection_after_close(0, 5), Some(0));
+        // Closing the only tab leaves nothing selected.
+        assert_eq!(selection_after_close(0, 1), None);
+        assert_eq!(selection_after_close(0, 0), None);
+        // The result is always a valid index into what is left.
+        for count in 1..=6 {
+            for closed in 0..count {
+                if let Some(next) = selection_after_close(closed, count) {
+                    assert!(next < count - 1, "closed {closed} of {count} gave {next}");
+                }
+            }
+        }
+    }
+}

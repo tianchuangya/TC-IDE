@@ -826,6 +826,8 @@ struct App {
     menu_cursor: menu_core::MenuCursor,
     /// Slide of the dropdown as it opens and closes.
     menu_dropdown_motion: UiMotion,
+    /// Tab whose close button the pointer is on.
+    tab_close_hovered: Option<usize>,
     /// Whether the comment bubbles are drawn beside the code.
     comment_bubbles: bool,
     /// Whether the shortcut sheet is open.
@@ -2582,6 +2584,30 @@ impl App {
         motion_core::step(value, velocity, target, dt, motion_core::DRAWER);
     }
 
+    /// Where each file tab sits, and where the new-tab button is.
+    ///
+    /// One piece of arithmetic for the drawing and the hit test, so the close
+    /// button the reader sees is the one a click finds.
+    fn tab_layout(&self) -> (Vec<(i32, i32)>, i32) {
+        let s = |v: i32| self.s(v);
+        let left = (self.width as f32 * 0.17) as i32;
+        let right = self.graph_left();
+        let close_width = menu_core::tab_close_width(s(7));
+        let mut tab_x = left + s(10);
+        let mut tabs = Vec::new();
+        for file in &self.files {
+            let name_width = self.pango_text_size(&file.name, false).0;
+            let width = menu_core::tab_width(name_width, s(28), s(58));
+            if tab_x + width > right - s(180) {
+                break;
+            }
+            tabs.push((tab_x, width));
+            tab_x += width + s(2);
+        }
+        let _ = close_width;
+        (tabs, tab_x + s(4))
+    }
+
     /// Step a motion towards shown or hidden, with the feel its role calls for.
     ///
     /// Every panel used one profile before this, so a menu and a drawer moved
@@ -3619,6 +3645,58 @@ impl App {
         }
     }
 
+    /// Read a project document and show the view it records.
+    ///
+    /// The document says which range, file and symbol the relations were last
+    /// looked at with, so opening it puts the graph back where it was left
+    /// rather than at a default nobody chose.
+    fn show_project_document(&mut self) {
+        // The parser ignores what it does not recognise, so an unreadable
+        // document reads as an empty one rather than failing; a document with
+        // nothing in it is reported as such rather than shown as an empty graph.
+        let lines = self.files[self.selected_file].lines.clone();
+        let document = tcide_project::parse(&lines.join("\n"));
+        if document.symbols.is_empty() && document.files.is_empty() {
+            self.status_message = self
+                .tr(
+                    "That project document records nothing yet",
+                    "该工程文档尚无内容",
+                )
+                .into();
+            return;
+        }
+        self.tcide_project = document.clone();
+        self.graph_visible = true;
+        self.graph_motion = UiMotion::new(1.0);
+        self.graph_scope = match document.view.scope.as_str() {
+            "project" => Some(graph_core::GraphScope::Project),
+            "folder" => Some(graph_core::GraphScope::Folder),
+            "symbol" => Some(graph_core::GraphScope::Symbol),
+            "file" => Some(graph_core::GraphScope::File),
+            // Anything else means the document did not record a choice.
+            _ => None,
+        };
+        self.graph_folded = document.view.folded.iter().cloned().collect();
+        // The focused file, when the project still has it.
+        if !document.view.focused_file.is_empty() {
+            if let Some(index) = self
+                .files
+                .iter()
+                .position(|file| file.name == document.view.focused_file)
+            {
+                self.selected_file = index;
+            }
+        }
+        let symbols = document.symbols.len();
+        let unit = self.tr("symbol(s)", "个符号");
+        self.status_message = format!(
+            "{} {} {} {symbols} {unit}",
+            self.tr("Project", "工程"),
+            document.name,
+            self.tr("with", "共"),
+        );
+    }
+
     fn trigger_file_switch(&mut self) {
         self.file_switch_motion = UiMotion::new(0.0);
         self.file_switch_motion.velocity = 1.0;
@@ -3651,9 +3729,16 @@ impl App {
                 self.remember_session();
                 let opened = self.files[self.selected_file].name.clone();
                 self.status_message = format!("{} {opened}", self.tr("Opened", "已打开"));
-                // A server for the file that was just opened, if one is
-                // installed; a missing one only says so.
-                self.ensure_language_server();
+                // A project document is a description of the project rather
+                // than something to edit, so opening one shows the relations it
+                // records instead of a page of text.
+                if opened.ends_with(&format!(".{}", tcide_project::FILE_EXTENSION)) {
+                    self.show_project_document();
+                } else {
+                    // A server for the file that was just opened, if one is
+                    // installed; a missing one only says so.
+                    self.ensure_language_server();
+                }
             }
             Err(error) => {
                 self.status_message = format!(
@@ -4831,47 +4916,58 @@ impl App {
         // File tabs mirror the overall preview: switching files keeps the
         // editor surface stable while the active tab receives a small accent
         // lift instead of replacing the title in place.
-        let mut tab_x = left + s(10);
+        // The strip is laid out with the shared geometry, so the close button
+        // drawn here is the one the hit test finds rather than a second guess.
         let tab_shift =
             ((1.0 - self.file_switch_motion.value.clamp(0.0, 1.0)) * s(9) as f32).round() as i32;
-        for (index, file) in self.files.iter().enumerate().take(6) {
-            let tab_width = self.pango_text_size(&file.name, false).0.max(s(58)) + s(28);
-            if tab_x + tab_width > right - s(180) {
+        let close_width = menu_core::tab_close_width(s(7));
+        let (tabs, new_tab_x) = self.tab_layout();
+        for (index, file) in self.files.iter().enumerate() {
+            let Some(&(tab_x, width)) = tabs.get(index) else {
                 break;
-            }
-            if index == self.selected_file {
-                self.rect(
-                    self.colors.panel,
-                    tab_x + tab_shift,
-                    s(49),
-                    tab_width,
-                    s(32),
-                );
+            };
+            let selected = index == self.selected_file;
+            let shift = if selected { tab_shift } else { 0 };
+            if selected {
+                self.rect(self.colors.panel, tab_x + shift, s(49), width, s(32));
                 self.line(
                     self.colors.accent,
                     2,
-                    (tab_x + tab_shift, s(82)),
-                    (tab_x + tab_width + tab_shift, s(82)),
+                    (tab_x + shift, s(82)),
+                    (tab_x + width + shift, s(82)),
                 );
+            } else if self.tab_close_hovered == Some(index) {
+                // A tab the pointer is on lifts slightly, so it is clear which
+                // one the close button belongs to.
+                self.rect(self.colors.panel_2, tab_x, s(51), width, s(30));
             }
             self.text(
-                if index == self.selected_file {
+                if selected {
                     self.colors.bright
                 } else {
                     self.colors.muted
                 },
-                tab_x
-                    + s(12)
-                    + if index == self.selected_file {
-                        tab_shift
-                    } else {
-                        0
-                    },
+                tab_x + s(12) + shift,
                 s(70),
                 &file.name,
             );
-            tab_x += tab_width + s(2);
+            // The close button, at the tab's trailing edge.
+            let close_x = tab_x + width - close_width - s(4) + shift;
+            let hovered = self.tab_close_hovered == Some(index);
+            self.text(
+                if hovered {
+                    self.colors.accent
+                } else {
+                    self.colors.muted
+                },
+                close_x + s(4),
+                s(70),
+                "×",
+            );
         }
+        // The new-tab button sits after the last tab.
+        self.outline(self.colors.line, new_tab_x, s(52), s(46), s(26));
+        self.text(self.colors.muted, new_tab_x + s(18), s(70), "+");
         let debug_x = left + s(174);
         for (index, label) in ["●  BP", "▶  F5", "→  F10", "■  STOP"].iter().enumerate() {
             let bx = debug_x + index as i32 * s(78);
@@ -6866,6 +6962,37 @@ impl App {
                 self.folded = vec![0, 5];
                 self.goto_prompt = Some("42".into());
                 self.goto_focused = true;
+                true
+            }
+            "project-document" => {
+                // A project document opened, so the relations it records are
+                // shown rather than a page of text.
+                self.files = vec![FileBuffer::new(
+                    "Demo.tcIDE".into(),
+                    PathBuf::from("/tmp/tc-ide-preview/Demo.tcIDE"),
+                    vec![
+                        "# TC-IDE project document".into(),
+                        "format=1".into(),
+                        "".into(),
+                        "[project]".into(),
+                        "name=Demo".into(),
+                        "root=.".into(),
+                        "language=Rust".into(),
+                        "".into(),
+                        "[files]".into(),
+                        "path=src/main.rs\tlanguage=Rust".into(),
+                        "path=src/graph.rs\tlanguage=Rust".into(),
+                        "".into(),
+                        "[symbols]".into(),
+                        "id=symbol:src/main.rs:4:main\tfile=src/main.rs\tname=main\tline=4\trole=declaration".into(),
+                        "id=symbol:src/graph.rs:8:build_graph\tfile=src/graph.rs\tname=build_graph\tline=8\trole=declaration".into(),
+                        "".into(),
+                        "[view]".into(),
+                        "scope=project\tfocused_file=src/main.rs".into(),
+                    ],
+                )];
+                self.selected_file = 0;
+                self.show_project_document();
                 true
             }
             "typing" => {
@@ -9050,6 +9177,64 @@ impl App {
         }
     }
 
+    /// Close a file tab.
+    ///
+    /// The document is dropped and the selection moves to a sensible tab
+    /// rather than jumping to the first or landing past the end. The last tab
+    /// is kept: an editor with no document has nothing to draw, and the strip
+    /// would have no way back.
+    fn close_tab(&mut self, index: usize) {
+        if self.files.len() <= 1 {
+            self.status_message = self
+                .tr("The last tab cannot be closed", "最后一个标签不能关闭")
+                .into();
+            return;
+        }
+        if index >= self.files.len() {
+            return;
+        }
+        let name = self.files[index].name.clone();
+        self.files.remove(index);
+        if let Some(next) = menu_core::selection_after_close(index, self.files.len() + 1) {
+            self.selected_file = next;
+        }
+        self.clamp_caret_to_document((usize::MAX, 0));
+        self.caret_line = self
+            .caret_line
+            .min(self.files[self.selected_file].lines.len() - 1);
+        self.folded.clear();
+        self.tab_close_hovered = None;
+        self.status_message = format!("{} {name}", self.tr("Closed", "已关闭"));
+    }
+
+    /// Open a new empty document as a tab.
+    fn new_tab(&mut self) {
+        let name = self.unique_document_name();
+        self.files.push(FileBuffer::new(
+            name.clone(),
+            PathBuf::from(&name),
+            vec![String::new()],
+        ));
+        self.selected_file = self.files.len() - 1;
+        self.caret_line = 0;
+        self.caret_column = 0;
+        self.folded.clear();
+        self.file_switch_motion = UiMotion::new(0.0);
+        self.file_switch_motion.velocity = 1.0;
+        self.status_message = format!("{} {name}", self.tr("New file", "新建文件"));
+    }
+
+    /// A name no open document is using.
+    fn unique_document_name(&self) -> String {
+        for number in 1..1000 {
+            let name = format!("untitled-{number}.rs");
+            if !self.files.iter().any(|file| file.name == name) {
+                return name;
+            }
+        }
+        "untitled.rs".to_string()
+    }
+
     /// Note where the pointer is, so the title under it highlights.
     ///
     /// Hover moves the same cursor the keyboard does, so the two can never
@@ -9063,6 +9248,18 @@ impl App {
                 (menu, left, top, width, height)
             })
             .collect::<Vec<_>>();
+        // A pointer on the tab strip highlights the close button it is over,
+        // so it is clear which tab the button belongs to.
+        self.tab_close_hovered = None;
+        if y >= self.s(49) && y <= self.s(81) {
+            let (tabs, _) = self.tab_layout();
+            let close_width = menu_core::tab_close_width(self.s(7));
+            if let Some(hit) = menu_core::tab_at(&tabs, close_width, x) {
+                if hit.close {
+                    self.tab_close_hovered = Some(hit.index);
+                }
+            }
+        }
         let Some(menu) = menu_core::menu_under(&rects, x, y) else {
             return;
         };
@@ -10298,6 +10495,30 @@ impl App {
             if self.graph_visible && x >= gx && x <= gx + gw && y >= gy && y <= gy + gh {
                 self.graph_visible = false;
                 self.status_message = self.tr("Call hierarchy hidden", "已隐藏调用层级").into();
+                return;
+            }
+        }
+        // The tab strip: a click selects a tab, its close button closes it,
+        // and the button after the last tab opens a new document. The geometry
+        // comes from the same call the drawing used.
+        if y >= s(49) && y <= s(84) {
+            let (tabs, new_tab_x) = self.tab_layout();
+            let close_width = menu_core::tab_close_width(s(7));
+            if let Some(hit) = menu_core::tab_at(&tabs, close_width, x) {
+                if hit.close {
+                    self.close_tab(hit.index);
+                } else {
+                    self.selected_file = hit.index;
+                    self.caret_line = self
+                        .caret_line
+                        .min(self.files[self.selected_file].lines.len().saturating_sub(1));
+                    self.file_switch_motion = UiMotion::new(0.0);
+                    self.file_switch_motion.velocity = 1.0;
+                }
+                return;
+            }
+            if x >= new_tab_x && x <= new_tab_x + s(46) {
+                self.new_tab();
                 return;
             }
         }
@@ -13243,6 +13464,7 @@ pub fn run() {
             open_menu: None,
             menu_cursor: menu_core::MenuCursor::default(),
             menu_dropdown_motion: UiMotion::new(0.0),
+            tab_close_hovered: None,
             comment_bubbles: true,
             shortcuts_open: false,
             about_open: false,
