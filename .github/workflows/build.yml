@@ -71,6 +71,7 @@ jobs:
           xvfb-run -a cargo run -- --render-frame /tmp/tc-crop.png --render-scene background-crop
           xvfb-run -a cargo run -- --render-frame /tmp/tc-hover.png --render-scene settings-hover
           xvfb-run -a cargo run -- --render-frame /tmp/tc-pressed.png --render-scene settings-controls
+          xvfb-run -a cargo run -- --render-frame /tmp/tc-syntax-colors.png --render-scene syntax-colors
           python3 - <<'PY'
           import os
           import sys
@@ -94,6 +95,7 @@ jobs:
               "/tmp/tc-crop.png",
               "/tmp/tc-hover.png",
               "/tmp/tc-pressed.png",
+              "/tmp/tc-syntax-colors.png",
           ]
           sizes = {path: os.path.getsize(path) for path in frames}
           for path, size in sizes.items():
@@ -102,10 +104,9 @@ jobs:
           # to differ from the plain editor frame: identical bytes would mean
           # --render-scene silently stopped priming the animation.
           editor = sizes["/tmp/tc-frame.png"]
-          # The relation graph scene needs a member call in the fixture, so it
-          # only has to be a real frame; the others must differ from the editor.
+          # Every primed scene must differ from the plain editor frame.
           ok = all(size > 20_000 for size in sizes.values()) and all(
-              sizes[path] != editor for path in frames[1:-1]
+              sizes[path] != editor for path in frames[1:]
           )
           sys.exit(0 if ok else 1)
           PY

@@ -18,6 +18,66 @@ pub const TEXT_MINIMUM: f64 = 4.5;
 /// Contrast a decoration, an accent or a border needs.
 pub const DECORATION_MINIMUM: f64 = 3.0;
 
+/// Syntax categories a person can customise independently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum SyntaxRole {
+    Keyword,
+    Type,
+    Function,
+    Constant,
+    Variable,
+    Parameter,
+    Property,
+    Macro,
+    Module,
+    Preprocessor,
+    Literal,
+    Comment,
+}
+
+impl SyntaxRole {
+    pub const ALL: [Self; 12] = [
+        Self::Keyword,
+        Self::Type,
+        Self::Function,
+        Self::Constant,
+        Self::Variable,
+        Self::Parameter,
+        Self::Property,
+        Self::Macro,
+        Self::Module,
+        Self::Preprocessor,
+        Self::Literal,
+        Self::Comment,
+    ];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Keyword => "keyword",
+            Self::Type => "type",
+            Self::Function => "function",
+            Self::Constant => "constant",
+            Self::Variable => "variable",
+            Self::Parameter => "parameter",
+            Self::Property => "property",
+            Self::Macro => "macro",
+            Self::Module => "module",
+            Self::Preprocessor => "preprocessor",
+            Self::Literal => "literal",
+            Self::Comment => "comment",
+        }
+    }
+}
+
+/// Parse CSS-style six-digit RGB, accepting either `#RRGGBB` or `RRGGBB`.
+pub fn parse_hex_rgb(value: &str) -> Option<u32> {
+    let digits = value.trim().strip_prefix('#').unwrap_or(value.trim());
+    (digits.len() == 6)
+        .then(|| u32::from_str_radix(digits, 16).ok())
+        .flatten()
+}
+
 /// The colours of one theme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
@@ -70,6 +130,22 @@ pub struct Palette {
 }
 
 impl Palette {
+    pub fn syntax(self, role: SyntaxRole) -> u32 {
+        match role {
+            SyntaxRole::Keyword => self.keyword,
+            SyntaxRole::Type => self.syntax_type,
+            SyntaxRole::Function => self.function,
+            SyntaxRole::Constant => self.constant,
+            SyntaxRole::Variable => self.variable,
+            SyntaxRole::Parameter => self.parameter,
+            SyntaxRole::Property => self.property,
+            SyntaxRole::Macro => self.macro_name,
+            SyntaxRole::Module => self.module,
+            SyntaxRole::Preprocessor => self.preprocessor,
+            SyntaxRole::Literal => self.literal,
+            SyntaxRole::Comment => self.comment,
+        }
+    }
     /// Palette of the dark theme.
     pub fn dark() -> Self {
         Self {
@@ -330,6 +406,19 @@ pub fn meets_contrast(foreground: u32, background: u32, minimum: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn syntax_roles_and_hex_rgb_are_stable() {
+        assert_eq!(SyntaxRole::ALL.len(), 12);
+        assert_eq!(parse_hex_rgb("#64D2FF"), Some(0x64d2ff));
+        assert_eq!(parse_hex_rgb("0a84ff"), Some(0x0a84ff));
+        assert_eq!(parse_hex_rgb("#12345"), None);
+        assert_eq!(parse_hex_rgb("#GG0000"), None);
+        for role in SyntaxRole::ALL {
+            assert!(!role.key().is_empty());
+            assert_eq!(Palette::dark().syntax(role), Palette::dark().syntax(role));
+        }
+    }
 
     #[test]
     fn contrast_matches_the_known_extremes() {

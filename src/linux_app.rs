@@ -632,6 +632,13 @@ struct LinuxControlVisual {
     lift: f32,
 }
 
+type SyntaxOverrides = [Option<u32>; 12];
+
+const SYNTAX_SWATCHES: [u32; 18] = [
+    0x64d2ff, 0x0a84ff, 0x30d158, 0xbf5af2, 0xffd60a, 0xff9f0a, 0xff375f, 0xff8fa3, 0xe8e8ed,
+    0x8e8e93, 0x0b5394, 0x146b2e, 0x71317f, 0x785700, 0x1b5e8a, 0x8a2f45, 0x5f6368, 0x24292f,
+];
+
 fn control_visual_index(state: theme_core::ControlState, emphasised: bool) -> usize {
     let state = match state {
         theme_core::ControlState::Normal => 0,
@@ -640,6 +647,24 @@ fn control_visual_index(state: theme_core::ControlState, emphasised: bool) -> us
         theme_core::ControlState::Disabled => 3,
     };
     state * 2 + usize::from(emphasised)
+}
+
+fn set_linux_syntax_color(palette: &mut Palette, role: theme_core::SyntaxRole, pixel: c_ulong) {
+    use theme_core::SyntaxRole::*;
+    match role {
+        Keyword => palette.keyword = pixel,
+        Type => palette.syntax_type = pixel,
+        Function => palette.function = pixel,
+        Constant => palette.constant = pixel,
+        Variable => palette.variable = pixel,
+        Parameter => palette.parameter = pixel,
+        Property => palette.property = pixel,
+        Macro => palette.macro_name = pixel,
+        Module => palette.module = pixel,
+        Preprocessor => palette.preprocessor = pixel,
+        Literal => palette.literal = pixel,
+        Comment => palette.comment = pixel,
+    }
 }
 
 /// A question the editor asks the language server.
@@ -732,6 +757,13 @@ struct App {
     settings_pressed: Option<SettingsControl>,
     /// Control the keyboard is on in the settings panel.
     settings_focus: Option<SettingsControl>,
+    syntax_colors_open: bool,
+    syntax_color_role: usize,
+    syntax_hex_input: String,
+    syntax_hex_focused: bool,
+    syntax_overrides_dark: SyntaxOverrides,
+    syntax_overrides_light: SyntaxOverrides,
+    syntax_swatch_pixels: [c_ulong; 18],
     hovered_from_code: bool,
     hovered_code_span: Option<(usize, usize, usize)>,
     selected_file: usize,
@@ -1356,6 +1388,95 @@ impl App {
                 },
             )
             .into();
+        self.refresh_syntax_hex_input();
+    }
+
+    fn selected_syntax_role(&self) -> theme_core::SyntaxRole {
+        theme_core::SyntaxRole::ALL[self
+            .syntax_color_role
+            .min(theme_core::SyntaxRole::ALL.len() - 1)]
+    }
+
+    fn syntax_pixel(&self, role: theme_core::SyntaxRole) -> c_ulong {
+        match role {
+            theme_core::SyntaxRole::Keyword => self.colors.keyword,
+            theme_core::SyntaxRole::Type => self.colors.syntax_type,
+            theme_core::SyntaxRole::Function => self.colors.function,
+            theme_core::SyntaxRole::Constant => self.colors.constant,
+            theme_core::SyntaxRole::Variable => self.colors.variable,
+            theme_core::SyntaxRole::Parameter => self.colors.parameter,
+            theme_core::SyntaxRole::Property => self.colors.property,
+            theme_core::SyntaxRole::Macro => self.colors.macro_name,
+            theme_core::SyntaxRole::Module => self.colors.module,
+            theme_core::SyntaxRole::Preprocessor => self.colors.preprocessor,
+            theme_core::SyntaxRole::Literal => self.colors.literal,
+            theme_core::SyntaxRole::Comment => self.colors.comment,
+        }
+    }
+
+    fn selected_syntax_rgb(&self) -> u32 {
+        let role = self.selected_syntax_role();
+        let overrides = if self.light_theme {
+            &self.syntax_overrides_light
+        } else {
+            &self.syntax_overrides_dark
+        };
+        overrides[role as usize]
+            .unwrap_or_else(|| theme_core::Palette::for_scheme(self.light_theme).syntax(role))
+    }
+
+    fn refresh_syntax_hex_input(&mut self) {
+        self.syntax_hex_input = theme_core::Palette::hex(self.selected_syntax_rgb()).to_uppercase();
+    }
+
+    fn set_syntax_rgb(&mut self, rgb: u32) {
+        let role = self.selected_syntax_role();
+        let screen = unsafe { XDefaultScreen(self.display) };
+        let map = unsafe { XDefaultColormap(self.display, screen) };
+        let pixel = unsafe { color(self.display, map, &theme_core::Palette::hex(rgb)) };
+        let overrides = if self.light_theme {
+            &mut self.syntax_overrides_light
+        } else {
+            &mut self.syntax_overrides_dark
+        };
+        overrides[role as usize] = Some(rgb & 0x00ff_ffff);
+        if self.light_theme {
+            set_linux_syntax_color(&mut self.light_colors, role, pixel);
+            self.colors = self.light_colors;
+        } else {
+            set_linux_syntax_color(&mut self.dark_colors, role, pixel);
+            self.colors = self.dark_colors;
+        }
+        save_syntax_preferences(&self.syntax_overrides_dark, &self.syntax_overrides_light);
+        self.refresh_syntax_hex_input();
+        self.status_message = format!(
+            "{} {} = {}",
+            self.tr("Syntax colour", "语法颜色"),
+            role.key(),
+            self.syntax_hex_input
+        );
+    }
+
+    fn reset_selected_syntax_rgb(&mut self) {
+        let role = self.selected_syntax_role();
+        if self.light_theme {
+            self.syntax_overrides_light[role as usize] = None;
+        } else {
+            self.syntax_overrides_dark[role as usize] = None;
+        }
+        let rgb = theme_core::Palette::for_scheme(self.light_theme).syntax(role);
+        let screen = unsafe { XDefaultScreen(self.display) };
+        let map = unsafe { XDefaultColormap(self.display, screen) };
+        let pixel = unsafe { color(self.display, map, &theme_core::Palette::hex(rgb)) };
+        if self.light_theme {
+            set_linux_syntax_color(&mut self.light_colors, role, pixel);
+            self.colors = self.light_colors;
+        } else {
+            set_linux_syntax_color(&mut self.dark_colors, role, pixel);
+            self.colors = self.dark_colors;
+        }
+        save_syntax_preferences(&self.syntax_overrides_dark, &self.syntax_overrides_light);
+        self.refresh_syntax_hex_input();
     }
 
     fn filtered_font_indices(&self) -> Vec<usize> {
@@ -3966,6 +4087,191 @@ impl App {
         );
     }
 
+    fn syntax_color_panel_rect(&self) -> (i32, i32, i32, i32) {
+        let width = self.s(760).min(self.width - self.s(40));
+        let height = self.s(560).min(self.height - self.s(80));
+        (
+            (self.width - width) / 2,
+            (self.height - height) / 2,
+            width,
+            height,
+        )
+    }
+
+    fn syntax_role_label(&self, role: theme_core::SyntaxRole) -> &'static str {
+        use theme_core::SyntaxRole::*;
+        match role {
+            Keyword => self.tr("Keyword", "关键字"),
+            Type => self.tr("Type / Class", "类型 / Class"),
+            Function => self.tr("Function", "函数"),
+            Constant => self.tr("Constant", "常量"),
+            Variable => self.tr("Variable", "变量"),
+            Parameter => self.tr("Parameter", "参数"),
+            Property => self.tr("Property", "属性"),
+            Macro => self.tr("Macro / Annotation", "宏 / 注解"),
+            Module => self.tr("Module / Namespace", "模块 / 命名空间"),
+            Preprocessor => self.tr("Preprocessor", "预处理"),
+            Literal => self.tr("String / Number", "字符串 / 数字"),
+            Comment => self.tr("Comment", "注释"),
+        }
+    }
+
+    unsafe fn draw_syntax_color_panel(&self) {
+        let s = |v| self.s(v);
+        let (x, y, w, h) = self.syntax_color_panel_rect();
+        self.floating_panel(x, y, w, h);
+        self.text(
+            self.colors.bright,
+            x + s(20),
+            y + s(30),
+            self.tr("SYNTAX COLOURS", "语法颜色"),
+        );
+        self.text(self.colors.muted, x + w - s(38), y + s(30), "x");
+        self.text(
+            self.colors.muted,
+            x + s(280),
+            y + s(30),
+            self.tr(
+                if self.light_theme {
+                    "LIGHT THEME"
+                } else {
+                    "DARK THEME"
+                },
+                if self.light_theme {
+                    "浅色主题"
+                } else {
+                    "深色主题"
+                },
+            ),
+        );
+        for (index, role) in theme_core::SyntaxRole::ALL.into_iter().enumerate() {
+            let row = y + s(62 + index as i32 * 38);
+            if index == self.syntax_color_role {
+                self.rect(self.colors.project, x + s(14), row - s(24), s(238), s(31));
+                self.outline(self.colors.accent, x + s(14), row - s(24), s(238), s(31));
+            }
+            let rgb = if self.light_theme {
+                self.syntax_overrides_light[index]
+            } else {
+                self.syntax_overrides_dark[index]
+            }
+            .unwrap_or_else(|| theme_core::Palette::for_scheme(self.light_theme).syntax(role));
+            let pixel = self.syntax_pixel(role);
+            self.rect(pixel, x + s(24), row - s(16), s(13), s(13));
+            self.text(
+                self.colors.text,
+                x + s(48),
+                row,
+                self.syntax_role_label(role),
+            );
+            self.text(self.colors.muted, x + s(174), row, &format!("#{rgb:06X}"));
+        }
+        let right = x + s(280);
+        self.text(
+            self.colors.muted,
+            right,
+            y + s(78),
+            self.tr("Palette", "调色盘"),
+        );
+        for (index, pixel) in self.syntax_swatch_pixels.iter().enumerate() {
+            let column = index % 6;
+            let row = index / 6;
+            let sx = right + column as i32 * s(66);
+            let sy = y + s(94 + row as i32 * 52);
+            self.rect(*pixel, sx, sy, s(48), s(36));
+            if SYNTAX_SWATCHES[index] == self.selected_syntax_rgb() {
+                self.outline(self.colors.bright, sx - s(2), sy - s(2), s(52), s(40));
+            }
+        }
+        self.text(
+            self.colors.muted,
+            right,
+            y + s(268),
+            self.tr("Hex RGB", "16 进制 RGB"),
+        );
+        self.rect(self.colors.bg, right, y + s(282), s(250), s(38));
+        self.outline(
+            if self.syntax_hex_focused {
+                self.colors.accent
+            } else {
+                self.colors.line
+            },
+            right,
+            y + s(282),
+            s(250),
+            s(38),
+        );
+        self.text(
+            self.colors.bright,
+            right + s(12),
+            y + s(308),
+            &self.syntax_hex_input,
+        );
+        self.rect(
+            self.colors.bright,
+            right + s(266),
+            y + s(282),
+            s(150),
+            s(38),
+        );
+        self.text(
+            self.colors.bg,
+            right + s(302),
+            y + s(308),
+            self.tr("APPLY", "应用"),
+        );
+        self.text(
+            self.colors.muted,
+            right,
+            y + s(350),
+            self.tr("Live code preview", "代码实时预览"),
+        );
+        self.rect(self.colors.bg, right, y + s(365), w - s(310), s(104));
+        self.pango_text(
+            self.colors.keyword,
+            right + s(14),
+            y + s(394),
+            "pub const",
+            true,
+        );
+        self.pango_text(
+            self.colors.syntax_type,
+            right + s(126),
+            y + s(394),
+            "Widget",
+            true,
+        );
+        self.pango_text(
+            self.colors.function,
+            right + s(14),
+            y + s(426),
+            "render",
+            true,
+        );
+        self.pango_text(
+            self.colors.variable,
+            right + s(108),
+            y + s(426),
+            "value",
+            true,
+        );
+        self.pango_text(self.colors.literal, right + s(190), y + s(426), "42", true);
+        self.pango_text(
+            self.colors.comment,
+            right + s(14),
+            y + s(458),
+            "// preview",
+            true,
+        );
+        self.outline(self.colors.line, right, y + s(490), s(184), s(38));
+        self.text(
+            self.colors.text,
+            right + s(24),
+            y + s(516),
+            self.tr("RESET THIS COLOUR", "重置当前颜色"),
+        );
+    }
+
     unsafe fn draw_settings_menu(&self) {
         let s = |v| self.s(v);
         let x = self.width - s(410);
@@ -3978,6 +4284,14 @@ impl App {
             x + s(16),
             y + s(27),
             self.tr("SETTINGS", "设置"),
+        );
+        self.rect(self.colors.panel_2, x + w - s(174), y + s(8), s(158), s(28));
+        self.outline(self.colors.line, x + w - s(174), y + s(8), s(158), s(28));
+        self.text(
+            self.colors.text,
+            x + w - s(160),
+            y + s(28),
+            self.tr("SYNTAX COLOURS", "语法颜色"),
         );
         self.text(
             self.colors.muted,
@@ -4195,6 +4509,9 @@ impl App {
                 py + s(24),
                 self.tr("Choose a PNG to crop it here", "选择 PNG 后可在这里取景"),
             );
+        }
+        if self.syntax_colors_open {
+            self.draw_syntax_color_panel();
         }
     }
 
@@ -6485,6 +6802,14 @@ impl App {
                 self.graph_relation = graph_core::GraphRelation::Callees;
                 true
             }
+            "syntax-colors" => {
+                self.settings_open = true;
+                self.settings_motion = UiMotion::new(1.0);
+                self.syntax_colors_open = true;
+                self.syntax_color_role = theme_core::SyntaxRole::Variable as usize;
+                self.refresh_syntax_hex_input();
+                true
+            }
             "settings-controls" | "settings-hover" => {
                 // Settings open on a picture: one control hovered, one pressed,
                 // one focused from the keyboard and several disabled.
@@ -8739,6 +9064,71 @@ impl App {
         let scale = self.scale();
         let s = move |v: i32| (v as f32 * scale).round() as i32;
         let graph_left = self.graph_left();
+        if self.syntax_colors_open {
+            let (panel_x, panel_y, panel_w, _panel_h) = self.syntax_color_panel_rect();
+            if button == 1 {
+                if x >= panel_x + panel_w - s(60) && y <= panel_y + s(48) {
+                    self.syntax_colors_open = false;
+                    self.syntax_hex_focused = false;
+                    return;
+                }
+                for index in 0..theme_core::SyntaxRole::ALL.len() {
+                    let row = panel_y + s(62 + index as i32 * 38);
+                    if x >= panel_x + s(14)
+                        && x <= panel_x + s(252)
+                        && y >= row - s(24)
+                        && y <= row + s(7)
+                    {
+                        self.syntax_color_role = index;
+                        self.refresh_syntax_hex_input();
+                        self.syntax_hex_focused = false;
+                        return;
+                    }
+                }
+                let right = panel_x + s(280);
+                for (index, rgb) in SYNTAX_SWATCHES.into_iter().enumerate() {
+                    let column = index % 6;
+                    let row = index / 6;
+                    let sx = right + column as i32 * s(66);
+                    let sy = panel_y + s(94 + row as i32 * 52);
+                    if x >= sx && x <= sx + s(48) && y >= sy && y <= sy + s(36) {
+                        self.set_syntax_rgb(rgb);
+                        return;
+                    }
+                }
+                if x >= right
+                    && x <= right + s(250)
+                    && y >= panel_y + s(282)
+                    && y <= panel_y + s(320)
+                {
+                    self.syntax_hex_focused = true;
+                    return;
+                }
+                if x >= right + s(266)
+                    && x <= right + s(416)
+                    && y >= panel_y + s(282)
+                    && y <= panel_y + s(320)
+                {
+                    if let Some(rgb) = theme_core::parse_hex_rgb(&self.syntax_hex_input) {
+                        self.set_syntax_rgb(rgb);
+                    } else {
+                        self.status_message = self
+                            .tr("Use a colour like #64D2FF", "请输入如 #64D2FF 的颜色")
+                            .into();
+                    }
+                    return;
+                }
+                if x >= right
+                    && x <= right + s(184)
+                    && y >= panel_y + s(490)
+                    && y <= panel_y + s(528)
+                {
+                    self.reset_selected_syntax_rgb();
+                    return;
+                }
+            }
+            return;
+        }
         if let Some((menu_x, menu_y)) = self.workspace_context_menu {
             if button == 1
                 && x >= menu_x
@@ -9150,6 +9540,16 @@ impl App {
             let menu_x = self.width - s(410);
             let menu_y = s(43);
             if button == 1 && x >= menu_x && x <= menu_x + s(390) {
+                if x >= menu_x + s(216)
+                    && x <= menu_x + s(374)
+                    && y >= menu_y + s(8)
+                    && y <= menu_y + s(36)
+                {
+                    self.syntax_colors_open = true;
+                    self.syntax_hex_focused = false;
+                    self.refresh_syntax_hex_input();
+                    return;
+                }
                 // Every button of this panel is one control with one rectangle,
                 // so the pressed state and the click cannot disagree.
                 if let Some(control) = self.settings_control_at(x, y) {
@@ -9656,6 +10056,51 @@ impl App {
             .collect::<Vec<_>>();
         let input = std::str::from_utf8(&bytes).unwrap_or("");
         let control = event.state & CONTROL_MASK != 0;
+        if self.syntax_colors_open {
+            if keysym == ESCAPE_KEYSYM {
+                if self.syntax_hex_focused {
+                    self.syntax_hex_focused = false;
+                    self.refresh_syntax_hex_input();
+                } else {
+                    self.syntax_colors_open = false;
+                }
+                return true;
+            }
+            if self.syntax_hex_focused {
+                if control && shortcut_from_keysym(keysym) == Some('a') {
+                    self.syntax_hex_input.clear();
+                    return true;
+                }
+                if keysym == BACKSPACE_KEYSYM {
+                    self.syntax_hex_input.pop();
+                    return true;
+                }
+                if keysym == RETURN_KEYSYM {
+                    if let Some(rgb) = theme_core::parse_hex_rgb(&self.syntax_hex_input) {
+                        self.set_syntax_rgb(rgb);
+                        self.syntax_hex_focused = false;
+                    } else {
+                        self.status_message = self
+                            .tr("Use a colour like #64D2FF", "请输入如 #64D2FF 的颜色")
+                            .into();
+                    }
+                    return true;
+                }
+                if count > 0
+                    && input
+                        .chars()
+                        .all(|value| value == '#' || value.is_ascii_hexdigit())
+                    && self.syntax_hex_input.len() + input.len() <= 7
+                {
+                    self.syntax_hex_input.push_str(&input.to_ascii_uppercase());
+                    if let Some(rgb) = theme_core::parse_hex_rgb(&self.syntax_hex_input) {
+                        self.set_syntax_rgb(rgb);
+                    }
+                }
+                return true;
+            }
+            return true;
+        }
         // Ctrl+Shift+C copies the terminal selection; Ctrl+C is left alone so
         // it still interrupts the running program.
         if control
@@ -10871,6 +11316,57 @@ fn save_ui_preferences(chinese: bool, font_family: usize, code_zoom: i32, light_
     );
 }
 
+fn syntax_preferences_path() -> PathBuf {
+    ui_settings_path().with_file_name("syntax-colors.conf")
+}
+
+fn parse_syntax_override_list(value: &str) -> SyntaxOverrides {
+    let mut result = [None; 12];
+    for (index, item) in value.split(',').take(result.len()).enumerate() {
+        result[index] = theme_core::parse_hex_rgb(item);
+    }
+    result
+}
+
+fn load_syntax_preferences() -> (SyntaxOverrides, SyntaxOverrides) {
+    let mut dark = [None; 12];
+    let mut light = [None; 12];
+    let content = fs::read_to_string(syntax_preferences_path()).unwrap_or_default();
+    for line in content.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "dark" => dark = parse_syntax_override_list(value),
+            "light" => light = parse_syntax_override_list(value),
+            _ => {}
+        }
+    }
+    (dark, light)
+}
+
+fn save_syntax_preferences(dark: &SyntaxOverrides, light: &SyntaxOverrides) {
+    let path = syntax_preferences_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let list = |values: &SyntaxOverrides| {
+        values
+            .iter()
+            .map(|value| {
+                value
+                    .map(|rgb| format!("{:06X}", rgb & 0x00ff_ffff))
+                    .unwrap_or_else(|| "-".into())
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let _ = fs::write(
+        path,
+        format!("dark={}\nlight={}\n", list(dark), list(light)),
+    );
+}
+
 fn bundled_font_path() -> Option<PathBuf> {
     let relative = PathBuf::from("assets/fonts/JetBrainsMono-Regular.ttf");
     let installed = std::env::current_exe()
@@ -11721,8 +12217,21 @@ pub fn run() {
                 ),
             }
         };
-        let dark_colors = share(theme_core::Palette::dark());
-        let light_colors = share(theme_core::Palette::light());
+        let mut dark_colors = share(theme_core::Palette::dark());
+        let mut light_colors = share(theme_core::Palette::light());
+        let syntax_swatch_pixels =
+            SYNTAX_SWATCHES.map(|rgb| color(display, map, &theme_core::Palette::hex(rgb)));
+        let (syntax_overrides_dark, syntax_overrides_light) = load_syntax_preferences();
+        for role in theme_core::SyntaxRole::ALL {
+            if let Some(rgb) = syntax_overrides_dark[role as usize] {
+                let pixel = color(display, map, &theme_core::Palette::hex(rgb));
+                set_linux_syntax_color(&mut dark_colors, role, pixel);
+            }
+            if let Some(rgb) = syntax_overrides_light[role as usize] {
+                let pixel = color(display, map, &theme_core::Palette::hex(rgb));
+                set_linux_syntax_color(&mut light_colors, role, pixel);
+            }
+        }
         let preferences = load_ui_preferences();
         let colors = if preferences.light_theme {
             light_colors
@@ -11777,6 +12286,18 @@ pub fn run() {
             hovered: None,
             settings_pressed: None,
             settings_focus: None,
+            syntax_colors_open: false,
+            syntax_color_role: 0,
+            syntax_hex_input: theme_core::Palette::hex(if preferences.light_theme {
+                syntax_overrides_light[0].unwrap_or(theme_core::Palette::light().keyword)
+            } else {
+                syntax_overrides_dark[0].unwrap_or(theme_core::Palette::dark().keyword)
+            })
+            .to_uppercase(),
+            syntax_hex_focused: false,
+            syntax_overrides_dark,
+            syntax_overrides_light,
+            syntax_swatch_pixels,
             hovered_from_code: false,
             hovered_code_span: None,
             selected_file: 0,
@@ -12382,6 +12903,16 @@ mod tests {
         assert!(tokens
             .iter()
             .any(|token| token.text == "\"TCI\"" && token.kind == editor_core::TokenKind::Literal));
+    }
+
+    #[test]
+    fn syntax_colour_overrides_parse_hex_and_keep_default_slots() {
+        let parsed = parse_syntax_override_list("64D2FF,-,#30D158,broken");
+        assert_eq!(parsed[0], Some(0x64d2ff));
+        assert_eq!(parsed[1], None);
+        assert_eq!(parsed[2], Some(0x30d158));
+        assert_eq!(parsed[3], None);
+        assert!(parsed[4..].iter().all(Option::is_none));
     }
 
     #[test]
