@@ -496,6 +496,21 @@ struct TerminalSession {
     output: Arc<Mutex<Vec<String>>>,
 }
 
+fn append_terminal_line(output: &Arc<Mutex<Vec<String>>>, line: String) {
+    append_terminal_lines(output, std::slice::from_ref(&line));
+}
+
+fn append_terminal_lines(output: &Arc<Mutex<Vec<String>>>, lines_to_add: &[String]) {
+    let Ok(mut lines) = output.lock() else {
+        return;
+    };
+    lines.extend(lines_to_add.iter().cloned());
+    if lines.len() > 200 {
+        let drain = lines.len() - 200;
+        lines.drain(0..drain);
+    }
+}
+
 struct ParsedComment<'a> {
     code: &'a str,
     text: &'a str,
@@ -5618,7 +5633,7 @@ impl App {
                 top + s(58),
                 self.tr("POP OUT", "弹出"),
             );
-            for (index, terminal) in self.terminals.iter().take(4).enumerate() {
+            for (index, _terminal) in self.terminals.iter().take(4).enumerate() {
                 let row = top + s(79 + index as i32 * 34);
                 if index == self.terminal_active {
                     self.rect(
@@ -5637,7 +5652,11 @@ impl App {
                     },
                     list_x + s(24),
                     row,
-                    &terminal.name,
+                    match index {
+                        0 => self.tr("▶ Build", "▶ 编译"),
+                        1 => self.tr("▶ Run", "▶ 运行"),
+                        _ => self.tr("Output · all tasks", "Output · 全部任务"),
+                    },
                 );
             }
             if self.terminals.len() > 4 {
@@ -7340,12 +7359,21 @@ impl App {
             return;
         }
         let active = self.terminal_active.min(self.terminals.len() - 1);
+        if active == 2 {
+            self.status_message = self
+                .tr(
+                    "Output is a read-only aggregate terminal",
+                    "Output 是只读的构建/运行汇总终端",
+                )
+                .into();
+            return;
+        }
         let command = self.terminals[active].input.trim().to_string();
         if command.is_empty() {
             return;
         }
         self.terminals[active].input.clear();
-        self.run_in_terminal(&command);
+        self.run_in_terminal_to(active, &command, false);
     }
 
     fn project_task_command(&self, build: bool) -> String {
@@ -7388,7 +7416,8 @@ impl App {
         self.terminal_focused = false;
         self.terminal_active = if build { 0 } else { 1 }.min(self.terminals.len() - 1);
         let command = self.project_task_command(build);
-        self.run_in_terminal(&command);
+        let active = self.terminal_active;
+        self.run_in_terminal_to(active, &command, true);
         self.status_message = format!(
             "{}: {command}",
             self.tr(
@@ -7412,9 +7441,28 @@ impl App {
             return;
         }
         let active = self.terminal_active.min(self.terminals.len() - 1);
-        let output = self.terminals[active].output.clone();
-        if let Ok(mut lines) = output.lock() {
-            lines.push(format!("$ {command}"));
+        self.run_in_terminal_to(active, command, false);
+    }
+
+    /// Execute a command in a named task terminal. Build/Run commands mirror
+    /// their transcript into the read-only Output terminal, so that tab is a
+    /// real aggregate view rather than a decorative third tab.
+    fn run_in_terminal_to(&mut self, active: usize, command: &str, mirror_output: bool) {
+        let Some(session) = self.terminals.get(active) else {
+            return;
+        };
+        let output = session.output.clone();
+        let mirror = if mirror_output {
+            self.terminals
+                .get(2)
+                .map(|terminal| terminal.output.clone())
+        } else {
+            None
+        };
+        let command_line = format!("$ {command}");
+        append_terminal_line(&output, command_line.clone());
+        if let Some(mirror) = &mirror {
+            append_terminal_line(mirror, command_line);
         }
         let cwd = self.project_path.clone().unwrap_or_else(projects_root);
         // The thread outlives this call, so it owns the command.
@@ -7424,31 +7472,30 @@ impl App {
                 .args(["-lc", &owned])
                 .current_dir(&cwd)
                 .output();
-            if let Ok(mut lines) = output.lock() {
-                match result {
-                    Ok(result) => {
-                        let text = format!(
-                            "{}{}",
-                            String::from_utf8_lossy(&result.stdout),
-                            String::from_utf8_lossy(&result.stderr)
-                        );
-                        lines.extend(text.lines().map(str::to_string));
-                        lines.push(format!(
-                            "{} process exited with {}",
-                            if result.status.success() {
-                                "✓"
-                            } else {
-                                "✕"
-                            },
-                            result.status
-                        ));
-                    }
-                    Err(error) => lines.push(format!("terminal error: {error}")),
+            let mut transcript = Vec::new();
+            match result {
+                Ok(result) => {
+                    let text = format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&result.stdout),
+                        String::from_utf8_lossy(&result.stderr)
+                    );
+                    transcript.extend(text.lines().map(str::to_string));
+                    transcript.push(format!(
+                        "{} process exited with {}",
+                        if result.status.success() {
+                            "✓"
+                        } else {
+                            "✕"
+                        },
+                        result.status
+                    ));
                 }
-                if lines.len() > 200 {
-                    let drain = lines.len() - 200;
-                    lines.drain(0..drain);
-                }
+                Err(error) => transcript.push(format!("terminal error: {error}")),
+            }
+            append_terminal_lines(&output, &transcript);
+            if let Some(mirror) = &mirror {
+                append_terminal_lines(mirror, &transcript);
             }
         });
     }
@@ -10054,7 +10101,8 @@ impl App {
                         if index <= 1 {
                             self.run_project_task(index == 0);
                         } else {
-                            self.terminal_focused = true;
+                            self.terminal_focused = false;
+                            self.editor_focused = false;
                         }
                         return;
                     }
@@ -10079,6 +10127,17 @@ impl App {
                         return;
                     }
                 }
+            }
+            if self.terminal_active == 2 {
+                self.terminal_focused = false;
+                self.editor_focused = false;
+                self.status_message = self
+                    .tr(
+                        "Output is a read-only aggregate terminal",
+                        "Output 是只读的构建/运行汇总终端",
+                    )
+                    .into();
+                return;
             }
             self.terminal_focused = true;
             self.editor_focused = false;
