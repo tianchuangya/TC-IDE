@@ -7119,32 +7119,60 @@ impl App {
                 true
             }
             "graph-callees" => {
-                // Focus the first method that calls a member, so the Callees
-                // relation of the graph can be inspected as a frame.
-                let focus = self.files.get(self.selected_file).and_then(|file| {
-                    let scan = syntax_core::scan(&file.lines, &file.name);
-                    let call = scan.calls.iter().find(|call| call.receiver.is_some())?;
-                    let declaration = scan
-                        .declarations
-                        .iter()
-                        .find(|declaration| {
-                            scan.scope_at(call.line) == Some(declaration.scope)
-                                || declaration.line == call.line
-                        })
-                        .or_else(|| scan.declarations.first())?;
-                    Some(editor_core::SymbolOccurrence {
-                        name: declaration.name.clone(),
-                        line: declaration.line,
-                        start: declaration.column,
-                        end: declaration.column + declaration.name.len(),
-                        role: editor_core::SymbolRole::Declaration,
-                    })
-                });
-                let Some(focus) = focus else {
+                // Focus a method that calls a member, so the Callees relation
+                // can be inspected as a frame. The document is set here rather
+                // than taken from whatever session was restored: the scene
+                // depends on there being a call with a receiver, and a session
+                // holding a short file made the scene prime nothing and render
+                // the plain editor, which is a frame that proves nothing.
+                self.files = vec![FileBuffer::new(
+                    "graph.rs".into(),
+                    PathBuf::from("/tmp/tc-ide-preview/graph.rs"),
+                    vec![
+                        "use tc_graph::{Project, Relation};".into(),
+                        "".into(),
+                        "pub struct GraphController {".into(),
+                        "    project: Project,".into(),
+                        "}".into(),
+                        "".into(),
+                        "impl GraphController {".into(),
+                        "    pub fn build_graph(&mut self) {".into(),
+                        "        let files = self.project.analyze_workspace();".into(),
+                        "        let symbols = self.project.resolve_symbols(files);".into(),
+                        "        self.render_graph(symbols);".into(),
+                        "    }".into(),
+                        "}".into(),
+                    ],
+                )];
+                self.selected_file = 0;
+                let file = &self.files[0];
+                let scan = syntax_core::scan(&file.lines, &file.name);
+                let Some(call) = scan.calls.iter().find(|call| call.receiver.is_some()) else {
                     return false;
                 };
-                self.hovered_symbol = Some(focus);
+                let Some(declaration) = scan
+                    .declarations
+                    .iter()
+                    .find(|declaration| {
+                        scan.scope_at(call.line) == Some(declaration.scope)
+                            || declaration.line == call.line
+                    })
+                    .or_else(|| scan.declarations.first())
+                else {
+                    return false;
+                };
+                self.hovered_symbol = Some(editor_core::SymbolOccurrence {
+                    name: declaration.name.clone(),
+                    line: declaration.line,
+                    start: declaration.column,
+                    end: declaration.column + declaration.name.len(),
+                    role: editor_core::SymbolRole::Declaration,
+                });
                 self.graph_relation = graph_core::GraphRelation::Callees;
+                // The panel has to be on screen, or the frame primed here is
+                // the plain editor.
+                self.graph_visible = true;
+                self.graph_motion = UiMotion::new(1.0);
                 true
             }
             "syntax-colors" => {
@@ -13756,5 +13784,19 @@ mod tests {
                 .count(),
             4
         );
+    }
+
+    #[test]
+    fn temp_diag_graph_nodes() {
+        // What the graph would contain for the default file, with and without
+        // the focus the scene sets.
+        let files = initial_files();
+        let file = &files[0];
+        let scan = syntax_core::scan(&file.lines, &file.name);
+        let symbols = editor_core::symbol_occurrences(&file.lines, &file.name);
+        println!("D symbols={} calls={}", symbols.len(), scan.calls.len());
+        for s in symbols.iter().take(8) {
+            println!("D  sym {} line={} role={:?}", s.name, s.line, s.role);
+        }
     }
 }
