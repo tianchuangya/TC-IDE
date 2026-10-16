@@ -480,6 +480,13 @@ impl FileBuffer {
     /// the two cannot disagree and the history stays correct.
     fn sync(&mut self) {
         self.lines = self.buffer.to_lines();
+        // `TextBuffer::to_lines` deliberately omits the empty row after a final
+        // newline. An editor caret, however, must be able to sit on that row:
+        // pressing Enter at the end of a file moves there immediately. Keep
+        // the visual line list large enough for that valid caret position.
+        if self.buffer.ends_with_newline() {
+            self.lines.push(String::new());
+        }
     }
 }
 
@@ -6685,7 +6692,10 @@ impl App {
             return;
         }
         let file = &self.files[self.selected_file];
-        let content = file.lines.join("\n");
+        // The piece table is authoritative and preserves a final newline.
+        // The rendered line list contains a synthetic empty caret row for that
+        // case, so serialising the buffer avoids either losing or duplicating it.
+        let content = file.buffer.to_text();
         match fs::write(&file.path, content) {
             Ok(_) => self.status_message = format!("Saved {}", file.path.display()),
             Err(error) => self.status_message = format!("Save failed: {error}"),
@@ -11872,6 +11882,25 @@ mod tests {
         assert_eq!(shortcut_from_keysym('C' as c_ulong), Some('c'));
         assert_eq!(shortcut_from_keysym('v' as c_ulong), Some('v'));
         assert_eq!(shortcut_from_keysym('S' as c_ulong), Some('s'));
+    }
+
+    #[test]
+    fn enter_at_end_keeps_a_real_caret_row() {
+        let mut file = FileBuffer::new(
+            "main.cpp".into(),
+            PathBuf::from("main.cpp"),
+            vec!["return 0;".into()],
+        );
+
+        file.buffer.insert(0, "return 0;".len(), "\n");
+        file.sync();
+        assert_eq!(file.lines, ["return 0;", ""]);
+        assert_eq!(file.buffer.to_text(), "return 0;\n");
+
+        // This is the exact follow-up access that used to panic after Enter.
+        file.buffer.insert(1, 0, "next");
+        file.sync();
+        assert_eq!(file.lines, ["return 0;", "next"]);
     }
 
     #[test]
