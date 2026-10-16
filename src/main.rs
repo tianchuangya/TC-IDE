@@ -11,6 +11,7 @@ mod linux_app;
 mod lsp_core;
 #[cfg(target_os = "macos")]
 mod macos_app;
+mod menu_core;
 mod motion_core;
 mod package_motion;
 mod search_core;
