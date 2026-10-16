@@ -1,9 +1,11 @@
 # TC-IDE 项目交接与后续任务
 
-> **接手的人请先读 [`docs/TAKEOVER.md`](TAKEOVER.md)**：当前状态、验证命令、正在做的事（Linux 控件观感，代码未写）、三个必须先知道的坑、以及硬约束。本文是需求队列与历史记录。
-
-> **进度快照与接手说明**：见 `docs/PROGRESS-TRANSFER.md`（当前进度、最近提交做了什么、本地验证配方、
-> 已知失败与排查顺序、硬约束、建议的下一步）。本文件仍是**任务队列的权威清单**。
+> **接手的人请按这个顺序读**：
+> 1. **[`docs/TAKEOVER.md`](TAKEOVER.md)** —— **先读这个**。当前状态、提交前必跑的验证、正在做的事
+>    （Linux 控件观感，代码未写）、三个必须先知道的坑、以及不要放宽的约束。
+> 2. **本文** —— 需求队列（§5）与历史记录，任务清单以此为准。
+> 3. [`docs/PROGRESS-TRANSFER.md`](PROGRESS-TRANSFER.md) —— 历史踩坑与排查顺序。
+> 4. [`docs/KNOWN-ISSUES.md`](KNOWN-ISSUES.md) —— Windows/Wine 配方、macOS SDK 限制。
 
 
 > 最后更新：2026-10-15（Linux 调试可视化、可调栏位、共享富语法配色）
