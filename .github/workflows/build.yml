@@ -74,6 +74,8 @@ jobs:
           xvfb-run -a cargo run -- --render-frame /tmp/tc-syntax-colors.png --render-scene syntax-colors
           xvfb-run -a cargo run -- --render-frame /tmp/tc-scrolling.png --render-scene scrolling
           xvfb-run -a cargo run -- --render-frame /tmp/tc-plugins.png --render-scene plugins
+          xvfb-run -a cargo run -- --render-frame /tmp/tc-menu-keyboard.png --render-scene menu-keyboard
+          xvfb-run -a cargo run -- --render-frame /tmp/tc-menu-hover.png --render-scene menu-hover
           python3 - <<'PY'
           import os
           import sys
@@ -100,6 +102,8 @@ jobs:
               "/tmp/tc-syntax-colors.png",
               "/tmp/tc-scrolling.png",
               "/tmp/tc-plugins.png",
+              "/tmp/tc-menu-keyboard.png",
+              "/tmp/tc-menu-hover.png",
           ]
           sizes = {path: os.path.getsize(path) for path in frames}
           for path, size in sizes.items():

@@ -517,3 +517,227 @@ mod tests {
         assert!(Menu::Debug.items().contains(&Item::StepOver));
     }
 }
+
+/// Where the keyboard is in the menu bar.
+///
+/// A menu bar is driven by two different positions: which title is under the
+/// pointer or the keyboard, and which item inside the open menu is
+/// highlighted. Keeping both here means the rules - what Right does at the
+/// last menu, what Down does at the last item - are written once and tested
+/// without a window, instead of being spread across a key handler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MenuCursor {
+    /// Title the keyboard is on, whether or not the menu is open.
+    pub menu: Menu,
+    /// Item highlighted in the open menu.
+    pub item: usize,
+}
+
+impl Default for MenuCursor {
+    fn default() -> Self {
+        Self {
+            menu: Menu::ALL[0],
+            item: 0,
+        }
+    }
+}
+
+/// What a key does to a menu bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuMove {
+    /// Move to the previous title.
+    Left,
+    /// Move to the next title.
+    Right,
+    /// Move to the previous item.
+    Up,
+    /// Move to the next item.
+    Down,
+}
+
+impl MenuCursor {
+    /// Where the cursor goes when a key is pressed.
+    ///
+    /// Left and Right wrap around the bar, and Up and Down stop at the ends
+    /// rather than wrapping: a menu that jumps from its last item back to its
+    /// first is disorienting, while a bar that wraps is what every desktop
+    /// does. Moving to another title resets the item, so an open menu always
+    /// starts at its first entry.
+    pub fn moved(self, direction: MenuMove) -> Self {
+        match direction {
+            MenuMove::Left | MenuMove::Right => {
+                let total = Menu::ALL.len();
+                let position = self.menu.index();
+                let next = if direction == MenuMove::Right {
+                    (position + 1) % total
+                } else {
+                    (position + total - 1) % total
+                };
+                Self {
+                    menu: Menu::ALL[next],
+                    item: 0,
+                }
+            }
+            MenuMove::Up | MenuMove::Down => {
+                let count = self.menu.items().len();
+                if count == 0 {
+                    return self;
+                }
+                let next = if direction == MenuMove::Down {
+                    (self.item + 1).min(count - 1)
+                } else {
+                    self.item.saturating_sub(1)
+                };
+                Self {
+                    menu: self.menu,
+                    item: next,
+                }
+            }
+        }
+    }
+
+    /// The item the cursor is on, when it is inside the current menu.
+    pub fn current_item(self) -> Option<Item> {
+        self.menu.items().get(self.item).copied()
+    }
+}
+
+/// The menu a cursor is on, for a pointer position.
+///
+/// Hover follows the pointer and the keyboard moves the same cursor, so the
+/// two cannot show different highlights. The buttons of a bar are adjacent, so
+/// the boundary between two of them belongs to the one on the right: a half
+/// open span would make the pixel at the join ambiguous and the highlight
+/// flicker as the pointer crossed it.
+pub fn menu_under(menus: &[(Menu, i32, i32, i32, i32)], x: i32, y: i32) -> Option<Menu> {
+    menus
+        .iter()
+        .find(|(_, left, top, width, height)| {
+            x >= *left && x < left + width && y >= *top && y < top + height
+        })
+        .or_else(|| {
+            // The last button has no neighbour to own its right edge, so it
+            // takes it rather than leaving a dead column.
+            menus.iter().rev().find(|(_, left, top, width, height)| {
+                x == left + width && y >= *top && y < top + height
+            })
+        })
+        .map(|(menu, ..)| *menu)
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    #[test]
+    fn the_arrows_walk_the_bar_and_wrap_at_both_ends() {
+        // A bar that wraps is what every desktop does, so the last title's
+        // Right goes back to the first.
+        let cursor = MenuCursor {
+            menu: Menu::File,
+            item: 0,
+        };
+        let cursor = cursor.moved(MenuMove::Right);
+        assert_eq!(cursor.menu, Menu::Edit);
+        let cursor = cursor.moved(MenuMove::Left);
+        assert_eq!(cursor.menu, Menu::File);
+        // Left from the first wraps to the last.
+        assert_eq!(cursor.moved(MenuMove::Left).menu, Menu::Help);
+        // And Right from the last wraps to the first.
+        let last = MenuCursor {
+            menu: Menu::Help,
+            item: 0,
+        };
+        assert_eq!(last.moved(MenuMove::Right).menu, Menu::File);
+
+        // Walking all the way round returns to where it started.
+        let mut walked = MenuCursor::default();
+        for _ in 0..Menu::ALL.len() {
+            walked = walked.moved(MenuMove::Right);
+        }
+        assert_eq!(walked.menu, Menu::File);
+    }
+
+    #[test]
+    fn the_arrows_stop_at_the_ends_of_a_menu() {
+        // Up and Down stop rather than wrap: a menu that jumps from its last
+        // item back to its first is disorienting.
+        let cursor = MenuCursor {
+            menu: Menu::Run,
+            item: 0,
+        };
+        assert_eq!(cursor.moved(MenuMove::Up), cursor, "already at the top");
+        let mut cursor = cursor;
+        for _ in 0..20 {
+            cursor = cursor.moved(MenuMove::Down);
+        }
+        let last = Menu::Run.items().len() - 1;
+        assert_eq!(cursor.item, last, "stops at the last item");
+        assert_eq!(cursor.moved(MenuMove::Down), cursor);
+        // And it can come back.
+        assert_eq!(cursor.moved(MenuMove::Up).item, last - 1);
+    }
+
+    #[test]
+    fn changing_menu_starts_at_the_first_item() {
+        // An open menu always starts at its first entry, whatever item was
+        // highlighted in the menu before it.
+        let cursor = MenuCursor {
+            menu: Menu::Edit,
+            item: 7,
+        };
+        let moved = cursor.moved(MenuMove::Right);
+        assert_eq!(moved.menu, Menu::View);
+        assert_eq!(moved.item, 0);
+        let moved = cursor.moved(MenuMove::Left);
+        assert_eq!(moved.menu, Menu::File);
+        assert_eq!(moved.item, 0);
+        // Walking the item Down then across keeps the new item at the top.
+        let down = cursor.moved(MenuMove::Down);
+        assert_eq!(down.item, 8, "same menu, next item");
+        assert_eq!(down.moved(MenuMove::Right).item, 0);
+    }
+
+    #[test]
+    fn the_cursor_names_the_item_it_is_on() {
+        let cursor = MenuCursor {
+            menu: Menu::Run,
+            item: 0,
+        };
+        assert_eq!(cursor.current_item(), Some(Item::Build));
+        assert_eq!(cursor.moved(MenuMove::Down).current_item(), Some(Item::Run));
+        // A cursor past the end names nothing rather than panicking.
+        let past = MenuCursor {
+            menu: Menu::Run,
+            item: 99,
+        };
+        assert_eq!(past.current_item(), None);
+    }
+
+    #[test]
+    fn every_menu_can_be_reached_by_arrows_from_the_first() {
+        // The bar is only navigable if the arrows visit every title.
+        let mut seen = Vec::new();
+        let mut cursor = MenuCursor::default();
+        for _ in 0..Menu::ALL.len() {
+            seen.push(cursor.menu);
+            cursor = cursor.moved(MenuMove::Right);
+        }
+        assert_eq!(seen, Menu::ALL.to_vec());
+    }
+
+    #[test]
+    fn hover_picks_the_menu_under_the_pointer() {
+        // Hover and the keyboard share one cursor, so the rectangles the
+        // drawing uses are the ones the pointer is tested against.
+        let rects = vec![(Menu::File, 112, 10, 58, 27), (Menu::Edit, 170, 10, 58, 27)];
+        assert_eq!(menu_under(&rects, 120, 20), Some(Menu::File));
+        assert_eq!(menu_under(&rects, 180, 20), Some(Menu::Edit));
+        // The boundary belongs to the menu that starts there.
+        assert_eq!(menu_under(&rects, 170, 20), Some(Menu::Edit));
+        // Outside the bar nothing is hovered.
+        assert_eq!(menu_under(&rects, 500, 20), None);
+        assert_eq!(menu_under(&rects, 120, 200), None);
+        assert_eq!(menu_under(&[], 120, 20), None);
+    }
+}

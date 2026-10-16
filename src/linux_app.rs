@@ -814,6 +814,10 @@ struct App {
     /// three, each closing the other two by name, which is why the two menus
     /// added later were never wired up.
     open_menu: Option<menu_core::Menu>,
+    /// Where the keyboard is in the menu bar, and which item is highlighted.
+    menu_cursor: menu_core::MenuCursor,
+    /// Slide of the dropdown as it opens and closes.
+    menu_dropdown_motion: UiMotion,
     /// Whether the comment bubbles are drawn beside the code.
     comment_bubbles: bool,
     /// Whether the shortcut sheet is open.
@@ -830,8 +834,6 @@ struct App {
     new_menu_motion: UiMotion,
     /// Short pulse used when a different editor tab becomes active.
     file_switch_motion: UiMotion,
-    edit_menu_motion: UiMotion,
-    view_menu_motion: UiMotion,
     settings_motion: UiMotion,
     package_motion: UiMotion,
     extensions_motion: UiMotion,
@@ -3934,11 +3936,8 @@ impl App {
         if self.new_menu_motion.value > 0.01 {
             self.draw_new_menu();
         }
-        if self.edit_menu_motion.value > 0.01 {
-            self.draw_edit_menu();
-        }
-        if self.view_menu_motion.value > 0.01 {
-            self.draw_view_menu();
+        if self.menu_dropdown_motion.value > 0.01 {
+            self.draw_menu_dropdown();
         }
         if self.settings_motion.value > 0.01 {
             self.draw_settings_menu();
@@ -4018,9 +4017,17 @@ impl App {
             let open = open
                 || (menu == menu_core::Menu::Extensions && self.extensions_open)
                 || (menu == menu_core::Menu::File && self.package_open);
+            // The title under the pointer or the keyboard is filled, so which
+            // one the arrows would act on is visible before a key is pressed.
+            let highlighted = self.menu_cursor.menu == menu;
+            if highlighted {
+                self.rect(self.colors.panel_2, left, top, width, height);
+            }
             self.outline(
                 if open {
                     self.colors.accent
+                } else if highlighted {
+                    self.colors.bright
                 } else {
                     self.colors.line
                 },
@@ -4744,104 +4751,6 @@ impl App {
                     self.text(self.colors.muted, x + s(130), row_y, &short);
                 }
             }
-        }
-    }
-
-    unsafe fn draw_edit_menu(&self) {
-        let s = |v| self.s(v);
-        let x = s(207);
-        let y = s(43) + self.overlay_offset(self.edit_menu_motion);
-        let w = s(260);
-        let h = s(244);
-        self.floating_panel(x, y, w, h);
-        let labels = if self.ui_chinese {
-            [
-                "撤销",
-                "重做",
-                "保存",
-                "全选",
-                "复制",
-                "粘贴",
-                "增大代码字号",
-                "减小代码字号",
-            ]
-        } else {
-            [
-                "Undo",
-                "Redo",
-                "Save",
-                "Select All",
-                "Copy",
-                "Paste",
-                "Larger Code",
-                "Smaller Code",
-            ]
-        };
-        for (index, (label, key)) in labels
-            .iter()
-            .zip([
-                "Ctrl+Z", "Ctrl+Y", "Ctrl+S", "Ctrl+A", "Ctrl+C", "Ctrl+V", "Ctrl++", "Ctrl+-",
-            ])
-            .enumerate()
-        {
-            let row = y + s(30 + index as i32 * 27);
-            self.text(self.colors.text, x + s(16), row, label);
-            self.text(self.colors.muted, x + w - s(80), row, key);
-        }
-    }
-
-    unsafe fn draw_view_menu(&self) {
-        let s = |v| self.s(v);
-        let x = s(302);
-        let y = s(43) + self.overlay_offset(self.view_menu_motion);
-        let w = s(280);
-        // One row per panel, plus the heading and the padding.
-        let h = s(51 + 36 * 3);
-        self.floating_panel(x, y, w, h);
-        self.text(
-            self.colors.muted,
-            x + s(15),
-            y + s(23),
-            self.tr("PANELS", "栏位"),
-        );
-        for (index, (label, enabled)) in [
-            (self.tr("Call hierarchy", "调用层级"), self.graph_visible),
-            (self.tr("Terminal", "终端"), self.terminal_open),
-            (self.tr("Debug panel", "调试面板"), self.debug_panel_open),
-        ]
-        .iter()
-        .enumerate()
-        {
-            let cy = y + s(51 + index as i32 * 36);
-            self.text(self.colors.text, x + s(18), cy + s(5), label);
-            let sx = x + w - s(64);
-            self.rect(
-                if *enabled {
-                    self.colors.accent
-                } else {
-                    self.colors.line
-                },
-                sx,
-                cy - s(13),
-                s(46),
-                s(24),
-            );
-            let progress = if index == 0 {
-                self.graph_motion.value
-            } else {
-                self.terminal_motion.value
-            }
-            .clamp(0.0, 1.0);
-            let thumb_x = sx + s(12) + (s(22) as f32 * progress) as i32;
-            let stretch = ((progress * std::f32::consts::PI).sin() * s(3) as f32) as i32;
-            self.rounded_rect(
-                self.colors.bright,
-                thumb_x - s(8) - stretch,
-                cy - s(9),
-                s(16) + stretch * 2,
-                s(16),
-                s(8),
-            );
         }
     }
 
@@ -6736,7 +6645,6 @@ impl App {
             }
             "view" => {
                 self.open_menu = Some(menu_core::Menu::View);
-                self.view_menu_motion = UiMotion::new(1.0);
                 self.terminal_open = true;
                 self.terminal_motion = UiMotion::new(1.0);
                 // Give the terminal output and a selection over part of it, so
@@ -6875,6 +6783,28 @@ impl App {
                 self.folded = vec![0, 5];
                 self.goto_prompt = Some("42".into());
                 self.goto_focused = true;
+                true
+            }
+            "menu-keyboard" => {
+                // A menu open with the keyboard on it, so the highlighted title
+                // and the highlighted item can both be inspected.
+                self.open_menu = Some(menu_core::Menu::View);
+                self.menu_cursor = menu_core::MenuCursor {
+                    menu: menu_core::Menu::View,
+                    item: 2,
+                };
+                self.menu_dropdown_motion = UiMotion::new(1.0);
+                true
+            }
+            "menu-hover" => {
+                // The pointer on a title that is not the open one, so hover and
+                // the open menu can be told apart.
+                self.open_menu = Some(menu_core::Menu::Run);
+                self.menu_cursor = menu_core::MenuCursor {
+                    menu: menu_core::Menu::Run,
+                    item: 1,
+                };
+                self.menu_dropdown_motion = UiMotion::new(1.0);
                 true
             }
             "brackets" => {
@@ -7391,22 +7321,13 @@ impl App {
             root_target,
             dt,
         );
+        Self::step_ui_motion(&mut self.menu_dropdown_motion, self.open_menu.is_some(), dt);
         Self::step_ui_motion(
             &mut self.new_menu_motion,
             self.open_menu == Some(menu_core::Menu::File),
             dt,
         );
         Self::step_ui_motion(&mut self.file_switch_motion, true, dt);
-        Self::step_ui_motion(
-            &mut self.edit_menu_motion,
-            self.open_menu == Some(menu_core::Menu::Edit),
-            dt,
-        );
-        Self::step_ui_motion(
-            &mut self.view_menu_motion,
-            self.open_menu == Some(menu_core::Menu::View),
-            dt,
-        );
         Self::step_ui_motion(&mut self.settings_motion, self.settings_open, dt);
         Self::step_ui_motion(&mut self.package_motion, self.package_open, dt);
         Self::step_ui_motion(&mut self.extensions_motion, self.extensions_open, dt);
@@ -8927,6 +8848,103 @@ impl App {
         })
     }
 
+    /// Draw the open menu as a list of items.
+    ///
+    /// One drawer for every menu the model lists, so adding a menu adds its
+    /// dropdown rather than leaving it without one. The File menu keeps its own
+    /// drawer because it draws richer rows than the model lists.
+    ///
+    /// # Safety
+    /// Requires a live Cairo context.
+    unsafe fn draw_menu_dropdown(&self) {
+        let Some(menu) = self.open_menu else {
+            return;
+        };
+        if menu == menu_core::Menu::File || menu.opens_panel() {
+            return;
+        }
+        let s = |v| self.s(v);
+        let (left, top, _, _) = self.menu_rect(menu);
+        let items = menu.items();
+        let width = s(260);
+        let row = s(26);
+        let height = s(12) + row * items.len() as i32;
+        // The panel slides in from the bar rather than appearing at once.
+        let offset = self.overlay_offset(self.menu_dropdown_motion);
+        let top = top + s(33) + offset;
+        self.floating_panel(left, top, width, height);
+        for (index, item) in items.iter().enumerate() {
+            let y = top + s(19) + index as i32 * row;
+            // The item the keyboard is on is filled, so the arrows can be used
+            // without a pointer.
+            if index == self.menu_cursor.item {
+                self.rect(
+                    self.colors.project,
+                    left + s(3),
+                    y - s(14),
+                    width - s(6),
+                    s(20),
+                );
+            }
+            let label = if self.ui_chinese {
+                item.label_chinese()
+            } else {
+                item.label()
+            };
+            self.text(self.colors.text, left + s(14), y, label);
+            if let Some(shortcut) = item.shortcut() {
+                let width_taken = self.pango_text_size(shortcut, false).0;
+                self.text(
+                    self.colors.muted,
+                    left + width - width_taken - s(12),
+                    y,
+                    shortcut,
+                );
+            }
+        }
+    }
+
+    /// Note where the pointer is, so the title under it highlights.
+    ///
+    /// Hover moves the same cursor the keyboard does, so the two can never
+    /// show different highlights, and moving onto a new title highlights its
+    /// first item exactly as arrowing onto it would.
+    fn update_menu_hover(&mut self, x: i32, y: i32) {
+        let rects = menu_core::Menu::ALL
+            .into_iter()
+            .map(|menu| {
+                let (left, top, width, height) = self.menu_rect(menu);
+                (menu, left, top, width, height)
+            })
+            .collect::<Vec<_>>();
+        let Some(menu) = menu_core::menu_under(&rects, x, y) else {
+            return;
+        };
+        if self.menu_cursor.menu != menu {
+            self.menu_cursor = menu_core::MenuCursor { menu, item: 0 };
+            // A menu that is already open follows the pointer to the next
+            // title, which is what a menu bar does once one is open.
+            if self.open_menu.is_some() {
+                self.open_menu = Some(menu);
+            }
+        }
+    }
+
+    /// Move the keyboard cursor through the bar or the open menu.
+    fn move_menu_cursor(&mut self, direction: menu_core::MenuMove) {
+        self.menu_cursor = self.menu_cursor.moved(direction);
+        if self.open_menu.is_some() {
+            self.open_menu = Some(self.menu_cursor.menu);
+        }
+    }
+
+    /// Run the item the keyboard is on.
+    fn activate_menu_cursor(&mut self) {
+        if let Some(item) = self.menu_cursor.current_item() {
+            self.activate_menu_item(item);
+        }
+    }
+
     /// Open a menu, or close it when it is already the open one.
     ///
     /// Opening one closes whatever else was open, panels included. The hand
@@ -8934,6 +8952,7 @@ impl App {
     /// menus came to be left out of it.
     fn toggle_menu(&mut self, menu: menu_core::Menu) {
         let already = self.open_menu == Some(menu);
+        self.menu_cursor = menu_core::MenuCursor { menu, item: 0 };
         self.settings_open = false;
         self.extensions_open = false;
         self.package_open = false;
@@ -11048,6 +11067,29 @@ impl App {
             }
             return true;
         }
+        // With a menu open, the arrows walk the bar and the items, Enter runs
+        // the highlighted item and Esc closes without running anything.
+        if self.open_menu.is_some() {
+            let direction = match keysym {
+                LEFT_KEYSYM => Some(menu_core::MenuMove::Left),
+                RIGHT_KEYSYM => Some(menu_core::MenuMove::Right),
+                UP_KEYSYM => Some(menu_core::MenuMove::Up),
+                DOWN_KEYSYM => Some(menu_core::MenuMove::Down),
+                _ => None,
+            };
+            if let Some(direction) = direction {
+                self.move_menu_cursor(direction);
+                return true;
+            }
+            if keysym == RETURN_KEYSYM {
+                self.activate_menu_cursor();
+                return true;
+            }
+            if keysym == ESCAPE_KEYSYM {
+                self.open_menu = None;
+                return true;
+            }
+        }
         if self.goto_focused {
             if keysym == RETURN_KEYSYM {
                 self.apply_goto_line();
@@ -13053,6 +13095,8 @@ pub fn run() {
             font_search: String::new(),
             font_search_focused: false,
             open_menu: None,
+            menu_cursor: menu_core::MenuCursor::default(),
+            menu_dropdown_motion: UiMotion::new(0.0),
             comment_bubbles: true,
             shortcuts_open: false,
             about_open: false,
@@ -13065,8 +13109,6 @@ pub fn run() {
             tree_motion_updated: Instant::now(),
             new_menu_motion: UiMotion::new(0.0),
             file_switch_motion: UiMotion::new(1.0),
-            edit_menu_motion: UiMotion::new(0.0),
-            view_menu_motion: UiMotion::new(0.0),
             settings_motion: UiMotion::new(0.0),
             package_motion: UiMotion::new(0.0),
             extensions_motion: UiMotion::new(0.0),
@@ -13242,6 +13284,7 @@ pub fn run() {
                         let motion = event.motion;
                         app.mouse_x = motion.x;
                         app.mouse_y = motion.y;
+                        app.update_menu_hover(motion.x, motion.y);
                         app.update_panel_drag(motion.x, motion.y, motion.state);
                         app.update_drag_selection(motion.x, motion.y, motion.state);
                         app.update_background_drag(motion.x, motion.y, motion.state);
