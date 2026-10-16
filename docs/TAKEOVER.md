@@ -11,7 +11,7 @@
 - 测试：**317 + 3 + 4** 全绿；三目标 clippy 零警告；CI **passing**。
 - 队列：**44 已完成 / 2 部分完成 / 0 未开始**。
 - 两个部分完成项**本机做不到**（需要 Windows 实机 / 一台 Mac），不要试图在 Linux 上「补完」它们。
-- **刚完成的一件事**：Linux 语法高亮颜色自定义面板已完成（见 §4.6）；下一项从 §7.3 的新功能候选继续。
+- **刚完成的一件事**：Linux 代码视口滚动条与真实 Build/Run 流水线已接通（见 §4.7）。
 - **方向已变**：用户明确说不再为 Windows 平台对齐投入时间，**专注新功能**。
 
 ---
@@ -109,6 +109,7 @@ CI 里逐个渲染并检查的场景（权威列表在 `.github/workflows/build.
 ai-panel  diagnostics  brackets  folding  find  project-find
 graph-callees  relations  background-crop  settings-hover  settings-controls
 syntax-colors
+scrolling
 ```
 
 另有 `background` 场景可在源码中使用，但未进入 CI 帧门槛。
@@ -192,6 +193,14 @@ grep -c "palette.control(" src/macos_app.rs        # 1
 - 同时支持 18 色调色盘与 `#RRGGBB` / `RRGGBB` 输入，有效值立即刷新代码预览。
 - 深色、浅色主题分开保存自定义值，单项可恢复主题默认色；配置保存在 `syntax-colors.conf`。
 - 新增 `syntax-colors` 渲染场景并纳入 Linux CI 帧门槛。
+
+### 4.7 代码滚动与真实 Build/Run
+
+- Linux 代码区现在有持久的纵向视口偏移，支持滚轮、点击滚动轨道和拖动滚动条；光标用方向键越过视口时会自动跟随。
+- 右侧终端列表的 `Build` / `Run` 是真实操作：先保存当前文件，再在项目根目录执行语言对应命令。
+- C/C++/Java 的 Run 命令包含“编译 `&&` 运行”，首次运行不再依赖事先存在的二进制；Rust/Go/Python/Node 分别使用 Cargo/Go/Python/npm。
+- `Ctrl+F5` 可直接执行 Run；F5 仍保留为调试。
+- CI 视觉场景 `scrolling` 固定验证长文件视口和滚动条。
 
 ---
 

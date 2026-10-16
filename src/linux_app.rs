@@ -546,6 +546,7 @@ enum CreateKind {
 enum PanelDrag {
     CallHierarchy,
     Terminal,
+    EditorScrollbar,
 }
 
 /// One row of the File menu.
@@ -777,6 +778,8 @@ struct App {
     editor_focused: bool,
     caret_line: usize,
     caret_column: usize,
+    /// First visible logical row in the editor after folded lines are removed.
+    editor_scroll: usize,
     selection_anchor: Option<(usize, usize)>,
     selection_head: Option<(usize, usize)>,
     clipboard: String,
@@ -959,6 +962,52 @@ impl App {
 
     fn code_line_step(&self) -> i32 {
         (self.s(28) + self.code_zoom * self.s(2)).max(self.s(20))
+    }
+
+    fn editor_visible_rows(&self) -> usize {
+        ((self.terminal_top() - self.s(119) - self.s(12)) / self.code_line_step().max(1)).max(1)
+            as usize
+    }
+
+    fn editor_line_indices(&self) -> Vec<usize> {
+        let hidden = self.folded_lines();
+        (0..self.files[self.selected_file].lines.len())
+            .filter(|line| !hidden.contains(line))
+            .collect()
+    }
+
+    fn editor_max_scroll(&self) -> usize {
+        self.editor_line_indices()
+            .len()
+            .saturating_sub(self.editor_visible_rows())
+    }
+
+    fn scroll_editor(&mut self, rows: i32) {
+        let next = self.editor_scroll as i64 + rows as i64;
+        self.editor_scroll = next.clamp(0, self.editor_max_scroll() as i64) as usize;
+    }
+
+    fn ensure_caret_visible(&mut self) {
+        let lines = self.editor_line_indices();
+        let Some(row) = lines.iter().position(|line| *line == self.caret_line) else {
+            return;
+        };
+        let visible = self.editor_visible_rows();
+        if row < self.editor_scroll {
+            self.editor_scroll = row;
+        } else if row >= self.editor_scroll + visible {
+            self.editor_scroll = row + 1 - visible;
+        }
+        self.editor_scroll = self.editor_scroll.min(self.editor_max_scroll());
+    }
+
+    fn editor_screen_row(&self, line: usize) -> Option<usize> {
+        let row = self
+            .editor_line_indices()
+            .iter()
+            .position(|item| *item == line)?;
+        let screen = row.checked_sub(self.editor_scroll)?;
+        (screen < self.editor_visible_rows()).then_some(screen)
     }
 
     fn graph_left(&self) -> i32 {
@@ -2775,7 +2824,8 @@ impl App {
 
     fn code_symbol_bounds(&self, line: usize, start: usize, end: usize) -> (i32, i32, i32, i32) {
         let left = (self.width as f32 * 0.17) as i32;
-        let y = self.s(119) + line as i32 * self.code_line_step();
+        let row = self.editor_screen_row(line).unwrap_or(0);
+        let y = self.s(119) + row as i32 * self.code_line_step();
         let value = &self.files[self.selected_file].lines[line];
         let x = left + self.s(52) + self.code_text_width(&value[..start]);
         let width = self.code_text_width(&value[start..end]);
@@ -3501,6 +3551,7 @@ impl App {
                 self.selected_file = self.files.len() - 1;
                 self.caret_line = 0;
                 self.caret_column = 0;
+                self.editor_scroll = 0;
                 self.remember_session();
                 let opened = self.files[self.selected_file].name.clone();
                 self.status_message = format!("{} {opened}", self.tr("Opened", "已打开"));
@@ -4735,22 +4786,21 @@ impl App {
         let show_bubbles = !(self.mouse_x >= 0 && self.mouse_x < left);
         // A folded block takes one row on screen, so the row is counted
         // separately from the line in the file.
-        let hidden = self.folded_lines();
         let fold_starts = self
             .fold_regions()
             .into_iter()
             .map(|region| region.start_line)
             .collect::<Vec<_>>();
-        let mut row = 0i32;
-        for (index, line) in self.files[self.selected_file].lines.iter().enumerate() {
-            if hidden.contains(&index) {
-                continue;
-            }
-            let y = base_y + row * step;
-            row += 1;
-            if y > self.height - s(65) {
-                break;
-            }
+        let visible_lines = self.editor_line_indices();
+        for (screen_row, index) in visible_lines
+            .iter()
+            .skip(self.editor_scroll)
+            .take(self.editor_visible_rows())
+            .copied()
+            .enumerate()
+        {
+            let line = &self.files[self.selected_file].lines[index];
+            let y = base_y + screen_row as i32 * step;
             self.text(self.colors.line, left + s(15), y, &(index + 1).to_string());
             // A block that can be folded says so beside its number, and a
             // closed one shows the arrow pointing the other way.
@@ -4928,6 +4978,36 @@ impl App {
             }
         }
         XSetFont(self.display, self.gc, (*self.font).fid);
+        // The scrollbar is always present, but its thumb fills the track for a
+        // short file. This makes the affordance discoverable before scrolling
+        // is needed and mirrors the other resizable panels.
+        let track_x = right - s(10);
+        let track_y = s(89);
+        let track_h = (self.terminal_top() - track_y - s(8)).max(s(40));
+        self.rounded_rect(self.colors.panel, track_x, track_y, s(6), track_h, s(3));
+        let total = visible_lines.len().max(1);
+        let shown = self.editor_visible_rows().min(total);
+        let thumb_h = ((track_h as i64 * shown as i64 / total as i64) as i32).max(s(28));
+        let travel = (track_h - thumb_h).max(0);
+        let thumb_y = if self.editor_max_scroll() == 0 {
+            track_y
+        } else {
+            track_y
+                + (travel as i64 * self.editor_scroll as i64 / self.editor_max_scroll() as i64)
+                    as i32
+        };
+        self.rounded_rect(
+            if self.editor_max_scroll() > 0 {
+                self.colors.muted
+            } else {
+                self.colors.line
+            },
+            track_x,
+            thumb_y,
+            s(6),
+            thumb_h,
+            s(3),
+        );
         self.draw_debug_values(left, right, base_y, step);
         let hint = if self.editor_focused {
             self.tr(
@@ -4949,8 +5029,11 @@ impl App {
                     + self.code_text_width(
                         &self.files[self.selected_file].lines[self.caret_line][..self.caret_column],
                     );
-                let popup_y =
-                    (base_y + (self.caret_line as i32 + 1) * step).min(self.height - s(180));
+                let popup_y = self
+                    .editor_screen_row(self.caret_line)
+                    .map(|row| base_y + (row as i32 + 1) * step)
+                    .unwrap_or(base_y)
+                    .min(self.height - s(180));
                 let popup_w = s(210);
                 let popup_h = s(30) * completions.len() as i32 + self.s(10);
                 self.rect(self.colors.panel_2, popup_x, popup_y, popup_w, popup_h);
@@ -4994,7 +5077,10 @@ impl App {
             .line
             .min(self.files[self.selected_file].lines.len().saturating_sub(1));
         let line = &self.files[self.selected_file].lines[line_index];
-        let y = base_y + line_index as i32 * step;
+        let Some(screen_row) = self.editor_screen_row(line_index) else {
+            return;
+        };
+        let y = base_y + screen_row as i32 * step;
         let mut lane = 0;
         for variable in self.debug_state.variables.iter().take(6) {
             let Some((start, end, _)) = editor_core::identifier_ranges(line)
@@ -6389,6 +6475,28 @@ impl App {
                 .unwrap_or_else(Instant::now)
         };
         match name {
+            "scrolling" => {
+                let mut lines = vec![
+                    "#include <iostream>".to_string(),
+                    "int main() {".to_string(),
+                ];
+                lines.extend((0..72).map(|index| {
+                    format!("    int value_{index} = {index}; // scrollable source row")
+                }));
+                lines.push("    std::cout << value_71 << std::endl;".into());
+                lines.push("}".into());
+                self.files = vec![FileBuffer::new(
+                    "main.cpp".into(),
+                    PathBuf::from("/tmp/tc-ide-preview/main.cpp"),
+                    lines,
+                )];
+                self.selected_file = 0;
+                self.editor_scroll = 28;
+                self.caret_line = 34;
+                self.caret_column = 8;
+                self.editor_focused = true;
+                true
+            }
             "view" => {
                 self.view_menu_open = true;
                 self.view_menu_motion = UiMotion::new(1.0);
@@ -7240,6 +7348,60 @@ impl App {
         self.run_in_terminal(&command);
     }
 
+    fn project_task_command(&self, build: bool) -> String {
+        let root = self.project_path.as_deref();
+        let file = &self.files[self.selected_file];
+        let relative = root
+            .and_then(|root| file.path.strip_prefix(root).ok())
+            .unwrap_or(&file.path);
+        let facts = workspace_core::ProjectFacts {
+            has_cargo: root.is_some_and(|path| path.join("Cargo.toml").is_file()),
+            has_package_json: root.is_some_and(|path| path.join("package.json").is_file()),
+            has_go_mod: root.is_some_and(|path| path.join("go.mod").is_file()),
+            language: self.detected_language_for_file(&file.name).to_string(),
+            file_name: relative.to_string_lossy().into_owned(),
+            file_stem: file
+                .path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            windows: false,
+        };
+        workspace_core::task_command(&facts, build)
+    }
+
+    /// Save the active document and execute the language-aware task in the
+    /// dedicated Build or Run terminal. Run commands for compiled single-file
+    /// languages include compilation, so a fresh project works on first click.
+    fn run_project_task(&mut self, build: bool) {
+        if self.project_path.is_none() {
+            self.status_message = self
+                .tr(
+                    "Create or open a project before running it",
+                    "请先新建或打开项目，再执行运行",
+                )
+                .into();
+            return;
+        }
+        self.save_current_file();
+        self.terminal_open = true;
+        self.terminal_focused = false;
+        self.terminal_active = if build { 0 } else { 1 }.min(self.terminals.len() - 1);
+        let command = self.project_task_command(build);
+        self.run_in_terminal(&command);
+        self.status_message = format!(
+            "{}: {command}",
+            self.tr(
+                if build { "Building" } else { "Running" },
+                if build {
+                    "正在编译"
+                } else {
+                    "正在运行"
+                }
+            )
+        );
+    }
+
     /// Run one command in the visible terminal and show its output there.
     ///
     /// The command is run through the shell so the user sees exactly what was
@@ -7271,9 +7433,15 @@ impl App {
                             String::from_utf8_lossy(&result.stderr)
                         );
                         lines.extend(text.lines().map(str::to_string));
-                        if text.is_empty() {
-                            lines.push(format!("process exited with {}", result.status));
-                        }
+                        lines.push(format!(
+                            "{} process exited with {}",
+                            if result.status.success() {
+                                "✓"
+                            } else {
+                                "✕"
+                            },
+                            result.status
+                        ));
                     }
                     Err(error) => lines.push(format!("terminal error: {error}")),
                 }
@@ -8455,7 +8623,9 @@ impl App {
         let s = |v| self.s(v);
         // The panel sits under the caret's line, kept inside the editor.
         let left = (self.width as f32 * 0.17) as i32 + s(60);
-        let y = s(119) + self.caret_line as i32 * self.code_line_step() + s(24);
+        let y = s(119)
+            + self.editor_screen_row(self.caret_line).unwrap_or(0) as i32 * self.code_line_step()
+            + s(24);
         let width = (text.chars().count() as i32 * s(8) + s(24)).min(self.width - left - s(24));
         let lines = ((width - s(20)) / s(8).max(1)).max(1) as usize;
         let wrapped = text.chars().count().div_ceil(lines).max(1) as i32;
@@ -8474,7 +8644,10 @@ impl App {
         let s = |v| self.s(v);
         if !self.lsp_completions.is_empty() {
             let left = (self.width as f32 * 0.17) as i32 + s(60);
-            let top = s(119) + self.caret_line as i32 * self.code_line_step() + s(24);
+            let top = s(119)
+                + self.editor_screen_row(self.caret_line).unwrap_or(0) as i32
+                    * self.code_line_step()
+                + s(24);
             let rows = self.lsp_completions.len().min(8) as i32;
             let width = s(340);
             let height = rows * s(20) + s(10);
@@ -8894,6 +9067,7 @@ impl App {
                 self.selected_file = self.files.len() - 1;
                 self.caret_line = 0;
                 self.caret_column = 0;
+                self.editor_scroll = 0;
                 self.editor_focused = true;
                 self.remember_session();
                 if let Some(index) = pack_index {
@@ -9030,6 +9204,7 @@ impl App {
         self.selected_file = 0;
         self.caret_line = 0;
         self.caret_column = 0;
+        self.editor_scroll = 0;
         self.graph_current = true;
         self.rebuild_project_index();
         self.remember_session();
@@ -9250,6 +9425,22 @@ impl App {
             return;
         }
         let workspace_right = (self.width as f32 * 0.17) as i32;
+        // X11 reports the wheel as buttons 4/5. Consume it in the editor before
+        // graph handling, and let a click on the track jump to that position.
+        if x >= workspace_right && x < graph_left && y >= s(84) && y < self.terminal_top() {
+            if button == 4 || button == 5 {
+                self.scroll_editor(if button == 4 { -3 } else { 3 });
+                return;
+            }
+            if button == 1 && x >= graph_left - s(18) {
+                let track_y = s(89);
+                let track_h = (self.terminal_top() - track_y - s(8)).max(s(40));
+                let ratio = ((y - track_y) as f32 / track_h.max(1) as f32).clamp(0.0, 1.0);
+                self.editor_scroll = (ratio * self.editor_max_scroll() as f32).round() as usize;
+                self.panel_drag = Some(PanelDrag::EditorScrollbar);
+                return;
+            }
+        }
         let debug_x = workspace_right + s(174);
         if button == 1 && y >= s(52) && y <= s(77) && x >= debug_x && x < debug_x + s(312) {
             match ((x - debug_x) / s(78).max(1)).clamp(0, 3) {
@@ -9826,7 +10017,7 @@ impl App {
             }
             // A press in the body starts a selection; the header controls are
             // handled below, so they still work.
-            if button == 1 && y > terminal_top + s(30) {
+            if button == 1 && y > terminal_top + s(30) && x < self.width - s(190) {
                 if let Some(point) = self.terminal_point_at(x, y) {
                     self.terminal_selection =
                         Some(terminal_core::TerminalSelection::new(point, point));
@@ -9860,7 +10051,11 @@ impl App {
                     let row = terminal_top + s(79 + index as i32 * 34);
                     if (y - row).abs() <= s(16) {
                         self.terminal_active = index;
-                        self.terminal_focused = true;
+                        if index <= 1 {
+                            self.run_project_task(index == 0);
+                        } else {
+                            self.terminal_focused = true;
+                        }
                         return;
                     }
                 }
@@ -9903,7 +10098,10 @@ impl App {
             let base = s(119);
             let step = self.code_line_step();
             for index in 0..self.files[self.selected_file].lines.len() {
-                let y_line = base + index as i32 * step;
+                let Some(screen_row) = self.editor_screen_row(index) else {
+                    continue;
+                };
+                let y_line = base + screen_row as i32 * step;
                 let Some(comment) =
                     self.comment_parts(&self.files[self.selected_file].lines[index])
                 else {
@@ -10001,6 +10199,7 @@ impl App {
                     self.graph_scroll = 0;
                     self.caret_line = 0;
                     self.caret_column = 0;
+                    self.editor_scroll = 0;
                     self.editor_focused = false;
                     self.selection_anchor = None;
                     self.selection_head = None;
@@ -10025,9 +10224,12 @@ impl App {
             self.ai_field_focused = None;
             let base = s(119);
             let step = s(28);
-            let line = ((y - base + step / 2) / step).max(0) as usize;
-            self.caret_line =
-                line.min(self.files[self.selected_file].lines.len().saturating_sub(1));
+            let screen_row = ((y - base + step / 2) / step).max(0) as usize;
+            let visible = self.editor_line_indices();
+            self.caret_line = visible
+                .get(self.editor_scroll + screen_row)
+                .copied()
+                .unwrap_or_else(|| self.files[self.selected_file].lines.len().saturating_sub(1));
             let text_x = workspace_right + s(52);
             self.caret_column = self.byte_index_at_code_x(
                 &self.files[self.selected_file].lines[self.caret_line],
@@ -10239,7 +10441,9 @@ impl App {
             return true;
         }
         if keysym == F5_KEYSYM {
-            if event.state & SHIFT_MASK != 0 {
+            if control {
+                self.run_project_task(false);
+            } else if event.state & SHIFT_MASK != 0 {
                 self.stop_debugging();
             } else {
                 self.start_or_continue_debugging();
@@ -10867,6 +11071,7 @@ impl App {
                 }
             }
         }
+        self.ensure_caret_visible();
         true
     }
 
@@ -10881,8 +11086,13 @@ impl App {
             return;
         }
         let comment_bounds = self.active_comment_edit_bounds();
-        let line = (((y - s(119) + s(14)) / s(28).max(1)).max(0) as usize)
-            .min(self.files[self.selected_file].lines.len() - 1);
+        let screen_row = ((y - s(119) + self.code_line_step() / 2) / self.code_line_step().max(1))
+            .max(0) as usize;
+        let visible = self.editor_line_indices();
+        let line = visible
+            .get(self.editor_scroll + screen_row)
+            .copied()
+            .unwrap_or(self.files[self.selected_file].lines.len() - 1);
         let column = self.byte_index_at_code_x(
             &self.files[self.selected_file].lines[line],
             (x - left - s(52)).max(0),
@@ -10928,6 +11138,12 @@ impl App {
                     (self.height - y).clamp(self.s(150), self.height - self.s(150));
                 self.status_message = self.tr("Resizing terminal", "正在调整终端高度").into();
             }
+            PanelDrag::EditorScrollbar => {
+                let track_y = self.s(89);
+                let track_h = (self.terminal_top() - track_y - self.s(8)).max(self.s(40));
+                let ratio = ((y - track_y) as f32 / track_h.max(1) as f32).clamp(0.0, 1.0);
+                self.editor_scroll = (ratio * self.editor_max_scroll() as f32).round() as usize;
+            }
         }
     }
 
@@ -10937,9 +11153,15 @@ impl App {
         let left = (self.width as f32 * 0.17) as i32;
         let graph = self.graph_left();
         if self.mouse_x >= left && self.mouse_x < graph && self.mouse_y > s(90) {
-            let row = ((self.mouse_y - s(119) + self.code_line_step() / 2)
+            let screen_row = ((self.mouse_y - s(119) + self.code_line_step() / 2)
                 / self.code_line_step().max(1))
             .max(0) as usize;
+            let visible = self.editor_line_indices();
+            let Some(row) = visible.get(self.editor_scroll + screen_row).copied() else {
+                self.hovered_from_code = false;
+                self.hovered_code_span = None;
+                return;
+            };
             if let Some(line) = self.files[self.selected_file].lines.get(row) {
                 let byte = self.byte_index_at_code_x(line, (self.mouse_x - left - s(52)).max(0));
                 if let Some((start, end)) = identifier_span_at(line, byte) {
@@ -12311,6 +12533,7 @@ pub fn run() {
             editor_focused: false,
             caret_line: 0,
             caret_column: 0,
+            editor_scroll: 0,
             selection_anchor: None,
             selection_head: None,
             clipboard: String::new(),

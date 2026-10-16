@@ -459,21 +459,29 @@ pub fn task_command(facts: &ProjectFacts, build: bool) -> String {
             if build {
                 format!("gcc {quoted_file} -o {}", facts.executable())
             } else {
-                facts.executable()
+                format!(
+                    "gcc {quoted_file} -o {} && {}",
+                    facts.executable(),
+                    facts.executable()
+                )
             }
         }
         "C++" => {
             if build {
                 format!("g++ {quoted_file} -o {}", facts.executable())
             } else {
-                facts.executable()
+                format!(
+                    "g++ {quoted_file} -o {} && {}",
+                    facts.executable(),
+                    facts.executable()
+                )
             }
         }
         "Java" => {
             if build {
                 format!("javac {quoted_file}")
             } else {
-                format!("java {}", facts.class_name())
+                format!("javac {quoted_file} && java {}", facts.class_name())
             }
         }
         _ => format!(
@@ -997,7 +1005,10 @@ mod tests {
             task_command(&c, true),
             "gcc \"main.c\" -o .\\tc-ide-build.exe"
         );
-        assert_eq!(task_command(&c, false), ".\\tc-ide-build.exe");
+        assert_eq!(
+            task_command(&c, false),
+            "gcc \"main.c\" -o .\\tc-ide-build.exe && .\\tc-ide-build.exe"
+        );
         let unix = ProjectFacts {
             windows: false,
             ..c.clone()
@@ -1006,7 +1017,10 @@ mod tests {
             task_command(&unix, true),
             "gcc \"main.c\" -o ./tc-ide-build"
         );
-        assert_eq!(task_command(&unix, false), "./tc-ide-build");
+        assert_eq!(
+            task_command(&unix, false),
+            "gcc \"main.c\" -o ./tc-ide-build && ./tc-ide-build"
+        );
 
         let java = ProjectFacts {
             language: "Java".into(),
@@ -1016,7 +1030,22 @@ mod tests {
             ..ProjectFacts::default()
         };
         assert_eq!(task_command(&java, true), "javac \"Main.java\"");
-        assert_eq!(task_command(&java, false), "java Main");
+        assert_eq!(
+            task_command(&java, false),
+            "javac \"Main.java\" && java Main"
+        );
+
+        let cpp = ProjectFacts {
+            language: "C++".into(),
+            file_name: "src/main.cpp".into(),
+            file_stem: "main".into(),
+            windows: false,
+            ..ProjectFacts::default()
+        };
+        assert_eq!(
+            task_command(&cpp, false),
+            "g++ \"src/main.cpp\" -o ./tc-ide-build && ./tc-ide-build"
+        );
     }
 
     #[test]
