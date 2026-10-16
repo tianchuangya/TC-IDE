@@ -370,6 +370,13 @@ extern "C" {
     fn cairo_create(surface: *mut CairoSurface) -> *mut CairoContext;
     fn cairo_destroy(context: *mut CairoContext);
     fn cairo_set_source_rgb(context: *mut CairoContext, red: f64, green: f64, blue: f64);
+    fn cairo_set_source_rgba(
+        context: *mut CairoContext,
+        red: f64,
+        green: f64,
+        blue: f64,
+        alpha: f64,
+    );
     fn cairo_move_to(context: *mut CairoContext, x: f64, y: f64);
     fn cairo_save(context: *mut CairoContext);
     fn cairo_restore(context: *mut CairoContext);
@@ -2834,6 +2841,47 @@ impl App {
         self.pango_text(color, x, y, value, false);
     }
 
+    /// Draw text at less than full opacity.
+    ///
+    /// A character arriving during an edit is drawn faint and comes up to full
+    /// strength, which is what makes a run read as being written rather than
+    /// appearing all at once.
+    ///
+    /// # Safety
+    /// Requires a live Cairo context.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn pango_text_alpha(
+        &self,
+        color: c_ulong,
+        x: i32,
+        y: i32,
+        value: &str,
+        code: bool,
+        alpha: f64,
+    ) {
+        let clean = value.replace('\0', "");
+        let Ok(value) = CString::new(clean) else {
+            return;
+        };
+        let Ok(font) = CString::new(self.font_description(code)) else {
+            return;
+        };
+        let layout = pango_cairo_create_layout(self.cairo);
+        if layout.is_null() {
+            return;
+        }
+        let description = pango_font_description_from_string(font.as_ptr());
+        pango_layout_set_text(layout, value.as_ptr(), value.as_bytes().len() as i32);
+        pango_layout_set_font_description(layout, description);
+        let (_, height) = self.pango_text_size(value.to_str().unwrap_or(""), code);
+        let (red, green, blue) = self.color_rgb(color);
+        cairo_set_source_rgba(self.cairo, red, green, blue, alpha.clamp(0.0, 1.0));
+        cairo_move_to(self.cairo, x as f64, (y - height + self.s(2)) as f64);
+        pango_cairo_show_layout(self.cairo, layout);
+        pango_font_description_free(description);
+        g_object_unref(layout.cast());
+    }
+
     unsafe fn pango_text(&self, color: c_ulong, x: i32, y: i32, value: &str, code: bool) {
         let clean = value.replace('\0', "");
         let Ok(value) = CString::new(clean) else {
@@ -4991,9 +5039,38 @@ impl App {
                     let inserted = &line[pulse.start..pulse.end];
                     let after = &line[pulse.end..];
                     self.highlighted_text(code_x, y, before, detected);
+                    // Each character of the run arrives on its own, so typing
+                    // reads as keystrokes rather than the whole run appearing
+                    // at once. A deletion has no characters to bring in, so it
+                    // keeps the gap marker below.
+                    let characters = inserted.char_indices().collect::<Vec<_>>();
+                    let count = characters.len();
+                    let mut pen_x = code_x + self.code_text_width(before);
+                    for (index, (offset, character)) in characters.iter().enumerate() {
+                        let end = offset
+                            + character
+                                .len_utf8()
+                                .min(inserted.len().saturating_sub(*offset));
+                        let piece = &inserted[*offset..end];
+                        let progress = motion_core::character_progress(
+                            index,
+                            count,
+                            pulse.age,
+                            motion_core::EditPulses::DURATION,
+                        );
+                        let (offset_y, opacity) =
+                            motion_core::character_arrival(progress, s(9) as f32);
+                        self.pango_text_alpha(
+                            self.colors.bright,
+                            pen_x,
+                            y + offset_y as i32,
+                            piece,
+                            true,
+                            opacity as f64,
+                        );
+                        pen_x += self.code_text_width(piece);
+                    }
                     let insert_x = code_x + self.code_text_width(before);
-                    let lift = (eased * s(9) as f32) as i32;
-                    self.pango_text(self.colors.bright, insert_x, y + lift, inserted, true);
                     self.highlighted_text(
                         insert_x + self.code_text_width(inserted),
                         y,
@@ -6783,6 +6860,33 @@ impl App {
                 self.folded = vec![0, 5];
                 self.goto_prompt = Some("42".into());
                 self.goto_focused = true;
+                true
+            }
+            "typing" => {
+                // A run of characters part way through arriving, so the
+                // per-character cascade can be seen rather than described.
+                self.files = vec![FileBuffer::new(
+                    "main.rs".into(),
+                    PathBuf::from("/tmp/tc-ide-preview/main.rs"),
+                    vec![
+                        "fn main() {".into(),
+                        "    let values = compute(alpha, beta);".into(),
+                        "    println!(\"{}\", values);".into(),
+                        "}".into(),
+                    ],
+                )];
+                self.selected_file = 0;
+                self.caret_line = 1;
+                self.caret_column = 42;
+                // The run `compute(alpha, beta)` is halfway in.
+                self.edit_pulses = motion_core::EditPulses::new();
+                self.edit_pulses
+                    .push(motion_core::EditKind::Insert, 1, 17, 38);
+                // Step the pulses to just after the edit, so the run is part
+                // way through arriving rather than finished.
+                for _ in 0..4 {
+                    self.edit_pulses.step(0.015);
+                }
                 true
             }
             "menu-keyboard" => {

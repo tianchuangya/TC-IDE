@@ -808,3 +808,168 @@ mod tests {
         assert!(pulses.newest().is_none(), "the highlight faded out");
     }
 }
+
+/// How far into an edit one character of it is, in `0.0..=1.0`.
+///
+/// An edit that inserts several characters should not arrive as one block:
+/// typing `let` should read as three keystrokes, and a paste should read as
+/// one action that is longer. Each character is given a slice of the pulse's
+/// life, spread across a fraction of it so a long run still settles quickly
+/// rather than dribbling in for a second.
+///
+/// Returns `1.0` for a character whose turn has come and gone, so a caller can
+/// treat it as settled.
+pub fn character_progress(index: usize, count: usize, age: f32, duration: f32) -> f32 {
+    // Nothing to animate, or no time to animate it in: both mean the text is
+    // simply there, which is better than leaving it invisible for ever.
+    if count == 0 || duration <= 0.0 || !age.is_finite() {
+        return 1.0;
+    }
+    if count == 1 {
+        // A single character is the whole edit, so it rises with the pulse.
+        return settled_fraction(age, duration);
+    }
+    // The characters share the first part of the pulse; the rest is the fade,
+    // which runs for the edit as a whole.
+    let spread = duration * CHARACTER_SPREAD;
+    let each = spread / count as f32;
+    let start = each * index as f32;
+    let elapsed = age - start;
+    if elapsed <= 0.0 {
+        return 0.0;
+    }
+    settled_fraction(elapsed, CHARACTER_RISE)
+}
+
+/// Fraction of a run of characters that is spent bringing them in, rather
+/// than fading the whole edit out.
+pub const CHARACTER_SPREAD: f32 = 0.6;
+/// How long one character takes to settle, in seconds.
+pub const CHARACTER_RISE: f32 = 0.05;
+
+/// How settled something is after `age` of a `duration` long rise.
+fn settled_fraction(age: f32, duration: f32) -> f32 {
+    if duration <= 0.0 || !age.is_finite() {
+        return 1.0;
+    }
+    (age / duration).clamp(0.0, 1.0)
+}
+
+/// The lift of one character as it arrives, in layout units.
+///
+/// A character comes up from below rather than fading in place, so a run of
+/// them reads as being written. Returns two offsets: how far it still has to
+/// travel, and its opacity, so a caller can draw both without repeating the
+/// arithmetic.
+pub fn character_arrival(progress: f32, travel: f32) -> (f32, f32) {
+    let progress = if progress.is_finite() {
+        progress.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    // Ease out: most of the distance is covered early, so the tail is short
+    // and a fast typist is not left waiting for characters to land.
+    let eased = 1.0 - (1.0 - progress) * (1.0 - progress);
+    let offset = travel * (1.0 - eased);
+    let opacity = 0.35 + 0.65 * eased;
+    (offset, opacity)
+}
+
+#[cfg(test)]
+mod character_tests {
+    use super::*;
+
+    #[test]
+    fn a_typed_run_arrives_one_character_at_a_time() {
+        // Typing `let` should read as three keystrokes, so the second
+        // character must still be waiting when the first has started.
+        let duration = EditPulses::DURATION;
+        let first = character_progress(0, 3, 0.0, duration);
+        let second = character_progress(1, 3, 0.0, duration);
+        let third = character_progress(2, 3, 0.0, duration);
+        assert_eq!(first, 0.0, "the first has not started either");
+        assert_eq!(second, 0.0);
+        assert_eq!(third, 0.0);
+
+        // A little later the first is moving and the last has not begun.
+        let early = 0.01;
+        let first = character_progress(0, 3, early, duration);
+        let third = character_progress(2, 3, early, duration);
+        assert!(first > 0.0, "the first character has started");
+        assert_eq!(third, 0.0, "the last is still waiting");
+        // An earlier character is always at least as far along as a later
+        // one, at every moment: the run arrives in the order it was typed.
+        for age in [0.0, 0.01, 0.02, 0.05, 0.08, 0.13, 0.26] {
+            for index in 1..3 {
+                let earlier = character_progress(index - 1, 3, age, duration);
+                let later = character_progress(index, 3, age, duration);
+                assert!(
+                    earlier >= later,
+                    "at {age}s character {index} was ahead of {}: {earlier} < {later}",
+                    index - 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_character_settles_before_the_edit_is_over() {
+        // A run must not still be arriving when the highlight has already
+        // faded, or a fast typist sees characters land after the edit ended.
+        let duration = EditPulses::DURATION;
+        for count in 1..=12 {
+            for index in 0..count {
+                let settled = character_progress(index, count, duration, duration);
+                assert_eq!(
+                    settled, 1.0,
+                    "{index} of {count} had not settled by the end"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_single_character_is_the_whole_edit() {
+        // One keystroke has nothing to spread across, so it rises with the
+        // pulse rather than being held back.
+        let duration = EditPulses::DURATION;
+        assert_eq!(character_progress(0, 1, 0.0, duration), 0.0);
+        let half = character_progress(0, 1, duration / 2.0, duration);
+        assert!((half - 0.5).abs() < 0.01, "{half}");
+        assert_eq!(character_progress(0, 1, duration, duration), 1.0);
+    }
+
+    #[test]
+    fn an_empty_run_and_a_strange_duration_are_handled() {
+        // Guards against a caller passing nothing, or a duration that would
+        // divide by zero.
+        assert_eq!(character_progress(0, 0, 0.0, 1.0), 1.0);
+        assert_eq!(character_progress(5, 0, 0.0, 1.0), 1.0);
+        assert_eq!(character_progress(0, 3, 0.0, 0.0), 1.0);
+        assert_eq!(character_progress(0, 3, f32::NAN, 1.0), 1.0);
+        // A negative age is before the edit, so nothing has started. A caller
+        // never passes one, but reporting "arrived" would make a character
+        // appear early rather than late, which is the worse of the two.
+        assert_eq!(character_progress(0, 3, -1.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn a_character_comes_up_from_below_and_reaches_its_place() {
+        // The offset shrinks to nothing and the opacity rises to one, so a
+        // settled character is drawn exactly where it belongs.
+        let (offset, opacity) = character_arrival(0.0, 9.0);
+        assert_eq!(offset, 9.0, "it starts below its place");
+        assert!(opacity < 1.0, "and faint");
+        let (offset, opacity) = character_arrival(1.0, 9.0);
+        assert_eq!(offset, 0.0, "it lands exactly");
+        assert_eq!(opacity, 1.0);
+        // Halfway, most of the distance is already covered.
+        let (offset, _) = character_arrival(0.5, 9.0);
+        assert!(offset < 4.5, "the movement eases out: {offset}");
+        assert!(offset > 0.0);
+        // Out of range values are clamped rather than producing a jump.
+        assert_eq!(character_arrival(-1.0, 9.0), (9.0, 0.35));
+        assert_eq!(character_arrival(2.0, 9.0), (0.0, 1.0));
+        assert_eq!(character_arrival(f32::NAN, 9.0), (0.0, 1.0));
+    }
+}

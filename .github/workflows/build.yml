@@ -76,6 +76,7 @@ jobs:
           xvfb-run -a cargo run -- --render-frame /tmp/tc-plugins.png --render-scene plugins
           xvfb-run -a cargo run -- --render-frame /tmp/tc-menu-keyboard.png --render-scene menu-keyboard
           xvfb-run -a cargo run -- --render-frame /tmp/tc-menu-hover.png --render-scene menu-hover
+          xvfb-run -a cargo run -- --render-frame /tmp/tc-typing.png --render-scene typing
           python3 - <<'PY'
           import os
           import sys
@@ -104,6 +105,7 @@ jobs:
               "/tmp/tc-plugins.png",
               "/tmp/tc-menu-keyboard.png",
               "/tmp/tc-menu-hover.png",
+              "/tmp/tc-typing.png",
           ]
           sizes = {path: os.path.getsize(path) for path in frames}
           for path, size in sizes.items():
