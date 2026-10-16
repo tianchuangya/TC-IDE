@@ -139,14 +139,20 @@ folded=folder:src
 
 ## 5. 验证命令
 
-在仓库根目录执行：
+> **先读这一条：本机的默认 `cargo` 是 1.75，而 CI 用 stable（1.99）。**
+> 必须用 `~/.cargo/bin/rustup run stable cargo ...`，否则格式化结果与 CI 不同。
 
 ```bash
-cargo fmt --all
-cargo test --all-targets
-cargo build --release
-git diff --check
+R=~/.cargo/bin/rustup
+$R run stable cargo fmt --check
+$R run stable cargo test --all-targets
+$R run stable cargo clippy --all-targets -- -D warnings
+$R run stable cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+$R run stable cargo clippy --all-targets --target x86_64-apple-darwin -- -D warnings
+python3 tools/windows_editor_sim.py
 ```
+
+原始命令（`cargo fmt --all` 等）在默认工具链下即可运行，但**不要用它判断 CI 是否会红**。
 
 Linux 当前应为：
 
@@ -221,3 +227,41 @@ TC-IDE.desktop
 5. 补齐菜单交互、动效和 `.tcIDE` 点击打开关系图。
 6. 做真实项目回归：Rust、C++、Python 项目各一个，验证打开、编辑、保存、Build、Run、关系图、终端和 `.tcIDE`。
 7. 最后才构建交付包；不要提前创建 Release。
+
+## 10. 接手后的进展（2026-10-17）
+
+### 已完成
+
+- **共享菜单模型 `src/menu_core.rs`**（第 19 个共享核心，已纳入 `tests/platform_boundary.rs` 守护）。
+  8 个菜单标题、43 个菜单项、双语标签、快捷键，全部可在无窗口下测试（7 项测试）。
+  写这个模型时测试抓出我自己的 3 个建模错误：撤销/重做同时列在「文件」和「编辑」、
+  停止同时列在「运行」和「调试」、以及一个项漏登记。
+- **Linux 菜单栏按模型绘制并全部接通**。此前「运行」「调试」是画了边框和文字但没有状态字段、
+  也没有命中测试的死按钮，点下去什么都不会发生；「窗口」「帮助」根本不存在。
+  现 8 个标题全部可点，命中测试与绘制共用同一套矩形。渲染实测：x=202..1165 共 8 个相邻按钮，
+  与命中测试的布局一致（差值 ≤3px，即描边本身）。
+- 「文件」菜单保留自己的行点击处理：它的行比模型列出的更丰富（分节标题、最近项目、新建项）。
+
+### 顺手修掉的、推送前就已存在的问题
+
+这些问题在 main 上已经存在，会阻塞验证：
+
+1. `src/tcide_project.rs` 一处 clippy 报错（`field_reassign_with_default`）。
+2. `src/windows_app/workspace.rs` 使用 `tcide_project` 却没有导入，且 `language` 类型不匹配
+   （`&str` 传给 `String` 字段）。
+3. **`graph-callees` 渲染场景没有真正生效**，产出的帧与普通编辑器帧**逐字节相同**（都是 597119 字节），
+   因此 CI 帧门槛一直是失败的。根因：场景从「当前恢复的会话」取文档，而该会话是 `main.c`
+   （6 行、1 个调用、0 个带接收者的调用），查找返回空 → `prime_scene` 报「未知场景」→
+   画出普通编辑器帧。现在场景自带文档并主动打开面板；修复后该帧 667460 字节 vs 编辑器 600125 字节，
+   本地跑完整帧门槛 **PASS**。
+
+**CI 现已 passing，基线为 `328 + 3 + 4`。**
+
+### 下一步（按优先级）
+
+1. **P0 菜单交互补齐**：悬停高亮、键盘导航（左右移动菜单、上下移动项、Enter 执行、Esc 关闭）、
+   子菜单打开动效。目前只有点击。
+2. **P0 面板/终端/关系图的过渡曲线统一**到 `motion_core`，避免每处各自一套速度。
+3. **P1 `.tcIDE` 点击进入关系图视图**；AI 上下文优先读 `.tcIDE`。
+4. **P1 逐字输入/删除反馈**（目前是整行抬升）。
+5. **P2 把同一套菜单语义同步到 Windows 后端**（`menu_core` 已就绪，Windows 尚未接入）。
