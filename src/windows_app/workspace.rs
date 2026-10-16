@@ -55,9 +55,9 @@ impl WindowsAppState {
                     .to_string_lossy()
                     .replace('\\', "/");
                 let language = editor_core::language_for_file(&relative);
-                (language != "Plain Text").then_some(tcide_project::ProjectFile {
+                (language != "Plain Text").then(|| tcide_project::ProjectFile {
                     path: relative,
-                    language,
+                    language: language.to_string(),
                 })
             })
             .collect();

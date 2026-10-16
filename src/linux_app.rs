@@ -21,6 +21,7 @@ use crate::extension_core;
 use crate::graph_core;
 use crate::index_core;
 use crate::lsp_core;
+use crate::menu_core;
 use crate::motion_core;
 use crate::package_motion;
 use crate::search_core;
@@ -430,6 +431,9 @@ const LEFT_KEYSYM: c_ulong = 0xff51;
 const UP_KEYSYM: c_ulong = 0xff52;
 const RIGHT_KEYSYM: c_ulong = 0xff53;
 const DOWN_KEYSYM: c_ulong = 0xff54;
+/// Where the menu bar starts, in layout units.
+const MENU_BAR_LEFT: i32 = 112;
+
 const F5_KEYSYM: c_ulong = 0xffc2;
 /// F3, which steps to the next match of a search.
 const F3_KEYSYM: c_ulong = 0xffc0;
@@ -804,8 +808,18 @@ struct App {
     code_zoom: i32,
     font_search: String,
     font_search_focused: bool,
-    edit_menu_open: bool,
-    view_menu_open: bool,
+    /// Which menu of the bar is open, if any.
+    ///
+    /// One field rather than a boolean per menu: the hand written version had
+    /// three, each closing the other two by name, which is why the two menus
+    /// added later were never wired up.
+    open_menu: Option<menu_core::Menu>,
+    /// Whether the comment bubbles are drawn beside the code.
+    comment_bubbles: bool,
+    /// Whether the shortcut sheet is open.
+    shortcuts_open: bool,
+    /// Whether the about panel is open.
+    about_open: bool,
     workspace_search: String,
     workspace_search_focused: bool,
     project_tree_expanded: bool,
@@ -931,7 +945,6 @@ struct App {
     package_open: bool,
     package_targets: [bool; 4],
     build_started: Option<Instant>,
-    new_menu_open: bool,
     workspace_context_menu: Option<(i32, i32)>,
     extensions_open: bool,
     settings_open: bool,
@@ -3993,56 +4006,53 @@ impl App {
             self.text(self.colors.bright, s(15), s(29), "TC");
             self.text(self.colors.accent, s(42), s(29), "IDE");
         }
-        self.outline(
-            if self.new_menu_open {
-                self.colors.accent
+        // The bar is drawn from the model, so a menu that is listed is shown
+        // and a menu that is shown is clickable. Drawing five titles by hand is
+        // how two of them came to be decoration.
+        let bar_left = s(MENU_BAR_LEFT);
+        for menu in menu_core::Menu::ALL {
+            let (left, top, width, height) = self.menu_rect(menu);
+            let open = self.open_menu == Some(menu);
+            // A menu opens a panel rather than a list, so it is shown as open
+            // when that panel is.
+            let open = open
+                || (menu == menu_core::Menu::Extensions && self.extensions_open)
+                || (menu == menu_core::Menu::File && self.package_open);
+            self.outline(
+                if open {
+                    self.colors.accent
+                } else {
+                    self.colors.line
+                },
+                left,
+                top,
+                width,
+                height,
+            );
+            let label = if self.ui_chinese {
+                menu.title_chinese()
             } else {
-                self.colors.line
-            },
-            s(112),
-            s(10),
-            s(88),
-            s(27),
-        );
-        self.text(self.colors.text, s(124), s(29), self.tr("File", "文件"));
-        self.chevron(s(181), s(24), self.new_menu_open);
-        self.outline(
-            if self.edit_menu_open {
-                self.colors.accent
-            } else {
-                self.colors.line
-            },
-            s(207),
-            s(10),
-            s(88),
-            s(27),
-        );
-        self.text(self.colors.text, s(219), s(29), self.tr("Edit", "编辑"));
-        self.outline(
-            if self.view_menu_open {
-                self.colors.accent
-            } else {
-                self.colors.line
-            },
-            s(302),
-            s(10),
-            s(88),
-            s(27),
-        );
-        self.text(self.colors.text, s(314), s(29), self.tr("View", "查看"));
-        // Keep the primary workflow commands visible in the same menu row as
-        // the preview design: users should not have to open a secondary panel
-        // just to build, run or start a debug session.
-        self.outline(self.colors.line, s(397), s(10), s(72), s(27));
-        self.text(self.colors.text, s(410), s(29), self.tr("Run", "运行"));
-        self.outline(self.colors.line, s(475), s(10), s(72), s(27));
-        self.text(self.colors.text, s(488), s(29), self.tr("Debug", "调试"));
+                menu.title()
+            };
+            let text_width = self.pango_text_size(label, false).0;
+            self.text(
+                self.colors.text,
+                left + (width - text_width) / 2,
+                top + s(19),
+                label,
+            );
+        }
+        // The project path sits after the bar, so it never overlaps a title.
+        let bar_right = self.menu_rect(menu_core::Menu::Help).0
+            + self.menu_rect(menu_core::Menu::Help).2
+            + s(24);
+        let _ = bar_left;
         let path = format!(
             "{}  /  {}",
             self.project_name, self.files[self.selected_file].name
         );
         let path_x = self.width / 2 - self.pango_text_size(&path, false).0 / 2;
-        self.text(self.colors.muted, path_x.max(s(405)), s(29), &path);
+        self.text(self.colors.muted, path_x.max(bar_right), s(29), &path);
         self.outline(
             if self.settings_open {
                 self.colors.accent
@@ -4926,7 +4936,7 @@ impl App {
         let detected = self.detected_language_for_file(&self.files[self.selected_file].name);
         let base_y = s(119);
         let step = self.code_line_step();
-        let show_bubbles = !(self.mouse_x >= 0 && self.mouse_x < left);
+        let show_bubbles = self.comment_bubbles && !(self.mouse_x >= 0 && self.mouse_x < left);
         // A folded block takes one row on screen, so the row is counted
         // separately from the line in the file.
         let fold_starts = self
@@ -6725,7 +6735,7 @@ impl App {
                 true
             }
             "view" => {
-                self.view_menu_open = true;
+                self.open_menu = Some(menu_core::Menu::View);
                 self.view_menu_motion = UiMotion::new(1.0);
                 self.terminal_open = true;
                 self.terminal_motion = UiMotion::new(1.0);
@@ -6958,7 +6968,7 @@ impl App {
                     self.session.open(Some(path.clone()), name.to_string());
                     self.session.remember_project(&path);
                 }
-                self.new_menu_open = true;
+                self.open_menu = Some(menu_core::Menu::File);
                 self.new_menu_motion = UiMotion::new(1.0);
                 true
             }
@@ -7353,10 +7363,22 @@ impl App {
             root_target,
             dt,
         );
-        Self::step_ui_motion(&mut self.new_menu_motion, self.new_menu_open, dt);
+        Self::step_ui_motion(
+            &mut self.new_menu_motion,
+            self.open_menu == Some(menu_core::Menu::File),
+            dt,
+        );
         Self::step_ui_motion(&mut self.file_switch_motion, true, dt);
-        Self::step_ui_motion(&mut self.edit_menu_motion, self.edit_menu_open, dt);
-        Self::step_ui_motion(&mut self.view_menu_motion, self.view_menu_open, dt);
+        Self::step_ui_motion(
+            &mut self.edit_menu_motion,
+            self.open_menu == Some(menu_core::Menu::Edit),
+            dt,
+        );
+        Self::step_ui_motion(
+            &mut self.view_menu_motion,
+            self.open_menu == Some(menu_core::Menu::View),
+            dt,
+        );
         Self::step_ui_motion(&mut self.settings_motion, self.settings_open, dt);
         Self::step_ui_motion(&mut self.package_motion, self.package_open, dt);
         Self::step_ui_motion(&mut self.extensions_motion, self.extensions_open, dt);
@@ -8819,6 +8841,214 @@ impl App {
         );
     }
 
+    /// Width of one menu title on the bar, in layout units.
+    ///
+    /// A title is padded rather than fixed width, so a longer word is not
+    /// clipped and a short one does not leave a gap that reads as a separate
+    /// Run the File menu row the pointer was on.
+    ///
+    /// The File menu has rows the model does not list, so its actions live
+    /// here rather than in the model driven handler.
+    fn activate_file_menu_row(&mut self, row: &FileMenuRow) {
+        match row {
+            FileMenuRow::Heading(..) => {}
+            FileMenuRow::Create(kind) => {
+                self.create_kind = Some(*kind);
+                self.new_file_name.clear();
+                self.create_caret = 0;
+                self.project_location_focused = false;
+                self.status_message = self.tr("Enter a name", "请输入名称").into();
+            }
+            FileMenuRow::OpenFile => self.open_file_dialog(),
+            FileMenuRow::OpenFolder => self.open_folder_dialog(),
+            FileMenuRow::Recent(path) => {
+                let path = path.clone();
+                self.open_project_at(path);
+            }
+        }
+    }
+
+    /// button.
+    fn menu_title_width(menu: menu_core::Menu) -> i32 {
+        let characters = menu.title().chars().count() as i32;
+        (characters * 8 + 26).max(58)
+    }
+
+    /// Where a menu title sits on the bar.
+    ///
+    /// The bar is laid out left to right from `MENU_BAR_LEFT`, so the hit test
+    /// and the drawing use one piece of arithmetic and cannot disagree.
+    fn menu_rect(&self, menu: menu_core::Menu) -> (i32, i32, i32, i32) {
+        let s = |v: i32| self.s(v);
+        let mut left = s(MENU_BAR_LEFT);
+        for entry in menu_core::Menu::ALL {
+            let width = s(Self::menu_title_width(entry));
+            if entry == menu {
+                return (left, s(10), width, s(27));
+            }
+            left += width;
+        }
+        (left, s(10), s(Self::menu_title_width(menu)), s(27))
+    }
+
+    /// The menu whose title is under a point, if any.
+    fn menu_at(&self, x: i32, y: i32) -> Option<menu_core::Menu> {
+        menu_core::Menu::ALL.into_iter().find(|menu| {
+            let (left, top, width, height) = self.menu_rect(*menu);
+            x >= left && x <= left + width && y >= top && y <= top + height
+        })
+    }
+
+    /// Open a menu, or close it when it is already the open one.
+    ///
+    /// Opening one closes whatever else was open, panels included. The hand
+    /// written version repeated that list at every call site, which is how two
+    /// menus came to be left out of it.
+    fn toggle_menu(&mut self, menu: menu_core::Menu) {
+        let already = self.open_menu == Some(menu);
+        self.settings_open = false;
+        self.extensions_open = false;
+        self.package_open = false;
+        self.editor_focused = false;
+        self.open_menu = if already { None } else { Some(menu) };
+    }
+
+    /// Run one menu item.
+    ///
+    /// Every item the model lists has an arm here, so an item can never be
+    /// offered and do nothing, which is what Run and Debug used to do.
+    fn activate_menu_item(&mut self, item: menu_core::Item) {
+        use menu_core::Item::*;
+        self.open_menu = None;
+        match item {
+            Save => self.save_current_file(),
+            OpenFile => self.open_file_dialog(),
+            OpenFolder => self.open_folder_dialog(),
+            NewWindow | CloseWindow => {
+                self.status_message = self
+                    .tr("This build has a single window", "此版本只有单个窗口")
+                    .into()
+            }
+            Undo => self.undo_edit(),
+            Redo => self.redo_edit(),
+            SelectAll => {
+                let last = self.files[self.selected_file].lines.len() - 1;
+                self.selection_anchor = Some((0, 0));
+                self.selection_head =
+                    Some((last, self.files[self.selected_file].lines[last].len()));
+            }
+            Copy => self.copy_selection(),
+            Paste => self.paste_clipboard(),
+            Find => self.toggle_find(),
+            Replace => {
+                if !self.find_open {
+                    self.toggle_find();
+                }
+                self.find_replace_focused = true;
+                self.find_focused = false;
+            }
+            FindInProject => {
+                if self.project_matches.is_empty() && !self.find_text.is_empty() {
+                    self.search_project();
+                    self.jump_to_project_match();
+                } else if !self.project_matches.is_empty() {
+                    self.next_project_match();
+                } else {
+                    self.find_open = true;
+                    self.find_focused = true;
+                }
+            }
+            GoToLine => self.begin_goto_line(),
+            ToggleProjectTree => {
+                self.project_tree_expanded = !self.project_tree_expanded;
+            }
+            ToggleGraph => {
+                self.graph_visible = !self.graph_visible;
+            }
+            ToggleTerminal => {
+                self.terminal_open = !self.terminal_open;
+                self.terminal_focused = self.terminal_open;
+            }
+            ToggleComments => self.toggle_comment_bubbles(),
+            ToggleDebugInfo => self.toggle_debug_panel(),
+            FoldAll => self.toggle_fold_all(),
+            LargerCode => {
+                self.code_zoom = (self.code_zoom + 1).min(8);
+                self.reload_code_font();
+            }
+            SmallerCode => {
+                self.code_zoom = (self.code_zoom - 1).max(-2);
+                self.reload_code_font();
+            }
+            Build => self.run_project_task(true),
+            Run => self.run_project_task(false),
+            StopRun => self.stop_debugging(),
+            Package => self.package_open = !self.package_open,
+            StartDebug => self.start_or_continue_debugging(),
+            StepOver => self.step_debug(dap_core::PendingRequest::Next),
+            StepInto => self.step_debug(dap_core::PendingRequest::StepIn),
+            StepOut => self.step_debug(dap_core::PendingRequest::StepOut),
+            ToggleBreakpoint => self.toggle_breakpoint(),
+            StopDebug => self.stop_debugging(),
+            ShowExtensions => {
+                self.extensions_open = !self.extensions_open;
+                self.extension_search_focused = false;
+            }
+            ShowSettings => {
+                self.settings_open = !self.settings_open;
+                self.settings_motion = UiMotion::new(0.0);
+            }
+            ShowAiPanel => {
+                self.toggle_ai();
+                if self.ai_open {
+                    self.load_ai_history();
+                }
+            }
+            Minimize | Zoom | ToggleFullScreen => {
+                self.status_message = self
+                    .tr(
+                        "Window controls are handled by the window manager",
+                        "窗口控制由窗口管理器负责",
+                    )
+                    .into()
+            }
+            NewTerminal => self.add_terminal(),
+            DetachTerminal => {
+                self.status_message = self
+                    .tr(
+                        "A detached terminal is available on Windows",
+                        "独立终端窗口在 Windows 上提供",
+                    )
+                    .into()
+            }
+            ShowShortcuts => self.shortcuts_open = !self.shortcuts_open,
+            ShowAbout => self.about_open = !self.about_open,
+            OpenProjectFolder => {
+                let root = self.project_path.clone().unwrap_or_else(projects_root);
+                self.open_project_at(root);
+            }
+        }
+    }
+
+    /// Ask the debug session to step, in the direction asked for.
+    fn step_debug(&mut self, request: dap_core::PendingRequest) {
+        let Some(session) = self.debug_session.as_mut() else {
+            self.status_message = self.tr("Start debugging first", "请先启动调试").into();
+            return;
+        };
+        let _ = session.control(request);
+    }
+
+    /// Show or hide the comment bubbles beside the code.
+    fn toggle_comment_bubbles(&mut self) {
+        self.comment_bubbles = !self.comment_bubbles;
+        self.status_message = if self.comment_bubbles {
+            self.tr("Comment bubbles shown", "已显示注释气泡").into()
+        } else {
+            self.tr("Comment bubbles hidden", "已隐藏注释气泡").into()
+        };
+    }
+
     /// Recompute which brackets the caret is between.
     ///
     /// Named for what it does rather than when it runs: the pair is worked out
@@ -9878,104 +10108,20 @@ impl App {
                 return;
             }
         }
-        if x >= s(112) && x <= s(200) && y < s(46) {
-            self.new_menu_open = !self.new_menu_open;
-            self.edit_menu_open = false;
-            self.settings_open = false;
-            self.extensions_open = false;
-            self.package_open = false;
-            self.editor_focused = false;
-            return;
-        }
-        if x >= s(207) && x <= s(295) && y < s(46) {
-            self.edit_menu_open = !self.edit_menu_open;
-            self.new_menu_open = false;
-            self.view_menu_open = false;
-            self.settings_open = false;
-            self.extensions_open = false;
-            self.package_open = false;
-            return;
-        }
-        if x >= s(302) && x <= s(390) && y < s(46) {
-            self.view_menu_open = !self.view_menu_open;
-            self.new_menu_open = false;
-            self.edit_menu_open = false;
-            self.settings_open = false;
-            self.extensions_open = false;
-            self.package_open = false;
-            self.editor_focused = false;
-            return;
-        }
-        if self.view_menu_open {
-            let menu_x = s(302);
-            let menu_y = s(43);
-            if button == 1
-                && x >= menu_x
-                && x <= menu_x + s(280)
-                && y >= menu_y + s(29)
-                && y <= menu_y + s(51 + 36 * 3) - s(11)
-            {
-                let index = ((y - menu_y - s(29)) / s(36).max(1)).clamp(0, 2);
-                if index == 0 {
-                    self.graph_visible = !self.graph_visible;
-                    self.status_message = self
-                        .tr(
-                            if self.graph_visible {
-                                "Call hierarchy shown"
-                            } else {
-                                "Call hierarchy hidden"
-                            },
-                            if self.graph_visible {
-                                "已显示调用层级"
-                            } else {
-                                "已隐藏调用层级"
-                            },
-                        )
-                        .into();
-                } else if index == 1 {
-                    self.terminal_open = !self.terminal_open;
-                    self.terminal_focused = self.terminal_open;
-                } else {
-                    self.toggle_debug_panel();
-                }
+        // One handler for the whole bar, so every menu the model lists is
+        // clickable. The hand written version spelled out three x ranges and
+        // left the two menus added later dead.
+        if y < s(46) {
+            if let Some(menu) = self.menu_at(x, y) {
+                self.toggle_menu(menu);
                 return;
             }
-            self.view_menu_open = false;
         }
-        if self.edit_menu_open {
-            let menu_x = s(207);
-            let menu_y = s(43);
-            // Eight rows now, so the region has to match the panel it opens.
-            if x >= menu_x && x <= menu_x + s(260) && y >= menu_y && y <= menu_y + s(244) {
-                // The rows are the labels the menu draws, in the same order.
-                let index = ((y - menu_y - s(17)) / s(27).max(1)).clamp(0, 7);
-                match index {
-                    0 => self.undo_edit(),
-                    1 => self.redo_edit(),
-                    2 => self.save_current_file(),
-                    3 => {
-                        let last = self.files[self.selected_file].lines.len() - 1;
-                        self.selection_anchor = Some((0, 0));
-                        self.selection_head =
-                            Some((last, self.files[self.selected_file].lines[last].len()));
-                    }
-                    4 => self.copy_selection(),
-                    5 => self.paste_clipboard(),
-                    6 => {
-                        self.code_zoom = (self.code_zoom + 1).min(8);
-                        self.reload_code_font();
-                    }
-                    _ => {
-                        self.code_zoom = (self.code_zoom - 1).max(-2);
-                        self.reload_code_font();
-                    }
-                }
-                self.edit_menu_open = false;
-                return;
-            }
-            self.edit_menu_open = false;
-        }
-        if self.new_menu_open {
+        // The File menu draws richer rows than the model lists - headings, the
+        // recent projects, and the create entries - so it keeps its own hit
+        // test. The model still supplies the title and the simple items, which
+        // is what keeps the two from drifting apart.
+        if self.open_menu == Some(menu_core::Menu::File) {
             let menu_x = s(112);
             let menu_w = s(300);
             let rows = self.file_menu_rows();
@@ -9985,29 +10131,39 @@ impl App {
                 }
                 let row_y = self.file_menu_row_y(index);
                 if x >= menu_x && x <= menu_x + menu_w && (y - row_y).abs() <= s(14) {
-                    self.new_menu_open = false;
-                    match row {
-                        FileMenuRow::Create(kind) => {
-                            self.create_kind = Some(*kind);
-                            self.new_file_name.clear();
-                            self.create_caret = 0;
-                            self.project_location_focused = false;
-                            self.status_message = self.tr("Enter a name", "请输入名称").into();
-                        }
-                        FileMenuRow::OpenFile => self.open_file_dialog(),
-                        FileMenuRow::OpenFolder => self.open_folder_dialog(),
-                        FileMenuRow::Recent(path) => self.open_project_at(path.clone()),
-                        FileMenuRow::Heading(..) => {}
-                    }
+                    self.open_menu = None;
+                    self.activate_file_menu_row(row);
                     return;
                 }
             }
-            self.new_menu_open = false;
+            self.open_menu = None;
+            return;
+        }
+        if let Some(menu) = self.open_menu {
+            let (menu_x, menu_y, menu_w, _) = self.menu_rect(menu);
+            let items = menu.items();
+            let width = menu_w.max(s(240));
+            let height = s(12 + items.len() as i32 * 26);
+            if button == 1
+                && x >= menu_x
+                && x <= menu_x + width
+                && y >= menu_y + s(29)
+                && y <= menu_y + s(29) + height
+            {
+                let row = ((y - menu_y - s(29)) / s(26).max(1)).max(0) as usize;
+                if let Some(item) = items.get(row).copied() {
+                    self.activate_menu_item(item);
+                }
+                return;
+            }
+            // A click anywhere else closes the menu, which is what a menu bar
+            // does everywhere else.
+            self.open_menu = None;
         }
         if x >= self.width - s(410) && x <= self.width - s(290) && y < s(46) {
             self.settings_open = !self.settings_open;
-            self.new_menu_open = false;
-            self.edit_menu_open = false;
+            self.open_menu = None;
+            self.open_menu = None;
             self.extensions_open = false;
             self.package_open = false;
             self.editor_focused = false;
@@ -10076,8 +10232,8 @@ impl App {
         }
         if x > self.width - s(290) && x < self.width - s(145) && y < s(46) {
             self.extensions_open = !self.extensions_open;
-            self.new_menu_open = false;
-            self.edit_menu_open = false;
+            self.open_menu = None;
+            self.open_menu = None;
             self.settings_open = false;
             self.package_open = false;
             self.editor_focused = false;
@@ -10085,8 +10241,8 @@ impl App {
         }
         if x > self.width - s(150) && y < s(46) {
             self.package_open = !self.package_open;
-            self.new_menu_open = false;
-            self.edit_menu_open = false;
+            self.open_menu = None;
+            self.open_menu = None;
             self.settings_open = false;
             self.extensions_open = false;
             self.editor_focused = false;
@@ -11155,16 +11311,14 @@ impl App {
         }
         if keysym == ESCAPE_KEYSYM {
             if self.extensions_open
-                || self.new_menu_open
-                || self.edit_menu_open
+                || self.open_menu.is_some()
                 || self.settings_open
                 || self.workspace_context_menu.is_some()
                 || self.package_open
                 || self.build_started.is_some()
             {
                 self.extensions_open = false;
-                self.new_menu_open = false;
-                self.edit_menu_open = false;
+                self.open_menu = None;
                 self.settings_open = false;
                 self.workspace_context_menu = None;
                 self.version_menu_open = false;
@@ -12870,8 +13024,10 @@ pub fn run() {
             code_zoom: preferences.code_zoom,
             font_search: String::new(),
             font_search_focused: false,
-            edit_menu_open: false,
-            view_menu_open: false,
+            open_menu: None,
+            comment_bubbles: true,
+            shortcuts_open: false,
+            about_open: false,
             workspace_search: String::new(),
             workspace_search_focused: false,
             project_tree_expanded: true,
@@ -12961,7 +13117,6 @@ pub fn run() {
             package_open: false,
             package_targets: [false, false, false, false],
             build_started: None,
-            new_menu_open: false,
             workspace_context_menu: None,
             extensions_open: false,
             settings_open: false,

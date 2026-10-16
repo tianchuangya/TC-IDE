@@ -20,6 +20,7 @@ use crate::motion_core;
 use crate::package_motion;
 use crate::session_core;
 use crate::syntax_core;
+use crate::tcide_project;
 use crate::terminal_core;
 use crate::text_buffer;
 use crate::theme_core;

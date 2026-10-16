@@ -95,13 +95,14 @@ impl ProjectDocument {
     }
 
     pub fn for_root(root: &Path) -> Self {
-        let mut document = Self::default();
-        document.name = root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("TC-IDE 项目")
-            .to_string();
-        document
+        Self {
+            name: root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("TC-IDE 项目")
+                .to_string(),
+            ..Self::default()
+        }
     }
 }
 
