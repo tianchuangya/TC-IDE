@@ -8,10 +8,10 @@
 ## 0. 三十秒版本
 
 - 仓库：`/home/tianchuangya/桌面/TC-IDE`，分支 `main`，与 `origin/main` 同步，工作区干净。
-- 测试：**313 + 3 + 4** 全绿；三目标 clippy 零警告；CI **passing**。
+- 测试：**315 + 3 + 4** 全绿；三目标 clippy 零警告；CI **passing**。
 - 队列：**44 已完成 / 2 部分完成 / 0 未开始**。
 - 两个部分完成项**本机做不到**（需要 Windows 实机 / 一台 Mac），不要试图在 Linux 上「补完」它们。
-- **刚完成的一件事**：Linux 设置控件已接回共享视觉状态模型（见 §4）；下一项从 §7.3 的新功能候选继续。
+- **刚完成的一件事**：Linux 代码关系标签、注释过滤和工作区布局恢复已完成（见 §4.5）；下一项从 §7.3 的新功能候选继续。
 - **方向已变**：用户明确说不再为 Windows 平台对齐投入时间，**专注新功能**。
 
 ---
@@ -107,7 +107,7 @@ CI 里逐个渲染并检查的场景（权威列表在 `.github/workflows/build.
 ```
 (default)  packaging  packaging-emit  edit  debug  view  file-menu
 ai-panel  diagnostics  brackets  folding  find  project-find
-graph-callees  background-crop  settings-hover  settings-controls
+graph-callees  relations  background-crop  settings-hover  settings-controls
 ```
 
 另有 `background` 场景可在源码中使用，但未进入 CI 帧门槛。
@@ -176,6 +176,14 @@ grep -c "palette.control(" src/macos_app.rs        # 1
 - 按下边框比悬停更靠近 accent，焦点环改用共享 `focus_ring()`（bright），因此键盘焦点不再与鼠标悬停同色。
 - 与交接前留在 `/tmp` 的帧比较：`settings-hover` 改变 12,100 像素，`settings-controls` 改变 11,633 像素；按下填充从 `#000000` 变为 `#1d1d1e`，按下边框为 `#1a69ba`，悬停填充为 `#3d3d3f`。
 - 共享测试断言按下/悬停边框不同、焦点/悬停不同、禁用透明度合成后成为不透明且仍区别于常态。
+
+### 4.5 代码关系与工作区恢复
+
+- 代码中的“定义 / 调用 / 引用”改为不透明的小型指向气泡，不再用透明文字直接压住后续代码。
+- Rust 字段等 `project: Project` 形态会标成“定义”，函数调用和普通引用分开显示。
+- 关系扫描经过 `syntax_core::mask_line()`，字符串和注释里的同名词不再产生箭头。
+- 新增 `relations` 渲染场景，并纳入 Linux CI 帧门槛。
+- 退出窗口时保存活动文档、光标、项目树展开状态、调用层级显示/宽度、终端显示/高度；尺寸以窗口千分比保存，换分辨率后仍可用。
 
 ---
 

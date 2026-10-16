@@ -2575,6 +2575,55 @@ impl App {
         }
     }
 
+    /// A compact, opaque relation label to the right of an occurrence.
+    ///
+    /// The old plain text label was painted directly over the source that came
+    /// after the symbol. This uses the same visual grammar as a comment bubble:
+    /// an opaque card and a small tail that unambiguously points at the token.
+    unsafe fn relation_bubble(&self, anchor_x: i32, y: i32, label: &str, max_right: i32) {
+        let s = |v| self.s(v);
+        let width = (self.pango_text_size(label, false).0 + s(26)).clamp(s(88), s(160));
+        let height = s(27);
+        let left = anchor_x + s(13);
+        if left + width > max_right {
+            return;
+        }
+        let top = y - s(19);
+        self.line(
+            self.colors.accent,
+            1,
+            (anchor_x, y - s(5)),
+            (left - s(7), y - s(5)),
+        );
+        self.rect(self.colors.bright, left, top, width, height);
+        let tail_center = top + height / 2;
+        let mut tail = [
+            XPoint {
+                x: (left - s(7)) as i16,
+                y: tail_center as i16,
+            },
+            XPoint {
+                x: left as i16,
+                y: (tail_center - s(7)) as i16,
+            },
+            XPoint {
+                x: left as i16,
+                y: (tail_center + s(7)) as i16,
+            },
+        ];
+        self.set_color(self.colors.bright);
+        XFillPolygon(
+            self.display,
+            self.canvas,
+            self.gc,
+            tail.as_mut_ptr(),
+            3,
+            0,
+            0,
+        );
+        self.text(self.colors.bg, left + s(12), top + s(19), label);
+    }
+
     unsafe fn text(&self, color: c_ulong, x: i32, y: i32, value: &str) {
         self.pango_text(color, x, y, value, false);
     }
@@ -3230,6 +3279,24 @@ impl App {
                 .unwrap_or_default();
             self.session.open(Some(path), name);
         }
+        if !self.session.documents().is_empty() {
+            self.session
+                .activate(self.selected_file.min(self.session.documents().len() - 1));
+        }
+        self.session.set_caret(self.caret_line, self.caret_column);
+        let graph_fraction_milli = (self.graph_fraction.clamp(0.1, 0.8) * 1000.0).round() as u16;
+        let terminal_fraction_milli =
+            ((self.terminal_height.max(1) as f32 / self.height.max(1) as f32).clamp(0.1, 0.8)
+                * 1000.0)
+                .round() as u16;
+        self.session.set_layout(session_core::WorkspaceLayout {
+            project_tree_expanded: self.project_tree_expanded,
+            graph_visible: self.graph_visible,
+            graph_current: self.graph_current,
+            graph_fraction_milli,
+            terminal_open: self.terminal_open,
+            terminal_fraction_milli,
+        });
         self.session.prune_recent_projects(|path| path.is_dir());
         save_session(&self.session);
     }
@@ -3367,6 +3434,22 @@ impl App {
     fn restore_session(&mut self) {
         let session = load_session();
         self.session = session;
+        let layout = self.session.layout();
+        self.project_tree_expanded = layout.project_tree_expanded;
+        self.project_tree_amount = if layout.project_tree_expanded {
+            1.0
+        } else {
+            0.0
+        };
+        self.graph_visible = layout.graph_visible;
+        self.graph_current = layout.graph_current;
+        self.graph_fraction = (layout.graph_fraction_milli as f32 / 1000.0).clamp(0.1, 0.8);
+        self.graph_motion = UiMotion::new(if layout.graph_visible { 1.0 } else { 0.0 });
+        self.terminal_open = layout.terminal_open;
+        self.terminal_height =
+            ((self.height as f32 * layout.terminal_fraction_milli as f32 / 1000.0).round() as i32)
+                .clamp(self.s(150), self.height - self.s(150));
+        self.terminal_motion = UiMotion::new(if layout.terminal_open { 1.0 } else { 0.0 });
         if let Some(project) = self.session.project().cloned() {
             if project.is_dir() {
                 self.project_path = Some(project.clone());
@@ -3396,9 +3479,11 @@ impl App {
         }
         if !files.is_empty() {
             self.files = files;
-            self.selected_file = 0;
-            self.caret_line = 0;
-            self.caret_column = 0;
+            self.selected_file = self.session.active().min(self.files.len() - 1);
+            let (line, column) = self.session.caret();
+            self.caret_line = line.min(self.files[self.selected_file].lines.len() - 1);
+            self.caret_column =
+                column.min(self.files[self.selected_file].lines[self.caret_line].len());
             self.status_message = format!(
                 "Restored {} document(s) from the previous session",
                 self.files.len()
@@ -4882,7 +4967,15 @@ impl App {
             for (target_line, value) in file.lines.iter().enumerate() {
                 for (target_start, _) in value.match_indices(symbol) {
                     let target_end = target_start + symbol.len();
-                    if !identifier_match_is_exact(value, target_start, target_end) {
+                    if !identifier_match_is_exact(value, target_start, target_end)
+                        || !identifier_occurrence_is_code(
+                            value,
+                            &file.name,
+                            symbol,
+                            target_start,
+                            target_end,
+                        )
+                    {
                         continue;
                     }
                     if file_index == self.selected_file
@@ -4906,12 +4999,12 @@ impl App {
                         (end.0 - s(7), end.1),
                     );
                     self.outline(self.colors.accent, target_x, target_y, target_w, target_h);
-                    let role = symbol_role(value, symbol);
-                    self.text(
-                        self.colors.muted,
-                        target_x + target_w + s(8),
+                    let role = symbol_role(value, &file.name, symbol, target_start, target_end);
+                    self.relation_bubble(
+                        target_x + target_w,
                         target_y + s(19),
                         self.tr(role.0, role.1),
+                        self.graph_left() - s(12),
                     );
                     let mut arrow = [
                         XPoint {
@@ -6334,6 +6427,33 @@ impl App {
                 self.background_zoom = 1.6;
                 self.background_offset_x = 0.35;
                 self.background_offset_y = -0.25;
+                true
+            }
+            "relations" => {
+                self.files = vec![FileBuffer::new(
+                    "graph.rs".into(),
+                    PathBuf::from("/tmp/tc-ide-preview/graph.rs"),
+                    vec![
+                        "/// AI maps project relations in real time".into(),
+                        "pub struct GraphController {".into(),
+                        "    project: Project,".into(),
+                        "}".into(),
+                        "".into(),
+                        "impl GraphController {".into(),
+                        "    pub fn build_graph(&mut self) {".into(),
+                        "        let files = analyze_workspace(&self.project);".into(),
+                        "        render_graph(self.project.root(), files);".into(),
+                        "    }".into(),
+                        "}".into(),
+                    ],
+                )];
+                self.selected_file = 0;
+                let line = 7;
+                let start = self.files[0].lines[line].find("project").unwrap_or(0);
+                self.hovered_code_span = Some((line, start, start + "project".len()));
+                self.hovered_symbol =
+                    editor_core::symbol_at(&self.files[0].lines, &self.files[0].name, line, start);
+                self.hovered_from_code = true;
                 true
             }
             "graph-callees" => {
@@ -10982,17 +11102,64 @@ fn identifier_match_is_exact(value: &str, start: usize, end: usize) -> bool {
     (start == 0 || !valid(bytes[start - 1])) && (end == bytes.len() || !valid(bytes[end]))
 }
 
-fn symbol_role(line: &str, symbol: &str) -> (&'static str, &'static str) {
-    let trimmed = line.trim_start();
-    if trimmed.contains(&format!("fn {symbol}"))
+/// Whether an identifier occurrence belongs to executable/source syntax.
+/// `mask_line` keeps character columns stable while blanking comments and
+/// strings, so words used in prose never become relation arrows.
+fn identifier_occurrence_is_code(
+    line: &str,
+    file: &str,
+    symbol: &str,
+    start: usize,
+    end: usize,
+) -> bool {
+    if start > end
+        || end > line.len()
+        || !line.is_char_boundary(start)
+        || !line.is_char_boundary(end)
+    {
+        return false;
+    }
+    let start_char = line[..start].chars().count();
+    let char_len = line[start..end].chars().count();
+    syntax_core::mask_line(line, file)
+        .chars()
+        .skip(start_char)
+        .take(char_len)
+        .collect::<String>()
+        == symbol
+}
+
+fn symbol_role(
+    line: &str,
+    file: &str,
+    symbol: &str,
+    start: usize,
+    end: usize,
+) -> (&'static str, &'static str) {
+    let masked = syntax_core::mask_line(line, file);
+    let trimmed = masked.trim_start();
+    let after = line.get(end..).unwrap_or_default().trim_start();
+    let declaration = editor_core::declaration_name(line, file).as_deref() == Some(symbol)
+        || after.starts_with(':')
+        || ["let", "const", "var", "static", "auto", "final"]
+            .iter()
+            .any(|keyword| trimmed.contains(&format!("{keyword} {symbol}")))
+        || trimmed.contains(&format!("fn {symbol}"))
         || trimmed.contains(&format!("def {symbol}"))
         || trimmed.contains(&format!("function {symbol}"))
         || trimmed.contains(&format!("class {symbol}"))
-        || trimmed.contains(&format!("struct {symbol}"))
+        || trimmed.contains(&format!("struct {symbol}"));
+    if declaration {
+        ("definition", "定义")
+    } else if line
+        .get(end..)
+        .map(str::trim_start)
+        .is_some_and(|tail| tail.starts_with('('))
+        && identifier_occurrence_is_code(line, file, symbol, start, end)
     {
-        ("declaration", "声明")
+        ("call", "调用")
     } else {
-        ("call / reference", "调用 / 引用")
+        ("reference", "引用")
     }
 }
 
@@ -11849,6 +12016,9 @@ pub fn run() {
                 thread::sleep(frame - used);
             }
         }
+        // Closing the window is the authoritative point at which panel sizes,
+        // visibility, the active document and the caret are persisted.
+        app.remember_session();
         if !app.background_surface.is_null() {
             cairo_surface_destroy(app.background_surface);
         }
@@ -12125,15 +12295,82 @@ mod tests {
     }
 
     #[test]
-    fn symbol_roles_distinguish_declarations_from_calls() {
+    fn symbol_roles_distinguish_definitions_calls_and_references() {
+        let function = "pub fn build_graph() {";
+        let function_start = function.find("build_graph").unwrap();
         assert_eq!(
-            symbol_role("pub fn build_graph() {", "build_graph").0,
-            "declaration"
+            symbol_role(
+                function,
+                "graph.rs",
+                "build_graph",
+                function_start,
+                function_start + "build_graph".len()
+            )
+            .0,
+            "definition"
         );
+        let call = "build_graph();";
         assert_eq!(
-            symbol_role("build_graph();", "build_graph").0,
-            "call / reference"
+            symbol_role(call, "graph.rs", "build_graph", 0, "build_graph".len()).0,
+            "call"
         );
+        let field = "    project: Project,";
+        let field_start = field.find("project").unwrap();
+        assert_eq!(
+            symbol_role(
+                field,
+                "graph.rs",
+                "project",
+                field_start,
+                field_start + "project".len()
+            )
+            .0,
+            "definition"
+        );
+        let reference = "render(project);";
+        let reference_start = reference.find("project").unwrap();
+        assert_eq!(
+            symbol_role(
+                reference,
+                "graph.rs",
+                "project",
+                reference_start,
+                reference_start + "project".len()
+            )
+            .0,
+            "reference"
+        );
+    }
+
+    #[test]
+    fn relation_occurrences_ignore_comments_and_strings() {
+        let comment = "// project is explained here";
+        let comment_start = comment.find("project").unwrap();
+        assert!(!identifier_occurrence_is_code(
+            comment,
+            "graph.rs",
+            "project",
+            comment_start,
+            comment_start + "project".len()
+        ));
+        let string = "let text = \"project\";";
+        let string_start = string.find("project").unwrap();
+        assert!(!identifier_occurrence_is_code(
+            string,
+            "graph.rs",
+            "project",
+            string_start,
+            string_start + "project".len()
+        ));
+        let code = "render(project);";
+        let code_start = code.find("project").unwrap();
+        assert!(identifier_occurrence_is_code(
+            code,
+            "graph.rs",
+            "project",
+            code_start,
+            code_start + "project".len()
+        ));
     }
 
     #[test]

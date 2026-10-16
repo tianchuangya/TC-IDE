@@ -15,6 +15,33 @@ pub const MAX_RECENT_PROJECTS: usize = 8;
 /// Documents restored when a session is reopened.
 pub const MAX_RESTORED_DOCUMENTS: usize = 24;
 
+/// Geometry and visibility of the panels around the editor.
+///
+/// Fractions are stored in thousandths rather than pixels, so the same layout
+/// remains useful when the next launch uses a different monitor or DPI scale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkspaceLayout {
+    pub project_tree_expanded: bool,
+    pub graph_visible: bool,
+    pub graph_current: bool,
+    pub graph_fraction_milli: u16,
+    pub terminal_open: bool,
+    pub terminal_fraction_milli: u16,
+}
+
+impl Default for WorkspaceLayout {
+    fn default() -> Self {
+        Self {
+            project_tree_expanded: true,
+            graph_visible: true,
+            graph_current: true,
+            graph_fraction_milli: 390,
+            terminal_open: false,
+            terminal_fraction_milli: 230,
+        }
+    }
+}
+
 /// One open document as the session sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Document {
@@ -67,8 +94,10 @@ impl Document {
 pub struct Session {
     documents: Vec<Document>,
     active: usize,
+    caret: (usize, usize),
     project: Option<PathBuf>,
     recent_projects: Vec<PathBuf>,
+    layout: WorkspaceLayout,
 }
 
 impl Session {
@@ -82,6 +111,22 @@ impl Session {
 
     pub fn active_document(&self) -> Option<&Document> {
         self.documents.get(self.active)
+    }
+
+    pub fn caret(&self) -> (usize, usize) {
+        self.caret
+    }
+
+    pub fn set_caret(&mut self, line: usize, column: usize) {
+        self.caret = (line, column);
+    }
+
+    pub fn layout(&self) -> WorkspaceLayout {
+        self.layout
+    }
+
+    pub fn set_layout(&mut self, layout: WorkspaceLayout) {
+        self.layout = layout;
     }
 
     pub fn project(&self) -> Option<&PathBuf> {
@@ -207,6 +252,18 @@ impl Session {
     /// Session file contents. Never contains secrets.
     pub fn serialize(&self) -> String {
         let mut text = String::new();
+        text.push_str(&format!("active={}\n", self.active));
+        text.push_str(&format!("caret={}|{}\n", self.caret.0, self.caret.1));
+        let layout = self.layout;
+        text.push_str(&format!(
+            "layout={}|{}|{}|{}|{}|{}\n",
+            u8::from(layout.project_tree_expanded),
+            u8::from(layout.graph_visible),
+            u8::from(layout.graph_current),
+            layout.graph_fraction_milli,
+            u8::from(layout.terminal_open),
+            layout.terminal_fraction_milli
+        ));
         if let Some(project) = &self.project {
             text.push_str(&format!("project={}\n", project.to_string_lossy()));
         }
@@ -231,11 +288,40 @@ impl Session {
 
     pub fn parse(content: &str) -> Session {
         let mut session = Session::default();
+        let mut requested_active = None;
         for line in content.lines() {
             let Some((key, value)) = line.split_once('=') else {
                 continue;
             };
             match key.trim() {
+                "active" => requested_active = value.trim().parse::<usize>().ok(),
+                "caret" => {
+                    if let Some((line, column)) = value.split_once('|') {
+                        if let (Ok(line), Ok(column)) =
+                            (line.trim().parse::<usize>(), column.trim().parse::<usize>())
+                        {
+                            session.caret = (line, column);
+                        }
+                    }
+                }
+                "layout" => {
+                    let parts = value.split('|').collect::<Vec<_>>();
+                    if parts.len() == 6 {
+                        let boolean = |value: &str| value.trim() == "1";
+                        if let (Ok(graph), Ok(terminal)) =
+                            (parts[3].parse::<u16>(), parts[5].parse::<u16>())
+                        {
+                            session.layout = WorkspaceLayout {
+                                project_tree_expanded: boolean(parts[0]),
+                                graph_visible: boolean(parts[1]),
+                                graph_current: boolean(parts[2]),
+                                graph_fraction_milli: graph.clamp(100, 800),
+                                terminal_open: boolean(parts[4]),
+                                terminal_fraction_milli: terminal.clamp(100, 800),
+                            };
+                        }
+                    }
+                }
                 "project" if !value.trim().is_empty() => {
                     session.project = Some(PathBuf::from(value.trim()))
                 }
@@ -267,7 +353,9 @@ impl Session {
         }
         session.recent_projects.truncate(MAX_RECENT_PROJECTS);
         session.documents.truncate(MAX_RESTORED_DOCUMENTS);
-        session.active = session.documents.len().saturating_sub(1);
+        session.active = requested_active
+            .unwrap_or_else(|| session.documents.len().saturating_sub(1))
+            .min(session.documents.len().saturating_sub(1));
         if session.documents.is_empty() {
             session.active = 0;
         }
@@ -378,6 +466,15 @@ mod tests {
         session.remember_project(Path::new("/q"));
         session.mark_dirty(1, true);
         session.activate(0);
+        session.set_caret(17, 9);
+        session.set_layout(WorkspaceLayout {
+            project_tree_expanded: false,
+            graph_visible: true,
+            graph_current: false,
+            graph_fraction_milli: 315,
+            terminal_open: true,
+            terminal_fraction_milli: 420,
+        });
 
         let text = session.serialize();
         assert!(text.contains("project=/p"));
@@ -389,6 +486,9 @@ mod tests {
             &[PathBuf::from("/q"), PathBuf::from("/p")]
         );
         assert_eq!(restored.documents().len(), 2);
+        assert_eq!(restored.active(), 0);
+        assert_eq!(restored.caret(), (17, 9));
+        assert_eq!(restored.layout(), session.layout());
         // Unsaved edits cannot be restored, so restored documents start clean.
         assert!(restored.documents().iter().all(|doc| !doc.dirty));
         assert_eq!(restored.restorable_documents().len(), 2);
