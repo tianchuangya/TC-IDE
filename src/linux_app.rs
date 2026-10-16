@@ -32,6 +32,7 @@ use crate::terminal_core;
 use crate::text_buffer;
 use crate::theme_core;
 use crate::workspace_core;
+use motion_core::MotionRole;
 
 type Window = c_ulong;
 type Drawable = c_ulong;
@@ -2581,12 +2582,17 @@ impl App {
         motion_core::step(value, velocity, target, dt, motion_core::DRAWER);
     }
 
-    fn step_ui_motion(motion: &mut UiMotion, visible: bool, dt: f32) {
-        Self::spring_step(
+    /// Step a motion towards shown or hidden, with the feel its role calls for.
+    ///
+    /// Every panel used one profile before this, so a menu and a drawer moved
+    /// at the same speed even though they are different kinds of thing.
+    fn step_ui_motion(motion: &mut UiMotion, visible: bool, dt: f32, role: MotionRole) {
+        motion_core::step(
             &mut motion.value,
             &mut motion.velocity,
             if visible { 1.0 } else { 0.0 },
             dt,
+            role.profile(),
         );
     }
 
@@ -7425,19 +7431,55 @@ impl App {
             root_target,
             dt,
         );
-        Self::step_ui_motion(&mut self.menu_dropdown_motion, self.open_menu.is_some(), dt);
+        Self::step_ui_motion(
+            &mut self.menu_dropdown_motion,
+            self.open_menu.is_some(),
+            dt,
+            MotionRole::Overlay,
+        );
         Self::step_ui_motion(
             &mut self.new_menu_motion,
             self.open_menu == Some(menu_core::Menu::File),
             dt,
+            MotionRole::Overlay,
         );
-        Self::step_ui_motion(&mut self.file_switch_motion, true, dt);
-        Self::step_ui_motion(&mut self.settings_motion, self.settings_open, dt);
-        Self::step_ui_motion(&mut self.package_motion, self.package_open, dt);
-        Self::step_ui_motion(&mut self.extensions_motion, self.extensions_open, dt);
-        Self::step_ui_motion(&mut self.create_motion, self.create_kind.is_some(), dt);
-        Self::step_ui_motion(&mut self.terminal_motion, self.terminal_open, dt);
-        Self::step_ui_motion(&mut self.graph_motion, self.graph_visible, dt);
+        Self::step_ui_motion(&mut self.file_switch_motion, true, dt, MotionRole::Follow);
+        Self::step_ui_motion(
+            &mut self.settings_motion,
+            self.settings_open,
+            dt,
+            MotionRole::Drawer,
+        );
+        Self::step_ui_motion(
+            &mut self.package_motion,
+            self.package_open,
+            dt,
+            MotionRole::Overlay,
+        );
+        Self::step_ui_motion(
+            &mut self.extensions_motion,
+            self.extensions_open,
+            dt,
+            MotionRole::Drawer,
+        );
+        Self::step_ui_motion(
+            &mut self.create_motion,
+            self.create_kind.is_some(),
+            dt,
+            MotionRole::Overlay,
+        );
+        Self::step_ui_motion(
+            &mut self.terminal_motion,
+            self.terminal_open,
+            dt,
+            MotionRole::Drawer,
+        );
+        Self::step_ui_motion(
+            &mut self.graph_motion,
+            self.graph_visible,
+            dt,
+            MotionRole::Drawer,
+        );
         for folder in self.folders.clone() {
             let target = if self.collapsed_folders.contains(&folder) {
                 0.0

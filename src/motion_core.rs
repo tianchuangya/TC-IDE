@@ -973,3 +973,179 @@ mod character_tests {
         assert_eq!(character_arrival(f32::NAN, 9.0), (0.0, 1.0));
     }
 }
+
+/// What a piece of interface motion is for.
+///
+/// Every panel in the Linux backend used one profile, so a dropdown, a
+/// settings sheet, a terminal drawer and the graph all moved at the same
+/// speed. They are not the same kind of thing: a menu that opens under the
+/// pointer should feel immediate, while a drawer that takes a third of the
+/// window can afford to be softer. Naming the role here means a backend asks
+/// for the motion it means rather than reaching for whichever profile it
+/// copied from the code next door.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MotionRole {
+    /// A small panel that appears near what it belongs to: a menu, a popover.
+    Overlay,
+    /// A large panel that slides in: a drawer, a sidebar, the graph.
+    Drawer,
+    /// Something that follows a pointer or a caret.
+    Follow,
+}
+
+impl MotionRole {
+    pub const ALL: [MotionRole; 3] = [MotionRole::Overlay, MotionRole::Drawer, MotionRole::Follow];
+
+    /// The spring this role moves with.
+    pub fn profile(self) -> SpringProfile {
+        match self {
+            MotionRole::Overlay => OVERLAY,
+            MotionRole::Drawer => DRAWER,
+            // Following has to keep up without lagging behind the pointer, so
+            // it is stiffer than either panel and barely overshoots.
+            MotionRole::Follow => FOLLOW,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MotionRole::Overlay => "overlay",
+            MotionRole::Drawer => "drawer",
+            MotionRole::Follow => "follow",
+        }
+    }
+}
+
+/// Motion profile for something that tracks a pointer or a caret.
+pub const FOLLOW: SpringProfile = SpringProfile {
+    stiffness: 620.0,
+    damping: 34.0,
+    overshoot: 0.0,
+    settle_distance: 0.0004,
+    settle_speed: 0.0004,
+};
+
+/// The distance a role travels as it arrives, in layout units.
+///
+/// A menu drops a short way from the bar it belongs to; a drawer travels
+/// further because it covers more; something that follows does not travel at
+/// all, because it is already where it belongs.
+pub fn travel(role: MotionRole) -> f32 {
+    match role {
+        MotionRole::Overlay => 12.0,
+        MotionRole::Drawer => 24.0,
+        MotionRole::Follow => 0.0,
+    }
+}
+
+/// How settled a motion is, expressed so a caller can draw with it.
+///
+/// Returns `(progress, offset, opacity)`: the clamped progress, how far the
+/// thing still has to travel, and how opaque it should be. The opacity comes up
+/// faster than the travel finishes, so nothing is drawn faintly for long.
+pub fn arrival(role: MotionRole, value: f32) -> (f32, f32, f32) {
+    let progress = if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let offset = travel(role) * (1.0 - progress);
+    let opacity = (0.25 + 0.75 * progress).clamp(0.0, 1.0);
+    (progress, offset, opacity)
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+
+    #[test]
+    fn each_role_has_its_own_spring() {
+        // The point of naming roles is that they do not all move the same way;
+        // if two profiles matched, one of the roles would be pointless.
+        let profiles = MotionRole::ALL.map(|role| role.profile());
+        for (index, left) in profiles.iter().enumerate() {
+            for (offset, right) in profiles.iter().enumerate().skip(index + 1) {
+                assert_ne!(
+                    (left.stiffness, left.damping),
+                    (right.stiffness, right.damping),
+                    "{:?} and {:?} move identically",
+                    MotionRole::ALL[index],
+                    MotionRole::ALL[offset]
+                );
+            }
+        }
+        assert_eq!(MotionRole::ALL.len(), 3);
+    }
+
+    #[test]
+    fn a_following_motion_keeps_up_and_does_not_overshoot() {
+        // Something that tracks a pointer and overshoots reads as lagging, so
+        // it is stiffer than the panels and has no overshoot at all.
+        let follow = MotionRole::Follow.profile();
+        for role in [MotionRole::Overlay, MotionRole::Drawer] {
+            let panel = role.profile();
+            assert!(
+                follow.stiffness > panel.stiffness,
+                "follow should be stiffer than {}",
+                role.label()
+            );
+            assert!(
+                follow.settle_distance <= panel.settle_distance,
+                "follow should settle at least as precisely as {}",
+                role.label()
+            );
+        }
+        assert_eq!(follow.overshoot, 0.0);
+        // And it does not travel, because it is already where it belongs.
+        assert_eq!(travel(MotionRole::Follow), 0.0);
+    }
+
+    #[test]
+    fn a_drawer_travels_further_than_a_menu() {
+        // A drawer covers more of the window, so it can afford to move more
+        // than a menu that drops a short way from the bar.
+        assert!(travel(MotionRole::Drawer) > travel(MotionRole::Overlay));
+        assert!(travel(MotionRole::Overlay) > 0.0);
+        // Every role has a label, for a diagnostic or a test name.
+        for role in MotionRole::ALL {
+            assert!(!role.label().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_role_settles_to_its_place_and_full_strength() {
+        for role in MotionRole::ALL {
+            let (progress, offset, opacity) = arrival(role, 1.0);
+            assert_eq!(progress, 1.0);
+            assert_eq!(offset, 0.0, "{} has arrived", role.label());
+            assert_eq!(opacity, 1.0, "{} is fully drawn", role.label());
+            // At the start it is offset by the whole travel and faint.
+            let (progress, offset, opacity) = arrival(role, 0.0);
+            assert_eq!(progress, 0.0);
+            assert_eq!(offset, travel(role));
+            assert!(opacity < 1.0);
+            // Halfway it is nearer its place than not, and mostly opaque.
+            let (_, offset, opacity) = arrival(role, 0.5);
+            assert!(offset <= travel(role) / 2.0);
+            assert!(opacity > 0.5);
+        }
+    }
+
+    #[test]
+    fn a_broken_value_does_not_produce_a_broken_frame() {
+        // A spring should never produce these, but drawing from a NaN would
+        // put a panel somewhere unrepresentable rather than leaving it home.
+        for role in MotionRole::ALL {
+            assert_eq!(arrival(role, f32::NAN).0, 1.0);
+            assert_eq!(arrival(role, f32::INFINITY).0, 1.0);
+            assert_eq!(arrival(role, -5.0).0, 0.0);
+            assert_eq!(arrival(role, 5.0).0, 1.0);
+            for value in [-1.0f32, 0.0, 0.3, 0.7, 1.0, 2.0] {
+                let (progress, offset, opacity) = arrival(role, value);
+                assert!((0.0..=1.0).contains(&progress));
+                assert!(offset >= 0.0 && offset <= travel(role));
+                assert!((0.0..=1.0).contains(&opacity));
+            }
+        }
+    }
+}
