@@ -811,6 +811,8 @@ struct App {
     folder_tree_motion: BTreeMap<String, (f32, f32)>,
     tree_motion_updated: Instant,
     new_menu_motion: UiMotion,
+    /// Short pulse used when a different editor tab becomes active.
+    file_switch_motion: UiMotion,
     edit_menu_motion: UiMotion,
     view_menu_motion: UiMotion,
     settings_motion: UiMotion,
@@ -3545,6 +3547,11 @@ impl App {
         }
     }
 
+    fn trigger_file_switch(&mut self) {
+        self.file_switch_motion = UiMotion::new(0.0);
+        self.file_switch_motion.velocity = 1.0;
+    }
+
     /// Open one file, in a new tab when one is already open.
     fn open_path(&mut self, path: PathBuf) {
         if !path.is_file() {
@@ -3565,6 +3572,7 @@ impl App {
                 }
                 self.files.push(FileBuffer::new(name, path, lines));
                 self.selected_file = self.files.len() - 1;
+                self.trigger_file_switch();
                 self.caret_line = 0;
                 self.caret_column = 0;
                 self.editor_scroll = 0;
@@ -3788,6 +3796,7 @@ impl App {
             return false;
         };
         self.selected_file = index;
+        self.trigger_file_switch();
         self.remember_session();
         self.graph_scroll = 0;
         self.caret_line = target
@@ -4779,18 +4788,26 @@ impl App {
         // editor surface stable while the active tab receives a small accent
         // lift instead of replacing the title in place.
         let mut tab_x = left + s(10);
+        let tab_shift =
+            ((1.0 - self.file_switch_motion.value.clamp(0.0, 1.0)) * s(9) as f32).round() as i32;
         for (index, file) in self.files.iter().enumerate().take(6) {
             let tab_width = self.pango_text_size(&file.name, false).0.max(s(58)) + s(28);
             if tab_x + tab_width > right - s(180) {
                 break;
             }
             if index == self.selected_file {
-                self.rect(self.colors.panel, tab_x, s(49), tab_width, s(32));
+                self.rect(
+                    self.colors.panel,
+                    tab_x + tab_shift,
+                    s(49),
+                    tab_width,
+                    s(32),
+                );
                 self.line(
                     self.colors.accent,
                     2,
-                    (tab_x, s(82)),
-                    (tab_x + tab_width, s(82)),
+                    (tab_x + tab_shift, s(82)),
+                    (tab_x + tab_width + tab_shift, s(82)),
                 );
             }
             self.text(
@@ -4799,7 +4816,13 @@ impl App {
                 } else {
                     self.colors.muted
                 },
-                tab_x + s(12),
+                tab_x
+                    + s(12)
+                    + if index == self.selected_file {
+                        tab_shift
+                    } else {
+                        0
+                    },
                 s(70),
                 &file.name,
             );
@@ -7260,6 +7283,7 @@ impl App {
             dt,
         );
         Self::step_ui_motion(&mut self.new_menu_motion, self.new_menu_open, dt);
+        Self::step_ui_motion(&mut self.file_switch_motion, true, dt);
         Self::step_ui_motion(&mut self.edit_menu_motion, self.edit_menu_open, dt);
         Self::step_ui_motion(&mut self.view_menu_motion, self.view_menu_open, dt);
         Self::step_ui_motion(&mut self.settings_motion, self.settings_open, dt);
@@ -7831,6 +7855,7 @@ impl App {
         let open = self.files.iter().position(|document| document.name == name);
         if let Some(index) = open {
             self.selected_file = index;
+            self.trigger_file_switch();
         } else {
             let path = PathBuf::from(&file);
             match fs::read_to_string(&path) {
@@ -10428,6 +10453,7 @@ impl App {
                 }
                 if (y - s(center)).abs() < s(15) {
                     self.selected_file = index;
+                    self.trigger_file_switch();
                     self.graph_scroll = 0;
                     self.caret_line = 0;
                     self.caret_column = 0;
@@ -12782,6 +12808,7 @@ pub fn run() {
             folder_tree_motion: BTreeMap::new(),
             tree_motion_updated: Instant::now(),
             new_menu_motion: UiMotion::new(0.0),
+            file_switch_motion: UiMotion::new(1.0),
             edit_menu_motion: UiMotion::new(0.0),
             view_menu_motion: UiMotion::new(0.0),
             settings_motion: UiMotion::new(0.0),
