@@ -202,6 +202,22 @@ pub struct ControlVisual {
     pub opacity: f32,
 }
 
+impl ControlVisual {
+    /// Flatten this visual onto an opaque panel for backends whose primitive
+    /// controls do not support alpha. This is equivalent to drawing the whole
+    /// control with `opacity` over `background`.
+    pub fn composited_on(self, background: u32) -> Self {
+        let opacity = self.opacity.clamp(0.0, 1.0);
+        Self {
+            fill: mix(background, self.fill, opacity),
+            border: mix(background, self.border, opacity),
+            text: mix(background, self.text, opacity),
+            lift: self.lift,
+            opacity: 1.0,
+        }
+    }
+}
+
 /// Blend two colours, `amount` in `0.0..=1.0`.
 pub fn mix(first: u32, second: u32, amount: f32) -> u32 {
     let amount = if amount.is_finite() {
@@ -254,7 +270,10 @@ impl Palette {
             },
             ControlState::Pressed => ControlVisual {
                 fill: mix(base, self.background, 0.35),
-                border: mix(self.border, self.background, 0.25),
+                // Keep the action legible while the body sinks. A border that
+                // darkens with the fill reads like a broken control, whereas a
+                // stronger accent than hover makes the press unambiguous.
+                border: mix(self.border, self.accent, 0.65),
                 text: if emphasised { self.accent } else { self.bright },
                 lift: -1.0,
                 opacity: 1.0,
@@ -267,6 +286,11 @@ impl Palette {
                 opacity: 0.55,
             },
         }
+    }
+
+    /// A keyboard focus ring must not be confused with a pointer hover border.
+    pub fn focus_ring(&self) -> u32 {
+        self.bright
     }
 }
 
@@ -475,6 +499,19 @@ mod tests {
                 assert_ne!(pressed.fill, hovered.fill, "{name}: pressed vs hovered");
                 assert!(pressed.lift < normal.lift && hovered.lift > normal.lift);
                 assert!(disabled.opacity < normal.opacity, "{name}: disabled fades");
+                assert_ne!(
+                    pressed.border, hovered.border,
+                    "{name}: pressing must be stronger than hovering"
+                );
+                assert_ne!(
+                    palette.focus_ring(),
+                    hovered.border,
+                    "{name}: keyboard focus must not look like pointer hover"
+                );
+                let flattened = disabled.composited_on(palette.panel);
+                assert_eq!(flattened.opacity, 1.0);
+                assert_ne!(flattened.text, disabled.text);
+                assert_ne!(flattened.border, normal.border);
                 assert_eq!(disabled.text, palette.muted);
                 // A disabled control is still readable, it just stops inviting.
                 assert!(

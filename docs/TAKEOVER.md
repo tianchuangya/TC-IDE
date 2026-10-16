@@ -11,7 +11,7 @@
 - 测试：**313 + 3 + 4** 全绿；三目标 clippy 零警告；CI **passing**。
 - 队列：**44 已完成 / 2 部分完成 / 0 未开始**。
 - 两个部分完成项**本机做不到**（需要 Windows 实机 / 一台 Mac），不要试图在 Linux 上「补完」它们。
-- **当前正在做的一件事**：Linux 控件观感。用户已批准三项修改，**代码还没写**（见 §4）。
+- **刚完成的一件事**：Linux 设置控件已接回共享视觉状态模型（见 §4）；下一项从 §7.3 的新功能候选继续。
 - **方向已变**：用户明确说不再为 Windows 平台对齐投入时间，**专注新功能**。
 
 ---
@@ -122,9 +122,9 @@ DISPLAY=:0 cargo run -- --render-frame /tmp/x.png --render-scene <名字>
 
 ---
 
-## 4. 当前正在做的事：Linux 控件观感（**代码未写**）
+## 4. 已完成：Linux 控件观感
 
-用户已批准三项修改，**我尚未动代码**。这是接手后的第一件事。
+用户批准的三项修改已经实现并通过本地帧验证。
 
 ### 4.1 已确认的问题（实测，非推测）
 
@@ -169,14 +169,13 @@ grep -c "palette.control(" src/macos_app.rs        # 1
 
 **所以这大概率不是"写新逻辑"，而是"让 Linux 改用它已有的共享实现"**——和 27–36 轮反复出现的同一类问题：*共享代码写好了，某个后端没接上*。
 
-### 4.4 建议做法
+### 4.4 实现与证据
 
-1. 让 `settings_control_colors()` 改为调用 `theme_core::Palette::control()`，删掉 Linux 的手写映射。
-2. `ControlVisual` 的 `fill/border/text` 是 `u32`（RGB），Linux 用的是 X11 `c_ulong` pixel。**注意 `src/linux_app.rs` 里已有 `palette_colour_of()`** 做反向映射——但方向是反的，需要确认怎么转换，别硬编码。
-3. `opacity` 要真的用上（禁用态）。Cairo 绘制有 alpha，找一下现有用法。
-4. **focus ring 与 hover 的区分**：`Palette::control()` 目前不返回 focus 信息。需要你决定——加一个 `focused: bool` 参数，还是在外层画不同的环（例如焦点环用 accent、悬停只改边框）。
-5. **补测试**：`Palette::control()` 已被 Windows/macOS 使用，改动会影响它们。先在 `theme_core` 补纯函数测试（状态→visual 的映射、`lift` 方向、`opacity` 值），再改 Linux。
-6. **给出现帧证据**：改完重新渲染 `settings-hover` 与 `settings-controls`，给差分数字。这两个场景已在 CI 帧门槛里。
+- Linux 删除私有的状态配色分支，启动时把 `Palette::control()` 的八种状态/强调组合转换为 X11 pixel 并缓存；绘制直接采用共享 `fill/border/text/lift`。
+- `ControlVisual::composited_on()` 把禁用态的 `opacity: 0.55` 真实合成到面板底色，适配 X11 不带 alpha 的矩形原语。
+- 按下边框比悬停更靠近 accent，焦点环改用共享 `focus_ring()`（bright），因此键盘焦点不再与鼠标悬停同色。
+- 与交接前留在 `/tmp` 的帧比较：`settings-hover` 改变 12,100 像素，`settings-controls` 改变 11,633 像素；按下填充从 `#000000` 变为 `#1d1d1e`，按下边框为 `#1a69ba`，悬停填充为 `#3d3d3f`。
+- 共享测试断言按下/悬停边框不同、焦点/悬停不同、禁用透明度合成后成为不透明且仍区别于常态。
 
 ---
 

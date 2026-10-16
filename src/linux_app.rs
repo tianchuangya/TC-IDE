@@ -613,6 +613,26 @@ struct Palette {
     comment: c_ulong,
     project: c_ulong,
     shadow: c_ulong,
+    control_visuals: [LinuxControlVisual; 8],
+    focus_ring: c_ulong,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LinuxControlVisual {
+    fill: c_ulong,
+    border: c_ulong,
+    text: c_ulong,
+    lift: f32,
+}
+
+fn control_visual_index(state: theme_core::ControlState, emphasised: bool) -> usize {
+    let state = match state {
+        theme_core::ControlState::Normal => 0,
+        theme_core::ControlState::Hovered => 1,
+        theme_core::ControlState::Pressed => 2,
+        theme_core::ControlState::Disabled => 3,
+    };
+    state * 2 + usize::from(emphasised)
 }
 
 /// A question the editor asks the language server.
@@ -1523,31 +1543,14 @@ impl App {
         theme_core::ControlState::Normal
     }
 
-    /// Colours a control draws with, using the palette the window already uses.
-    fn settings_control_colors(
+    /// Shared control visual converted once to the X11 palette at startup.
+    fn settings_control_visual(
         &self,
         control: SettingsControl,
         emphasised: bool,
-    ) -> (c_ulong, c_ulong, c_ulong) {
-        use theme_core::ControlState::*;
-        match self.settings_control_state(control) {
-            Normal => (
-                if emphasised {
-                    self.colors.accent
-                } else {
-                    self.colors.line
-                },
-                self.colors.panel_2,
-                if emphasised {
-                    self.colors.accent
-                } else {
-                    self.colors.text
-                },
-            ),
-            Hovered => (self.colors.accent, self.colors.line, self.colors.bright),
-            Pressed => (self.colors.accent, self.colors.bg, self.colors.bright),
-            Disabled => (self.colors.line, self.colors.panel_2, self.colors.muted),
-        }
+    ) -> LinuxControlVisual {
+        self.colors.control_visuals
+            [control_visual_index(self.settings_control_state(control), emphasised)]
     }
 
     /// Draw a settings control, with its fill, border, label and focus ring.
@@ -1559,17 +1562,13 @@ impl App {
     ) {
         let s = |v| self.s(v);
         let (x, y, width, height) = self.settings_control_rect(control);
-        let (border, fill, text) = self.settings_control_colors(control, emphasised);
-        let (x, y) = if self.settings_control_state(control) == theme_core::ControlState::Pressed {
-            (x, y + s(1))
-        } else {
-            (x, y)
-        };
-        self.rect(fill, x, y, width, height);
-        self.outline(border, x, y, width, height);
+        let visual = self.settings_control_visual(control, emphasised);
+        let y = y - (visual.lift * s(1) as f32).round() as i32;
+        self.rect(visual.fill, x, y, width, height);
+        self.outline(visual.border, x, y, width, height);
         if self.settings_focus == Some(control) {
             self.outline(
-                self.colors.accent,
+                self.colors.focus_ring,
                 x - s(2),
                 y - s(2),
                 width + s(4),
@@ -1577,7 +1576,7 @@ impl App {
             );
         }
         let text_x = x + s(9);
-        self.text(text, text_x, y + s(20), label);
+        self.text(visual.text, text_x, y + s(20), label);
     }
 
     /// Activate a settings control, from the pointer or the keyboard.
@@ -11490,33 +11489,60 @@ pub fn run() {
         let cairo = cairo_create(cairo_surface);
         // The palette is shared with the Windows backend, so the themes stay one
         // design and its contrast is asserted in theme_core's tests.
-        let share = |palette: theme_core::Palette| Palette {
-            bg: color(display, map, &theme_core::Palette::hex(palette.background)),
-            panel: color(display, map, &theme_core::Palette::hex(palette.panel)),
-            panel_2: color(display, map, &theme_core::Palette::hex(palette.raised)),
-            line: color(display, map, &theme_core::Palette::hex(palette.border)),
-            muted: color(display, map, &theme_core::Palette::hex(palette.muted)),
-            text: color(display, map, &theme_core::Palette::hex(palette.text)),
-            bright: color(display, map, &theme_core::Palette::hex(palette.bright)),
-            accent: color(display, map, &theme_core::Palette::hex(palette.accent)),
-            keyword: color(display, map, &theme_core::Palette::hex(palette.keyword)),
-            syntax_type: color(display, map, &theme_core::Palette::hex(palette.syntax_type)),
-            function: color(display, map, &theme_core::Palette::hex(palette.function)),
-            constant: color(display, map, &theme_core::Palette::hex(palette.constant)),
-            variable: color(display, map, &theme_core::Palette::hex(palette.variable)),
-            parameter: color(display, map, &theme_core::Palette::hex(palette.parameter)),
-            property: color(display, map, &theme_core::Palette::hex(palette.property)),
-            macro_name: color(display, map, &theme_core::Palette::hex(palette.macro_name)),
-            module: color(display, map, &theme_core::Palette::hex(palette.module)),
-            preprocessor: color(
-                display,
-                map,
-                &theme_core::Palette::hex(palette.preprocessor),
-            ),
-            literal: color(display, map, &theme_core::Palette::hex(palette.literal)),
-            comment: color(display, map, &theme_core::Palette::hex(palette.comment)),
-            project: color(display, map, &theme_core::Palette::hex(palette.selection)),
-            shadow: color(display, map, &theme_core::Palette::hex(palette.shadow)),
+        let share = |palette: theme_core::Palette| {
+            let control = |state, emphasised| {
+                let visual = palette
+                    .control(state, emphasised)
+                    .composited_on(palette.panel);
+                LinuxControlVisual {
+                    fill: color(display, map, &theme_core::Palette::hex(visual.fill)),
+                    border: color(display, map, &theme_core::Palette::hex(visual.border)),
+                    text: color(display, map, &theme_core::Palette::hex(visual.text)),
+                    lift: visual.lift,
+                }
+            };
+            let states = [
+                theme_core::ControlState::Normal,
+                theme_core::ControlState::Hovered,
+                theme_core::ControlState::Pressed,
+                theme_core::ControlState::Disabled,
+            ];
+            let control_visuals =
+                std::array::from_fn(|index| control(states[index / 2], index % 2 == 1));
+            Palette {
+                bg: color(display, map, &theme_core::Palette::hex(palette.background)),
+                panel: color(display, map, &theme_core::Palette::hex(palette.panel)),
+                panel_2: color(display, map, &theme_core::Palette::hex(palette.raised)),
+                line: color(display, map, &theme_core::Palette::hex(palette.border)),
+                muted: color(display, map, &theme_core::Palette::hex(palette.muted)),
+                text: color(display, map, &theme_core::Palette::hex(palette.text)),
+                bright: color(display, map, &theme_core::Palette::hex(palette.bright)),
+                accent: color(display, map, &theme_core::Palette::hex(palette.accent)),
+                keyword: color(display, map, &theme_core::Palette::hex(palette.keyword)),
+                syntax_type: color(display, map, &theme_core::Palette::hex(palette.syntax_type)),
+                function: color(display, map, &theme_core::Palette::hex(palette.function)),
+                constant: color(display, map, &theme_core::Palette::hex(palette.constant)),
+                variable: color(display, map, &theme_core::Palette::hex(palette.variable)),
+                parameter: color(display, map, &theme_core::Palette::hex(palette.parameter)),
+                property: color(display, map, &theme_core::Palette::hex(palette.property)),
+                macro_name: color(display, map, &theme_core::Palette::hex(palette.macro_name)),
+                module: color(display, map, &theme_core::Palette::hex(palette.module)),
+                preprocessor: color(
+                    display,
+                    map,
+                    &theme_core::Palette::hex(palette.preprocessor),
+                ),
+                literal: color(display, map, &theme_core::Palette::hex(palette.literal)),
+                comment: color(display, map, &theme_core::Palette::hex(palette.comment)),
+                project: color(display, map, &theme_core::Palette::hex(palette.selection)),
+                shadow: color(display, map, &theme_core::Palette::hex(palette.shadow)),
+                control_visuals,
+                focus_ring: color(
+                    display,
+                    map,
+                    &theme_core::Palette::hex(palette.focus_ring()),
+                ),
+            }
         };
         let dark_colors = share(theme_core::Palette::dark());
         let light_colors = share(theme_core::Palette::light());
@@ -12133,6 +12159,13 @@ mod tests {
                 comment: 20,
                 project: 21,
                 shadow: 22,
+                control_visuals: [LinuxControlVisual {
+                    fill: 23,
+                    border: 24,
+                    text: 25,
+                    lift: 0.0,
+                }; 8],
+                focus_ring: 26,
             };
             let cases = [
                 (colors.keyword, palette.keyword, "keyword"),
