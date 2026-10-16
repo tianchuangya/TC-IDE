@@ -28,6 +28,89 @@ impl WindowsAppState {
     pub(super) fn refresh_index_tables(&mut self) {
         self.project_symbols = self.project_index.symbols();
         self.project_declarations = self.project_index.declarations();
+        self.sync_tcide_project_document();
+    }
+
+    /// Persist the editor's current index into the human-readable project file.
+    /// The graph is derived from this same data, so an AI tool opening the
+    /// `.tcIDE` document sees the same files, declarations and references.
+    pub(super) fn sync_tcide_project_document(&mut self) {
+        let mut document = self.tcide_project.clone();
+        document.name = self
+            .project_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("TC-IDE 项目")
+            .to_string();
+        document.root = ".".into();
+        document.files = self
+            .project_entry_paths
+            .iter()
+            .zip(self.project_entry_is_dir.iter())
+            .filter(|(_, is_dir)| !**is_dir)
+            .filter_map(|(path, _)| {
+                let relative = path
+                    .strip_prefix(&self.project_root)
+                    .ok()?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let language = editor_core::language_for_file(&relative);
+                (language != "Plain Text").then_some(tcide_project::ProjectFile {
+                    path: relative,
+                    language,
+                })
+            })
+            .collect();
+        document.symbols = self
+            .project_symbols
+            .iter()
+            .map(|entry| tcide_project::ProjectSymbol {
+                id: format!(
+                    "symbol:{}:{}:{}",
+                    entry.file,
+                    entry.symbol.line + 1,
+                    entry.symbol.name
+                ),
+                file: entry.file.clone(),
+                name: entry.symbol.name.clone(),
+                line: entry.symbol.line + 1,
+                role: match entry.symbol.role {
+                    editor_core::SymbolRole::Declaration => "declaration",
+                    editor_core::SymbolRole::Reference => "reference",
+                }
+                .into(),
+            })
+            .collect();
+        let declarations = document
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.role == "declaration")
+            .map(|symbol| (symbol.name.clone(), symbol.id.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        document.relations = document
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.role == "reference")
+            .filter_map(|symbol| {
+                declarations
+                    .get(&symbol.name)
+                    .map(|to| tcide_project::ProjectRelation {
+                        from: symbol.id.clone(),
+                        to: to.clone(),
+                        kind: "reference".into(),
+                        confidence: "indexed".into(),
+                    })
+            })
+            .collect();
+        document.view.folded = self.graph_folded.clone();
+        document.view.focused_file = self
+            .file_path
+            .as_ref()
+            .and_then(|path| path.strip_prefix(&self.project_root).ok())
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        self.tcide_project = document;
+        let _ = tcide_project::save(&self.project_root, &self.tcide_project);
     }
 
     pub(super) fn scan_project(
@@ -178,6 +261,7 @@ impl WindowsAppState {
         self.session.remember_project(&root);
         save_session(&self.session);
         self.project_root = root;
+        self.tcide_project = tcide_project::load_or_create(&self.project_root);
         self.package_targets = Self::load_package_targets(&self.project_root);
         self.project_scroll = 0;
         // A different project has different rows: nothing should slide over

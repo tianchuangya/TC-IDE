@@ -16,6 +16,7 @@ mod package_motion;
 mod search_core;
 mod session_core;
 mod syntax_core;
+mod tcide_project;
 mod terminal_core;
 mod text_buffer;
 mod theme_core;

@@ -252,6 +252,8 @@ struct WindowsAppState {
     file_name: String,
     file_path: Option<PathBuf>,
     project_root: PathBuf,
+    /// Project-level `.tcIDE` document shared by the editor, graph view and AI.
+    tcide_project: tcide_project::ProjectDocument,
     project_entries: Vec<String>,
     project_entry_paths: Vec<PathBuf>,
     project_entry_is_dir: Vec<bool>,
@@ -568,6 +570,7 @@ impl WindowsAppState {
             file_name: "main.rs".into(),
             file_path: None,
             project_root,
+            tcide_project: tcide_project::ProjectDocument::for_root(&create_location),
             project_entries,
             project_entry_paths,
             project_entry_is_dir,
