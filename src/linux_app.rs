@@ -860,6 +860,8 @@ struct App {
     graph_current: bool,
     graph_visible: bool,
     graph_fraction: f32,
+    /// The proportions the columns are laid out with.
+    layout: motion_core::Layout,
     panel_drag: Option<PanelDrag>,
     breakpoints: dap_core::Breakpoints,
     /// Incremental index of the open files, so the graph is not rescanned
@@ -1060,7 +1062,7 @@ impl App {
         if self.graph_motion.value <= 0.001 {
             return self.width;
         }
-        let workspace = (self.width as f32 * 0.17) as i32;
+        let workspace = (self.layout.workspace_pixels(self.width as f32)) as i32;
         let base = (self.width as f32 * self.graph_fraction).round().clamp(
             self.s(260) as f32,
             (self.width - workspace - self.s(360)) as f32,
@@ -1899,7 +1901,7 @@ impl App {
 
     /// Size of the region the background is drawn into behind the editor.
     fn background_view_size(&self) -> (f64, f64) {
-        let left = (self.width as f32 * 0.17) as i32;
+        let left = (self.layout.workspace_pixels(self.width as f32)) as i32;
         let right = self.graph_left();
         (
             (right - left - 1).max(1) as f64,
@@ -2590,7 +2592,7 @@ impl App {
     /// button the reader sees is the one a click finds.
     fn tab_layout(&self) -> (Vec<(i32, i32)>, i32) {
         let s = |v: i32| self.s(v);
-        let left = (self.width as f32 * 0.17) as i32;
+        let left = (self.layout.workspace_pixels(self.width as f32)) as i32;
         let right = self.graph_left();
         let close_width = menu_core::tab_close_width(s(7));
         let mut tab_x = left + s(10);
@@ -2939,7 +2941,7 @@ impl App {
     }
 
     fn code_symbol_bounds(&self, line: usize, start: usize, end: usize) -> (i32, i32, i32, i32) {
-        let left = (self.width as f32 * 0.17) as i32;
+        let left = (self.layout.workspace_pixels(self.width as f32)) as i32;
         let row = self.editor_screen_row(line).unwrap_or(0);
         let y = self.s(119) + row as i32 * self.code_line_step();
         let value = &self.files[self.selected_file].lines[line];
@@ -3383,7 +3385,7 @@ impl App {
     /// Rectangle of the debug panel, on the left above the project tree.
     fn debug_panel_bounds(&self) -> (i32, i32, i32, i32) {
         let s = |v: i32| (v as f32 * self.scale()).round() as i32;
-        let width = (self.width as f32 * 0.17) as i32 - s(8);
+        let width = (self.layout.workspace_pixels(self.width as f32)) as i32 - s(8);
         let top = s(52);
         let height = s(240);
         (s(4), top, width, height)
@@ -4255,7 +4257,7 @@ impl App {
 
     unsafe fn draw_workspace(&self) {
         let s = |v| self.s(v);
-        let width = (self.width as f32 * 0.17) as i32;
+        let width = (self.layout.workspace_pixels(self.width as f32)) as i32;
         self.rect(self.colors.panel, 0, s(46), width, self.height - s(70));
         self.line(
             self.colors.line,
@@ -4895,7 +4897,7 @@ impl App {
 
     unsafe fn draw_editor(&self) {
         let s = |v| self.s(v);
-        let left = (self.width as f32 * 0.17) as i32;
+        let left = (self.layout.workspace_pixels(self.width as f32)) as i32;
         let right = self.graph_left();
         self.rect(
             self.colors.bg,
@@ -5589,7 +5591,7 @@ impl App {
             return;
         };
         let s = |v| self.s(v);
-        let editor_left = (self.width as f32 * 0.17) as i32;
+        let editor_left = (self.layout.workspace_pixels(self.width as f32)) as i32;
         let symbol = &self.files[self.selected_file].lines[line][start_byte..end_byte];
         if symbol.len() < 2 {
             return;
@@ -7420,7 +7422,7 @@ impl App {
         if elapsed < absorb_seconds {
             let t = (elapsed / absorb_seconds).clamp(0.0, 1.0);
             if t > 0.76 {
-                let left = (self.width as f32 * 0.17) as i32;
+                let left = (self.layout.workspace_pixels(self.width as f32)) as i32;
                 let right = self.graph_left();
                 self.rect(
                     self.colors.bg,
@@ -8845,7 +8847,7 @@ impl App {
             return;
         }
         let s = |v| self.s(v);
-        let x = (self.width as f32 * 0.17) as i32 + s(20);
+        let x = (self.layout.workspace_pixels(self.width as f32)) as i32 + s(20);
         let width = (self.width - x - s(40)).min(s(620));
         let top = s(78);
         let height = if self.find_replace_focused || !self.replace_text.is_empty() {
@@ -8967,7 +8969,7 @@ impl App {
             return;
         }
         let s = |v| self.s(v);
-        let x = (self.width as f32 * 0.17) as i32 + s(20);
+        let x = (self.layout.workspace_pixels(self.width as f32)) as i32 + s(20);
         let width = (self.width - x - s(40)).min(s(620));
         let top = s(78) + s(84);
         let rows = self
@@ -9499,7 +9501,7 @@ impl App {
         };
         let s = |v| self.s(v);
         // The panel sits under the caret's line, kept inside the editor.
-        let left = (self.width as f32 * 0.17) as i32 + s(60);
+        let left = (self.layout.workspace_pixels(self.width as f32)) as i32 + s(60);
         let y = s(119)
             + self.editor_screen_row(self.caret_line).unwrap_or(0) as i32 * self.code_line_step()
             + s(24);
@@ -9520,7 +9522,7 @@ impl App {
     unsafe fn draw_language_overlays(&self) {
         let s = |v| self.s(v);
         if !self.lsp_completions.is_empty() {
-            let left = (self.width as f32 * 0.17) as i32 + s(60);
+            let left = (self.layout.workspace_pixels(self.width as f32)) as i32 + s(60);
             let top = s(119)
                 + self.editor_screen_row(self.caret_line).unwrap_or(0) as i32
                     * self.code_line_step()
@@ -10330,7 +10332,7 @@ impl App {
             self.reload_code_font();
             return;
         }
-        let workspace_right = (self.width as f32 * 0.17) as i32;
+        let workspace_right = (self.layout.workspace_pixels(self.width as f32)) as i32;
         // X11 reports the wheel as buttons 4/5. Consume it in the editor before
         // graph handling, and let a click on the track jump to that position.
         if x >= workspace_right && x < graph_left && y >= s(84) && y < self.terminal_top() {
@@ -10399,7 +10401,7 @@ impl App {
         if self.find_open {
             // The replace button, in the same place it is drawn.
             let s2 = |v| self.s(v);
-            let x0 = (self.width as f32 * 0.17) as i32 + s2(20);
+            let x0 = (self.layout.workspace_pixels(self.width as f32)) as i32 + s2(20);
             let width = (self.width - x0 - s2(40)).min(s2(620));
             let field = x0 + s2(70);
             let field_width = width - s2(70) - s2(150);
@@ -12000,7 +12002,7 @@ impl App {
             return;
         }
         let s = |v| self.s(v);
-        let left = (self.width as f32 * 0.17) as i32;
+        let left = (self.layout.workspace_pixels(self.width as f32)) as i32;
         let graph = self.graph_left();
         if x < left || x >= graph || y < s(85) {
             return;
@@ -12070,7 +12072,7 @@ impl App {
     fn update_hover(&mut self) {
         let scale = self.scale();
         let s = move |v: i32| (v as f32 * scale).round() as i32;
-        let left = (self.width as f32 * 0.17) as i32;
+        let left = (self.layout.workspace_pixels(self.width as f32)) as i32;
         let graph = self.graph_left();
         if self.mouse_x >= left && self.mouse_x < graph && self.mouse_y > s(90) {
             let screen_row = ((self.mouse_y - s(119) + self.code_line_step() / 2)
@@ -13493,6 +13495,7 @@ pub fn run() {
             graph_current: true,
             graph_visible: true,
             graph_fraction: 0.39,
+            layout: motion_core::Layout::DEFAULT,
             panel_drag: None,
             breakpoints: dap_core::Breakpoints::new(),
             project_index: index_core::IncrementalIndex::new(),

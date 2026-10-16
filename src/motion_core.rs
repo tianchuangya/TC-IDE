@@ -1149,3 +1149,144 @@ mod role_tests {
         }
     }
 }
+
+/// Proportions the three main columns take of the window.
+///
+/// The workspace was a `0.17` written out at eighteen call sites, so the tree,
+/// the tabs, the settings sheet and the background preview each decided the
+/// column for themselves and could drift apart by editing one of them. Naming
+/// the proportions puts them in one place and lets a test check that they
+/// leave the editor a usable share.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    /// Share of the width the project tree takes.
+    pub workspace: f32,
+    /// Share of the width the relation graph takes when it is open.
+    pub graph: f32,
+    /// Share of the height the terminal takes when it is open.
+    pub terminal: f32,
+}
+
+impl Layout {
+    /// The proportions the interface is built on.
+    pub const DEFAULT: Layout = Layout {
+        workspace: 0.17,
+        graph: 0.39,
+        terminal: 0.30,
+    };
+
+    /// Smallest share the editor may be left with, whatever else is open.
+    ///
+    /// A code editor narrower than this cannot show a useful line, so the
+    /// panels yield rather than pushing it off the window.
+    pub const MIN_EDITOR: f32 = 0.28;
+
+    /// The width of the project tree, in pixels.
+    pub fn workspace_pixels(self, width: f32) -> f32 {
+        (width * self.workspace.clamp(0.05, 0.4)).round()
+    }
+
+    /// The width of the graph, in pixels, when it is open.
+    ///
+    /// The graph is clamped to what is left after the tree and a usable editor,
+    /// so opening it on a narrow window shrinks it rather than hiding the code.
+    pub fn graph_pixels(self, width: f32, minimum: f32) -> f32 {
+        let tree = self.workspace_pixels(width);
+        let editor = width * Self::MIN_EDITOR;
+        let available = (width - tree - editor).max(0.0);
+        (width * self.graph.clamp(0.0, 0.8))
+            .round()
+            .min(available)
+            .max(minimum.min(available))
+    }
+
+    /// The height of the terminal, in pixels.
+    pub fn terminal_pixels(self, height: f32, minimum: f32) -> f32 {
+        (height * self.terminal.clamp(0.1, 0.6))
+            .round()
+            .max(minimum)
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_proportions_leave_the_editor_a_usable_share() {
+        let layout = Layout::DEFAULT;
+        // Every panel open at once still leaves the editor its minimum.
+        let width = 1600.0;
+        let tree = layout.workspace_pixels(width);
+        let graph = layout.graph_pixels(width, 260.0);
+        let editor = width - tree - graph;
+        assert!(
+            editor >= width * Layout::MIN_EDITOR,
+            "the editor kept only {editor} of {width}"
+        );
+        // And each panel is a sensible share on its own.
+        assert!(tree > 0.0 && tree < width * 0.4);
+        assert!(graph > 0.0 && graph < width * 0.8);
+        let terminal = layout.terminal_pixels(900.0, 120.0);
+        assert!(terminal > 0.0 && terminal < 900.0 * 0.6);
+    }
+
+    #[test]
+    fn a_narrow_window_makes_the_panels_yield() {
+        // On a window too narrow for everything, the graph shrinks rather than
+        // pushing the code off the screen.
+        let layout = Layout::DEFAULT;
+        let wide = layout.graph_pixels(2000.0, 260.0);
+        let narrow = layout.graph_pixels(700.0, 260.0);
+        assert!(narrow < wide, "the graph should shrink: {narrow} vs {wide}");
+        // It never exceeds what is left after the tree and the editor.
+        for width in [400.0f32, 600.0, 900.0, 1400.0, 2000.0, 3400.0] {
+            let tree = layout.workspace_pixels(width);
+            let graph = layout.graph_pixels(width, 260.0);
+            let editor = width - tree - graph;
+            assert!(
+                editor >= width * Layout::MIN_EDITOR - 1.0,
+                "at {width} the editor got {editor}"
+            );
+            assert!(graph >= 0.0, "at {width} the graph was negative");
+        }
+    }
+
+    #[test]
+    fn a_broken_proportion_cannot_produce_a_broken_column() {
+        // The layout is read from preferences, so it can hold anything a hand
+        // edited file put there.
+        let wild = Layout {
+            workspace: 5.0,
+            graph: -3.0,
+            terminal: f32::NAN,
+        };
+        let width = 1000.0;
+        let tree = wild.workspace_pixels(width);
+        assert!((0.0..=width).contains(&tree), "tree was {tree}");
+        let graph = wild.graph_pixels(width, 0.0);
+        assert!((0.0..=width).contains(&graph), "graph was {graph}");
+        let terminal = wild.terminal_pixels(800.0, 100.0);
+        assert!(
+            terminal.is_finite() && terminal > 0.0,
+            "terminal was {terminal}"
+        );
+        // A zero width window does not divide by anything or go negative.
+        assert_eq!(Layout::DEFAULT.workspace_pixels(0.0), 0.0);
+        assert!(Layout::DEFAULT.terminal_pixels(0.0, 100.0) >= 100.0);
+    }
+
+    #[test]
+    fn the_named_proportions_match_what_the_interface_used() {
+        // The workspace was 0.17 written out at eighteen call sites; naming it
+        // must not quietly move the column.
+        assert_eq!(Layout::DEFAULT.workspace, 0.17);
+        assert_eq!(Layout::DEFAULT.graph, 0.39);
+        assert_eq!(Layout::DEFAULT.terminal, 0.30);
+        // And the minimum is what the graph's own clamp already used, so the
+        // editor keeps the share it kept before.
+        let width = 2707.0;
+        let tree = Layout::DEFAULT.workspace_pixels(width);
+        assert_eq!(tree.round(), (width * 0.17).round());
+    }
+}
