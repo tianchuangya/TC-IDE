@@ -809,6 +809,10 @@ struct App {
     syntax_swatch_pixels: [c_ulong; 18],
     hovered_from_code: bool,
     hovered_code_span: Option<(usize, usize, usize)>,
+    /// Last symbol that owned the relation overlay. It survives pointer exit
+    /// until the closing spring settles, allowing the lines to retract rather
+    /// than disappearing in one frame.
+    relation_code_span: Option<(usize, usize, usize)>,
     selected_file: usize,
     files: Vec<FileBuffer>,
     folders: Vec<String>,
@@ -2881,7 +2885,19 @@ impl App {
             );
         }
         self.rounded_rect(
-            self.colors.bright,
+            self.colors.panel_2,
+            layout.left,
+            layout.top,
+            layout.width,
+            layout.height,
+            s(8),
+        );
+        self.rounded_outline(
+            if editing {
+                self.colors.accent
+            } else {
+                self.colors.line
+            },
             layout.left,
             layout.top,
             layout.width,
@@ -2911,7 +2927,7 @@ impl App {
                 y: (tail_center + s(7)) as i16,
             },
         ];
-        self.set_color(self.colors.bright);
+        self.set_color(self.colors.panel_2);
         XFillPolygon(
             self.display,
             self.canvas,
@@ -2922,13 +2938,13 @@ impl App {
             0,
         );
         self.text(
-            self.colors.bg,
+            self.colors.accent,
             layout.left + s(9),
             layout.top + s(20),
             if expanded { "v" } else { ">" },
         );
         self.text(
-            self.colors.bg,
+            self.colors.bright,
             layout.left + s(29),
             layout.top + s(20),
             if editing {
@@ -2938,7 +2954,7 @@ impl App {
             },
         );
         self.text(
-            self.colors.bg,
+            self.colors.muted,
             layout.left + layout.width - s(48),
             layout.top + s(20),
             self.tr("EDIT", "编辑"),
@@ -2946,7 +2962,7 @@ impl App {
         if expanded {
             for (index, line) in layout.lines.iter().enumerate() {
                 self.text(
-                    self.colors.bg,
+                    self.colors.text,
                     layout.left + s(12),
                     layout.top + s(48) + index as i32 * s(22),
                     line,
@@ -2964,7 +2980,10 @@ impl App {
         let s = |v| self.s(v);
         let width = (self.pango_text_size(label, false).0 + s(26)).clamp(s(88), s(160));
         let height = s(27);
-        let left = anchor_x + s(13);
+        // Keep relation cards in a stable right-side lane.  Labels beside a
+        // short identifier no longer cover the source that follows it, while
+        // the connector still makes the exact token unambiguous.
+        let left = (max_right - width).max(anchor_x + s(13));
         if left + width > max_right {
             return;
         }
@@ -2975,7 +2994,8 @@ impl App {
             (anchor_x, y - s(5)),
             (left - s(7), y - s(5)),
         );
-        self.rounded_rect(self.colors.bright, left, top, width, height, s(7));
+        self.rounded_rect(self.colors.panel_2, left, top, width, height, s(7));
+        self.rounded_outline(self.colors.line, left, top, width, height, s(7));
         let tail_center = top + height / 2;
         let mut tail = [
             XPoint {
@@ -2991,7 +3011,7 @@ impl App {
                 y: (tail_center + s(7)) as i16,
             },
         ];
-        self.set_color(self.colors.bright);
+        self.set_color(self.colors.panel_2);
         XFillPolygon(
             self.display,
             self.canvas,
@@ -3001,7 +3021,7 @@ impl App {
             0,
             0,
         );
-        self.text(self.colors.bg, left + s(12), top + s(19), label);
+        self.text(self.colors.bright, left + s(12), top + s(19), label);
     }
 
     unsafe fn text(&self, color: c_ulong, x: i32, y: i32, value: &str) {
@@ -4135,7 +4155,8 @@ impl App {
     fn graph_rows(&self, graph: &graph_core::Graph) -> usize {
         let (_, _, _, h) = self.graph_bounds();
         let _ = graph;
-        ((h - self.s(158)) / self.s(54).max(1)).max(1) as usize
+        let row_height = (self.s(54) as f32 * self.graph_zoom).round() as i32;
+        ((h - self.s(158)) / row_height.max(1)).max(1) as usize
     }
 
     /// Card position of a node index inside the graph panel.
@@ -4373,6 +4394,38 @@ impl App {
         );
         let path_x = self.width / 2 - self.pango_text_size(&path, false).0 / 2;
         self.text(self.colors.muted, path_x.max(s(150)), s(30), &path);
+        for (left, width, active) in [
+            (self.width - s(290), s(85), self.settings_open),
+            (self.width - s(205), s(100), self.extensions_open),
+            (self.width - s(105), s(100), self.package_open),
+        ] {
+            let hovered = self.mouse_y >= s(8)
+                && self.mouse_y <= s(40)
+                && self.mouse_x >= left
+                && self.mouse_x <= left + width;
+            if hovered || active {
+                self.rounded_rect(
+                    if active {
+                        self.colors.project
+                    } else {
+                        self.colors.panel
+                    },
+                    left + s(4),
+                    s(8),
+                    width - s(8),
+                    s(31),
+                    s(7),
+                );
+            }
+            if active {
+                self.line(
+                    self.colors.accent,
+                    2,
+                    (left + s(15), s(39)),
+                    (left + width - s(15), s(39)),
+                );
+            }
+        }
         self.text(
             if self.settings_open {
                 self.colors.accent
@@ -4872,7 +4925,7 @@ impl App {
         let x = self.width - s(410);
         let y = self.shell_content_top() + self.overlay_offset(self.settings_motion);
         let w = s(390);
-        let h = s(830);
+        let h = s(830).min((self.height - y - s(12)).max(s(420)));
         self.floating_panel(x, y, w, h);
         self.text(
             self.colors.bright,
@@ -5547,6 +5600,28 @@ impl App {
                 );
             }
         }
+        // Switching files moves a single restrained scan line across the
+        // editor.  It gives the content change continuity without fading the
+        // code or repainting a large translucent layer on every frame.
+        let file_progress = self.file_switch_motion.value.clamp(0.0, 1.0);
+        if file_progress < 0.995 {
+            let sweep_left = left + s(2);
+            let sweep_right = right - s(14);
+            let sweep_x =
+                sweep_left + ((sweep_right - sweep_left) as f32 * file_progress).round() as i32;
+            self.line(
+                self.colors.line,
+                1,
+                (sweep_x - s(9), tabs_bottom),
+                (sweep_x - s(9), self.terminal_top()),
+            );
+            self.line(
+                self.colors.accent,
+                2,
+                (sweep_x, tabs_bottom),
+                (sweep_x, self.terminal_top()),
+            );
+        }
         XSetFont(self.display, self.gc, (*self.font).fid);
         // The scrollbar is always present, but its thumb fills the track for a
         // short file. This makes the affordance discoverable before scrolling
@@ -5712,6 +5787,32 @@ impl App {
         let tabs_bottom = self.editor_tabs_bottom();
         self.rect(self.colors.panel, x, top, w, self.height - top - s(24));
         self.line(self.colors.line, 1, (x, top), (x, self.height - s(24)));
+        // A visible resize grip: the whole divider remains draggable, while
+        // this compact handle teaches that affordance without adding a label.
+        let grip_y = (top + self.terminal_top()) / 2;
+        let grip_hovered =
+            (self.mouse_x - x).abs() <= s(8) && (self.mouse_y - grip_y).abs() <= s(34);
+        self.rounded_rect(
+            if grip_hovered || self.panel_drag == Some(PanelDrag::CallHierarchy) {
+                self.colors.project
+            } else {
+                self.colors.panel_2
+            },
+            x - s(3),
+            grip_y - s(24),
+            s(7),
+            s(48),
+            s(4),
+        );
+        for offset in [-8, 0, 8] {
+            self.circle(
+                self.colors.muted,
+                self.colors.muted,
+                x,
+                grip_y + s(offset),
+                s(1),
+            );
+        }
         self.line(
             self.colors.line,
             1,
@@ -5961,13 +6062,18 @@ impl App {
                     graph_core::marker_glyph(node),
                 );
             }
-            let detail_width = self.pango_text_size(&node.detail, false).0;
-            self.text(
-                self.colors.muted,
-                (self.width - detail_width - s(26)).max(card_x + s(160)),
-                ny + s(5),
-                &node.detail,
-            );
+            // At compact density the hierarchy remains readable by keeping
+            // names and structure while dropping the trailing line metadata.
+            // It returns automatically as the panel is widened or zoomed in.
+            if w >= s(320) && self.graph_zoom >= 0.9 {
+                let detail_width = self.pango_text_size(&node.detail, false).0;
+                self.text(
+                    self.colors.muted,
+                    (self.width - detail_width - s(26)).max(card_x + s(160)),
+                    ny + s(5),
+                    &node.detail,
+                );
+            }
         }
         self.text(
             self.colors.muted,
@@ -5985,7 +6091,12 @@ impl App {
     }
 
     unsafe fn draw_code_relations(&self) {
-        let Some((line, start_byte, end_byte)) = self.hovered_code_span else {
+        let amount = self.relation_focus_motion.value.clamp(0.0, 1.0);
+        if amount <= 0.01 {
+            return;
+        }
+        let Some((line, start_byte, end_byte)) = self.hovered_code_span.or(self.relation_code_span)
+        else {
             return;
         };
         let s = |v| self.s(v);
@@ -6056,12 +6167,14 @@ impl App {
                     );
                     self.outline(self.colors.accent, target_x, target_y, target_w, target_h);
                     let role = symbol_role(value, &file.name, symbol, target_start, target_end);
-                    self.relation_bubble(
-                        target_x + target_w,
-                        target_y + s(19),
-                        self.tr(role.0, role.1),
-                        self.graph_left() - s(12),
-                    );
+                    if amount > 0.52 {
+                        self.relation_bubble(
+                            target_x + target_w,
+                            target_y + s(19),
+                            self.tr(role.0, role.1),
+                            self.graph_left() - s(12),
+                        );
+                    }
                     let mut arrow = [
                         XPoint {
                             x: end.0 as i16,
@@ -6221,6 +6334,30 @@ impl App {
         let top = self.height - panel_h;
         self.rect(self.colors.panel_2, left, top, panel_width, panel_h);
         self.line(self.colors.line, 1, (left, top), (right, top));
+        let grip_x = left + panel_width / 2;
+        let grip_hovered =
+            (self.mouse_y - top).abs() <= s(8) && (self.mouse_x - grip_x).abs() <= s(36);
+        self.rounded_rect(
+            if grip_hovered || self.panel_drag == Some(PanelDrag::Terminal) {
+                self.colors.project
+            } else {
+                self.colors.panel
+            },
+            grip_x - s(27),
+            top - s(3),
+            s(54),
+            s(7),
+            s(4),
+        );
+        for offset in [-8, 0, 8] {
+            self.circle(
+                self.colors.muted,
+                self.colors.muted,
+                grip_x + s(offset),
+                top,
+                s(1),
+            );
+        }
         // A real disclosure button, instead of a `>` typed into the title.
         self.disclosure(
             left + s(12),
@@ -8121,6 +8258,9 @@ impl App {
             dt,
             MotionRole::Follow,
         );
+        if !self.hovered_from_code && self.relation_focus_motion.value <= 0.01 {
+            self.relation_code_span = None;
+        }
         Self::step_ui_motion(&mut self.graph_content_motion, true, dt, MotionRole::Follow);
         for folder in self.folders.clone() {
             let target = if self.collapsed_folders.contains(&folder) {
@@ -10884,7 +11024,7 @@ impl App {
             }
             return;
         }
-        if state & CONTROL_MASK != 0 && (button == 4 || button == 5) {
+        if state & CONTROL_MASK != 0 && x < graph_left && (button == 4 || button == 5) {
             if button == 4 {
                 self.code_zoom = (self.code_zoom + 1).min(8);
             } else {
@@ -11078,6 +11218,25 @@ impl App {
                     }
                 }
             }
+        }
+        if x >= graph_left && state & CONTROL_MASK != 0 && (button == 4 || button == 5) {
+            let before = self.graph_zoom;
+            self.graph_zoom = if button == 4 {
+                (self.graph_zoom + 0.1).min(1.35)
+            } else {
+                (self.graph_zoom - 0.1).max(0.75)
+            };
+            if (self.graph_zoom - before).abs() > f32::EPSILON {
+                self.graph_scroll = 0;
+                self.graph_content_motion = UiMotion::new(0.0);
+                self.graph_content_motion.velocity = 0.8;
+                self.status_message = format!(
+                    "{} {:.0}%",
+                    self.tr("Graph density", "关系图密度"),
+                    self.graph_zoom * 100.0
+                );
+            }
+            return;
         }
         if x >= graph_left && button == 4 {
             self.graph_scroll = self.graph_scroll.saturating_sub(1);
@@ -12750,7 +12909,9 @@ impl App {
                         let _ = symbol;
                         self.hovered = None;
                         self.hovered_from_code = true;
-                        self.hovered_code_span = Some((row, start, end));
+                        let span = (row, start, end);
+                        self.hovered_code_span = Some(span);
+                        self.relation_code_span = Some(span);
                         return;
                     }
                 }
@@ -14094,6 +14255,7 @@ pub fn run() {
             syntax_swatch_pixels,
             hovered_from_code: false,
             hovered_code_span: None,
+            relation_code_span: None,
             selected_file: 0,
             files: initial_files(),
             folders: vec!["src".into(), "src/editor".into()],
