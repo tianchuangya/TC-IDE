@@ -870,6 +870,8 @@ struct App {
     /// Animated position of the active graph scope indicator.
     graph_scope_position: f32,
     graph_scope_velocity: f32,
+    graph_relation_position: f32,
+    graph_relation_velocity: f32,
     collapsed_folders: BTreeSet<String>,
     terminal_open: bool,
     terminal_height: i32,
@@ -5444,13 +5446,26 @@ impl App {
         ];
         let mode_w = s(73);
         let modes_x = self.width - mode_w * 3 - s(12);
+        let relation_x =
+            modes_x + (mode_w as f32 * self.graph_relation_position.clamp(0.0, 2.0)).round() as i32;
+        self.line(
+            self.colors.accent,
+            2,
+            (relation_x, s(77)),
+            (relation_x + mode_w - s(4), s(77)),
+        );
         for (index, label) in mode_labels.iter().enumerate() {
             let bx = modes_x + index as i32 * mode_w;
-            if self.graph_relation.index() == index {
-                self.rect(self.colors.project, bx, s(52), mode_w - s(4), s(25));
-            }
-            self.outline(self.colors.line, bx, s(52), mode_w - s(4), s(25));
-            self.text(self.colors.muted, bx + s(8), s(70), label);
+            self.text(
+                if self.graph_relation.index() == index {
+                    self.colors.bright
+                } else {
+                    self.colors.muted
+                },
+                bx + s(8),
+                s(70),
+                label,
+            );
         }
         if !self.graph_current {
             let cx = x + w / 2;
@@ -7688,6 +7703,12 @@ impl App {
             &mut self.graph_scope_position,
             &mut self.graph_scope_velocity,
             scope_target,
+            dt,
+        );
+        Self::spring_step(
+            &mut self.graph_relation_position,
+            &mut self.graph_relation_velocity,
+            self.graph_relation.index() as f32,
             dt,
         );
         for folder in self.folders.clone() {
@@ -13614,6 +13635,8 @@ pub fn run() {
             graph_motion: UiMotion::new(1.0),
             graph_scope_position: 0.0,
             graph_scope_velocity: 0.0,
+            graph_relation_position: 0.0,
+            graph_relation_velocity: 0.0,
             collapsed_folders: BTreeSet::new(),
             terminal_open: false,
             terminal_height: (230.0 * (width as f32 / 1440.0).clamp(0.85, 2.0)).round() as i32,
