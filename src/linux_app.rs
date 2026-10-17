@@ -120,6 +120,15 @@ struct XPoint {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct XRectangle {
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct XKeyEvent {
     type_: c_int,
     serial: c_ulong,
@@ -258,6 +267,16 @@ extern "C" {
     ) -> c_int;
     fn XFreeGC(display: *mut Display, gc: Gc) -> c_int;
     fn XSetForeground(display: *mut Display, gc: Gc, foreground: c_ulong) -> c_int;
+    fn XSetClipRectangles(
+        display: *mut Display,
+        gc: Gc,
+        clip_x_origin: c_int,
+        clip_y_origin: c_int,
+        rectangles: *mut XRectangle,
+        count: c_int,
+        ordering: c_int,
+    ) -> c_int;
+    fn XSetClipMask(display: *mut Display, gc: Gc, pixmap: Pixmap) -> c_int;
     fn XSetLineAttributes(
         display: *mut Display,
         gc: Gc,
@@ -998,11 +1017,17 @@ struct App {
     workspace_context_menu: Option<(i32, i32)>,
     extensions_open: bool,
     settings_open: bool,
+    settings_scroll: i32,
     ui_chinese: bool,
     languages: Vec<LanguagePack>,
     project_plugins: Vec<extension_core::PluginManifest>,
     downloading: Option<(usize, Instant)>,
     extension_scroll: usize,
+    extension_scroll_position: f32,
+    extension_scroll_velocity: f32,
+    /// Cached result of the comparatively expensive compiler/LSP probes.
+    /// Never launch tool processes from a paint frame.
+    language_tooling_cache: String,
     extension_category: usize,
     extension_search: String,
     extension_search_focused: bool,
@@ -1942,6 +1967,12 @@ impl App {
 
     /// Origin of the settings overlay.
     fn settings_origin(&self) -> (i32, i32) {
+        let (x, y) = self.settings_panel_origin();
+        (x, y - self.s(self.settings_scroll))
+    }
+
+    /// Fixed drawer origin; content may scroll underneath its header.
+    fn settings_panel_origin(&self) -> (i32, i32) {
         (
             self.width - self.s(410),
             self.shell_content_top() + self.overlay_offset(self.settings_motion),
@@ -2470,6 +2501,17 @@ impl App {
             self.shell_content_top() + s(12),
             s(20),
             s(20),
+        )
+    }
+
+    /// A permanently reachable handle when the call hierarchy is folded.
+    fn graph_restore_rect(&self) -> (i32, i32, i32, i32) {
+        let s = |v: i32| (v as f32 * self.scale()).round() as i32;
+        (
+            self.width - s(27),
+            self.editor_tabs_bottom() + s(16),
+            s(23),
+            s(72),
         )
     }
 
@@ -3663,8 +3705,10 @@ impl App {
         )
     }
 
-    /// Real installation state of the selected language's tooling.
-    fn language_tooling_summary(&self) -> String {
+    /// Probe the selected language once when the selection changes. Paint
+    /// frames only read the cached text; spawning compilers at 60 Hz was the
+    /// source of the severe Extensions scrolling stalls.
+    fn refresh_language_tooling_summary(&mut self) {
         let language = self
             .languages
             .get(self.selected_language.unwrap_or(0))
@@ -3674,7 +3718,7 @@ impl App {
             "Web" => "TypeScript / JavaScript",
             other => other,
         };
-        extension_core::language_tools(language, |tool| {
+        let summary = extension_core::language_tools(language, |tool| {
             std::process::Command::new(tool)
                 .arg("--version")
                 .stdin(std::process::Stdio::null())
@@ -3684,7 +3728,12 @@ impl App {
                 .map(|status| status.success())
                 .unwrap_or(false)
         })
-        .summary()
+        .summary();
+        let mut short = summary.chars().take(58).collect::<String>();
+        if summary.chars().count() > 58 {
+            short.push('…');
+        }
+        self.language_tooling_cache = short;
     }
 
     /// Summary of the extension runtime cache, for the extensions panel.
@@ -4239,6 +4288,13 @@ impl App {
         if self.hovered_from_code {
             self.draw_code_relations();
         }
+        // Docked surfaces are part of the workspace. Draw them before every
+        // floating drawer so a tall terminal can never cover Extensions,
+        // Settings, menus, dialogs, or their controls.
+        self.draw_status();
+        if !self.graph_visible || self.graph_motion.value < 0.92 {
+            self.draw_graph_restore();
+        }
         if self.workspace_context_menu.is_some() {
             self.draw_workspace_context_menu();
         }
@@ -4267,10 +4323,10 @@ impl App {
         if self.create_kind.is_some() && self.create_motion.value > 0.01 {
             self.draw_create_dialog();
         }
+        self.draw_help_overlays();
         if self.build_started.is_some() {
             self.draw_build_animation();
         }
-        self.draw_status();
         self.draw_diagnostic_status();
         cairo_surface_flush(self.cairo_surface);
         XCopyArea(
@@ -4333,7 +4389,12 @@ impl App {
         // labels instead of turning the entire top bar into old-style buttons.
         // and a menu that is shown is clickable. Drawing five titles by hand is
         // how two of them came to be decoration.
-        let focus_menu = self.open_menu.unwrap_or(self.menu_cursor.menu);
+        // Pointer focus is transient. Once the pointer leaves the bar
+        // vertically the old title must not remain lit; an open menu keeps its
+        // own title highlighted for keyboard navigation.
+        let focus_menu = self
+            .open_menu
+            .or_else(|| self.menu_at(self.mouse_x, self.mouse_y));
         let title_position = self.menu_title_position.clamp(0.0, 7.0);
         let lower = title_position.floor() as usize;
         let upper = title_position.ceil() as usize;
@@ -4344,14 +4405,16 @@ impl App {
             (lower_rect.0 as f32 * (1.0 - blend) + upper_rect.0 as f32 * blend).round() as i32;
         let focus_width =
             (lower_rect.2 as f32 * (1.0 - blend) + upper_rect.2 as f32 * blend).round() as i32;
-        self.rounded_rect(
-            self.colors.panel,
-            focus_left + s(3),
-            s(51),
-            focus_width - s(6),
-            s(24),
-            s(5),
-        );
+        if focus_menu.is_some() {
+            self.rounded_rect(
+                self.colors.panel,
+                focus_left + s(3),
+                s(51),
+                focus_width - s(6),
+                s(24),
+                s(5),
+            );
+        }
         for menu in menu_core::Menu::ALL {
             let (left, top, width, height) = self.menu_rect(menu);
             let open = self.open_menu == Some(menu);
@@ -4377,7 +4440,7 @@ impl App {
             };
             let text_width = self.pango_text_size(label, false).0;
             self.text(
-                if focus_menu == menu {
+                if focus_menu == Some(menu) {
                     self.colors.bright
                 } else {
                     self.colors.muted
@@ -4485,7 +4548,7 @@ impl App {
             (width, self.height - s(24)),
         );
         let activity_top =
-            top + s(11) + (self.activity_position.clamp(0.0, 3.0) * s(38) as f32).round() as i32;
+            top + s(11) + (self.activity_position.clamp(0.0, 1.0) * s(38) as f32).round() as i32;
         self.rounded_rect(self.colors.panel, s(7), activity_top, s(30), s(30), s(8));
         self.line(
             self.colors.accent,
@@ -4493,7 +4556,9 @@ impl App {
             (s(1), activity_top + s(8)),
             (s(1), activity_top + s(22)),
         );
-        for index in 0..4 {
+        // The explorer already contains file search. Keep this rail for the
+        // two panels it can reveal instantly: hierarchy and extensions.
+        for index in 0..2 {
             let item_top = top + s(11 + index as i32 * 38);
             let cx = rail / 2;
             let cy = item_top + s(15);
@@ -4504,14 +4569,8 @@ impl App {
             };
             match index {
                 0 => {
-                    self.rounded_outline(color, cx - s(7), cy - s(7), s(14), s(14), s(3));
-                    self.line(color, 1, (cx - s(3), cy - s(9)), (cx + s(5), cy - s(9)));
-                }
-                1 => {
-                    self.circle(self.colors.panel_2, color, cx - s(2), cy - s(2), s(5));
-                    self.line(color, 2, (cx + s(2), cy + s(2)), (cx + s(7), cy + s(7)));
-                }
-                2 => {
+                    // Relationship tree, replacing the old dead source-control
+                    // glyph that looked like a backwards seven.
                     self.line(color, 1, (cx - s(5), cy - s(6)), (cx - s(5), cy + s(6)));
                     self.line(color, 1, (cx - s(5), cy), (cx + s(6), cy));
                     self.circle(self.colors.panel_2, color, cx - s(5), cy - s(7), s(2));
@@ -4673,7 +4732,9 @@ impl App {
         }
         // A compact project card fills the otherwise empty tail of the
         // explorer and gives the same at-a-glance context as the preview.
-        let card_y = self.terminal_top() - s(93);
+        // This belongs to the explorer, not the terminal. Keeping it anchored
+        // prevents it from chasing the resize handle up and down.
+        let card_y = self.height - s(117);
         if card_y > top + s(230) {
             self.rounded_rect(
                 self.colors.panel_2,
@@ -4922,25 +4983,56 @@ impl App {
 
     unsafe fn draw_settings_menu(&self) {
         let s = |v| self.s(v);
-        let x = self.width - s(410);
-        let y = self.shell_content_top() + self.overlay_offset(self.settings_motion);
+        let (x, panel_y) = self.settings_panel_origin();
+        let (_, y) = self.settings_origin();
         let w = s(390);
-        let h = s(830).min((self.height - y - s(12)).max(s(420)));
-        self.floating_panel(x, y, w, h);
+        let h = s(830).min((self.height - panel_y - s(12)).max(s(420)));
+        self.floating_panel(x, panel_y, w, h);
+        // Fixed header. Everything below it is clipped to the drawer viewport
+        // and translated by settings_scroll.
         self.text(
             self.colors.bright,
             x + s(16),
-            y + s(27),
+            panel_y + s(27),
             self.tr("SETTINGS", "设置"),
         );
-        self.rect(self.colors.panel_2, x + w - s(174), y + s(8), s(158), s(28));
-        self.outline(self.colors.line, x + w - s(174), y + s(8), s(158), s(28));
+        self.rect(
+            self.colors.panel_2,
+            x + w - s(174),
+            panel_y + s(8),
+            s(158),
+            s(28),
+        );
+        self.outline(
+            self.colors.line,
+            x + w - s(174),
+            panel_y + s(8),
+            s(158),
+            s(28),
+        );
         self.text(
             self.colors.text,
             x + w - s(160),
-            y + s(28),
+            panel_y + s(28),
             self.tr("SYNTAX COLOURS", "语法颜色"),
         );
+        let clip_top = panel_y + s(43);
+        let mut clip = XRectangle {
+            x: x.max(0) as i16,
+            y: clip_top.max(0) as i16,
+            width: w.max(1).min(u16::MAX as i32) as u16,
+            height: (panel_y + h - clip_top).max(1).min(u16::MAX as i32) as u16,
+        };
+        XSetClipRectangles(self.display, self.gc, 0, 0, &mut clip, 1, 0);
+        cairo_save(self.cairo);
+        cairo_rectangle(
+            self.cairo,
+            x as f64,
+            clip_top as f64,
+            w as f64,
+            (panel_y + h - clip_top).max(1) as f64,
+        );
+        cairo_clip(self.cairo);
         self.text(
             self.colors.muted,
             x + s(16),
@@ -5157,6 +5249,14 @@ impl App {
                 py + s(24),
                 self.tr("Choose a PNG to crop it here", "选择 PNG 后可在这里取景"),
             );
+        }
+        cairo_restore(self.cairo);
+        XSetClipMask(self.display, self.gc, 0);
+        if self.settings_scroll > 0 {
+            self.text(self.colors.accent, x + w - s(26), panel_y + s(58), "↑");
+        }
+        if self.settings_scroll < 360 {
+            self.text(self.colors.muted, x + w - s(26), panel_y + h - s(12), "↓");
         }
         if self.syntax_colors_open {
             self.draw_syntax_color_panel();
@@ -5780,6 +5880,51 @@ impl App {
         );
     }
 
+    /// Small edge handle that remains after the hierarchy drawer is hidden.
+    unsafe fn draw_graph_restore(&self) {
+        let (x, y, w, h) = self.graph_restore_rect();
+        let hovered = self.mouse_x >= x
+            && self.mouse_x <= x + w
+            && self.mouse_y >= y
+            && self.mouse_y <= y + h;
+        self.rounded_rect(
+            if hovered {
+                self.colors.project
+            } else {
+                self.colors.panel_2
+            },
+            x,
+            y,
+            w,
+            h,
+            self.s(8),
+        );
+        self.outline(
+            if hovered {
+                self.colors.accent
+            } else {
+                self.colors.line
+            },
+            x,
+            y,
+            w,
+            h,
+        );
+        let cy = y + h / 2;
+        self.line(
+            self.colors.accent,
+            2,
+            (x + self.s(8), cy - self.s(7)),
+            (x + self.s(14), cy),
+        );
+        self.line(
+            self.colors.accent,
+            2,
+            (x + self.s(14), cy),
+            (x + self.s(8), cy + self.s(7)),
+        );
+    }
+
     unsafe fn draw_graph(&self) {
         let s = |v| self.s(v);
         let (x, y, w, h) = self.graph_bounds();
@@ -6384,12 +6529,13 @@ impl App {
         );
         if terminal_progress > 0.08 {
             let list_x = right - s(190);
-            self.rect(
-                self.colors.panel,
+            self.rounded_rect(
+                self.colors.panel_2,
                 list_x,
                 top + s(30),
                 s(190),
-                panel_h - s(30),
+                panel_h - s(38),
+                s(9),
             );
             self.line(
                 self.colors.line,
@@ -6397,8 +6543,16 @@ impl App {
                 (list_x, top + s(30)),
                 (list_x, self.height),
             );
-            self.rounded_outline(
-                self.colors.line,
+            self.rounded_rect(
+                if self.mouse_x >= list_x + s(10)
+                    && self.mouse_x <= list_x + s(86)
+                    && self.mouse_y >= top + s(38)
+                    && self.mouse_y <= top + s(65)
+                {
+                    self.colors.project
+                } else {
+                    self.colors.panel
+                },
                 list_x + s(10),
                 top + s(38),
                 s(76),
@@ -6411,8 +6565,16 @@ impl App {
                 top + s(58),
                 self.tr("+ NEW", "+ 新建"),
             );
-            self.rounded_outline(
-                self.colors.line,
+            self.rounded_rect(
+                if self.mouse_x >= list_x + s(94)
+                    && self.mouse_x <= list_x + s(178)
+                    && self.mouse_y >= top + s(38)
+                    && self.mouse_y <= top + s(65)
+                {
+                    self.colors.project
+                } else {
+                    self.colors.panel
+                },
                 list_x + s(94),
                 top + s(38),
                 s(84),
@@ -6624,6 +6786,78 @@ impl App {
         );
     }
 
+    /// Help overlays are real, dismissible surfaces rather than menu state
+    /// with no visual result.
+    unsafe fn draw_help_overlays(&self) {
+        if !self.about_open && !self.shortcuts_open {
+            return;
+        }
+        let s = |v| self.s(v);
+        let w = s(500).min(self.width - s(40));
+        let h = if self.shortcuts_open { s(360) } else { s(250) };
+        let x = (self.width - w) / 2;
+        let y = (self.height - h) / 2;
+        self.floating_panel(x, y, w, h);
+        self.text(self.colors.muted, x + w - s(28), y + s(28), "×");
+        if self.about_open {
+            self.text(self.colors.accent, x + s(24), y + s(39), "TC-IDE");
+            self.text(
+                self.colors.bright,
+                x + s(24),
+                y + s(82),
+                self.tr("Native semantic workspace", "原生语义工作空间"),
+            );
+            self.text(
+                self.colors.text,
+                x + s(24),
+                y + s(125),
+                self.tr(
+                    "Rust-native editor · call hierarchy · integrated terminal",
+                    "Rust 原生编辑器 · 调用层级 · 集成终端",
+                ),
+            );
+            self.text(
+                self.colors.muted,
+                x + s(24),
+                y + s(170),
+                "github.com/tianchuangya/TC-IDE",
+            );
+            self.text(
+                self.colors.muted,
+                x + s(24),
+                y + h - s(25),
+                self.tr("Click anywhere to close", "点击任意位置关闭"),
+            );
+        } else {
+            self.text(
+                self.colors.accent,
+                x + s(24),
+                y + s(39),
+                self.tr("KEYBOARD SHORTCUTS", "键盘快捷键"),
+            );
+            for (index, (key, en, zh)) in [
+                ("Ctrl+S", "Save", "保存"),
+                ("Ctrl+C / Ctrl+V", "Copy / Paste", "复制 / 粘贴"),
+                ("Ctrl+F", "Find", "查找"),
+                ("F5", "Run / Continue", "运行 / 继续"),
+                ("F10", "Step over", "单步跳过"),
+                ("Ctrl+wheel", "Code zoom", "代码缩放"),
+            ]
+            .iter()
+            .enumerate()
+            {
+                let row = y + s(86 + index as i32 * 40);
+                self.text(self.colors.bright, x + s(28), row, key);
+                self.text(
+                    self.colors.text,
+                    x + s(210),
+                    row,
+                    if self.ui_chinese { zh } else { en },
+                );
+            }
+        }
+    }
+
     unsafe fn draw_extensions(&self) {
         let s = |v| self.s(v);
         let w = s(950);
@@ -6706,9 +6940,21 @@ impl App {
             );
             let filtered = self.filtered_language_indices();
             let visible_count = 10;
-            let start = self.extension_scroll.min(filtered.len().saturating_sub(1));
-            for (visible, index) in filtered.iter().skip(start).take(visible_count).enumerate() {
-                let row = y + s(153 + visible as i32 * 47);
+            let scroll = self
+                .extension_scroll_position
+                .clamp(0.0, filtered.len().saturating_sub(visible_count) as f32);
+            let start = scroll.floor() as usize;
+            let offset = ((scroll.fract()) * s(47) as f32).round() as i32;
+            for (visible, index) in filtered
+                .iter()
+                .skip(start)
+                .take(visible_count + 1)
+                .enumerate()
+            {
+                let row = y + s(153 + visible as i32 * 47) - offset;
+                if row < y + s(132) || row > y + s(620) {
+                    continue;
+                }
                 let selected = self.selected_language == Some(*index);
                 if selected {
                     self.rect(self.colors.project, list_x, row - s(27), s(310), s(39));
@@ -6742,8 +6988,7 @@ impl App {
                     .max(s(34));
                 let max_scroll = filtered.len().saturating_sub(visible_count).max(1) as i32;
                 let thumb_y = track_y
-                    + (track_h - thumb_h) * self.extension_scroll.min(max_scroll as usize) as i32
-                        / max_scroll;
+                    + ((track_h - thumb_h) as f32 * scroll / max_scroll as f32).round() as i32;
                 self.rect(self.colors.accent, track_x - s(2), thumb_y, s(7), thumb_h);
             }
             self.line(
@@ -6870,7 +7115,7 @@ impl App {
                     &format!(
                         "{} {}",
                         self.tr("Tooling:", "工具链："),
-                        self.language_tooling_summary()
+                        self.language_tooling_cache
                     ),
                 );
                 self.text(
@@ -7350,6 +7595,15 @@ impl App {
                 .unwrap_or_else(Instant::now)
         };
         match name {
+            "extensions" => {
+                self.extensions_open = true;
+                self.extensions_motion = UiMotion::new(1.0);
+                self.extension_category = 0;
+                self.terminal_open = true;
+                self.terminal_motion = UiMotion::new(1.0);
+                self.selected_language = Some(1);
+                true
+            }
             "plugins" => {
                 self.extensions_open = true;
                 self.extensions_motion = UiMotion::new(1.0);
@@ -8151,6 +8405,8 @@ impl App {
             || self.menu_title_velocity.abs() > 0.01
             || self.terminal_tab_velocity.abs() > 0.01
             || self.activity_velocity.abs() > 0.01
+            || self.extension_scroll_velocity.abs() > 0.01
+            || self.panel_drag.is_some()
             || !self.edit_pulses.is_empty()
             || self.build_started.is_some()
             || self.downloading.is_some()
@@ -8249,7 +8505,13 @@ impl App {
         Self::spring_step(
             &mut self.activity_position,
             &mut self.activity_velocity,
-            self.activity_section.min(3) as f32,
+            self.activity_section.min(1) as f32,
+            dt,
+        );
+        Self::spring_step(
+            &mut self.extension_scroll_position,
+            &mut self.extension_scroll_velocity,
+            self.extension_scroll as f32,
             dt,
         );
         Self::step_ui_motion(
@@ -8335,7 +8597,7 @@ impl App {
         self.extensions_motion = UiMotion::new(if self.extensions_open { 1.0 } else { 0.0 });
         self.menu_title_position = self.open_menu.unwrap_or(self.menu_cursor.menu).index() as f32;
         self.terminal_tab_position = self.terminal_active.min(3) as f32;
-        self.activity_position = self.activity_section.min(3) as f32;
+        self.activity_position = self.activity_section.min(1) as f32;
         self.graph_relation_position = self.graph_relation.index() as f32;
         self.graph_scope_position = self.graph_scope_index() as f32
             / self.graph_scope_labels().len().saturating_sub(1).max(1) as f32;
@@ -9823,6 +10085,18 @@ impl App {
         })
     }
 
+    /// Animated dropdown geometry shared by painting, hover, and clicking.
+    fn menu_dropdown_rect(&self, menu: menu_core::Menu) -> (i32, i32, i32, i32) {
+        let (left, top, _, _) = self.menu_rect(menu);
+        let row = self.s(26);
+        (
+            left,
+            top + self.s(33) + self.overlay_offset(self.menu_dropdown_motion),
+            self.s(260),
+            self.s(12) + row * menu.items().len() as i32,
+        )
+    }
+
     /// Draw the open menu as a list of items.
     ///
     /// One drawer for every menu the model lists, so adding a menu adds its
@@ -9839,14 +10113,9 @@ impl App {
             return;
         }
         let s = |v| self.s(v);
-        let (left, top, _, _) = self.menu_rect(menu);
+        let (left, top, width, height) = self.menu_dropdown_rect(menu);
         let items = menu.items();
-        let width = s(260);
         let row = s(26);
-        let height = s(12) + row * items.len() as i32;
-        // The panel slides in from the bar rather than appearing at once.
-        let offset = self.overlay_offset(self.menu_dropdown_motion);
-        let top = top + s(33) + offset;
         self.floating_panel(left, top, width, height);
         for (index, item) in items.iter().enumerate() {
             let y = top + s(19) + index as i32 * row;
@@ -9963,6 +10232,16 @@ impl App {
                 }
             }
         }
+        if let Some(menu) = self.open_menu {
+            if menu != menu_core::Menu::File && !menu.opens_panel() {
+                let (left, top, width, height) = self.menu_dropdown_rect(menu);
+                if x >= left && x <= left + width && y >= top && y <= top + height {
+                    let item = ((y - top - self.s(6)) / self.s(26).max(1)).max(0) as usize;
+                    self.menu_cursor.item = item.min(menu.items().len().saturating_sub(1));
+                    return;
+                }
+            }
+        }
         let Some(menu) = menu_core::menu_under(&rects, x, y) else {
             return;
         };
@@ -9997,6 +10276,15 @@ impl App {
     /// written version repeated that list at every call site, which is how two
     /// menus came to be left out of it.
     fn toggle_menu(&mut self, menu: menu_core::Menu) {
+        if menu.opens_panel() {
+            self.extensions_open = !self.extensions_open;
+            self.settings_open = false;
+            self.package_open = false;
+            self.open_menu = None;
+            self.editor_focused = false;
+            self.activity_section = 1;
+            return;
+        }
         let already = self.open_menu == Some(menu);
         self.menu_cursor = menu_core::MenuCursor { menu, item: 0 };
         self.settings_open = false;
@@ -10118,7 +10406,21 @@ impl App {
             ShowAbout => self.about_open = !self.about_open,
             OpenProjectFolder => {
                 let root = self.project_path.clone().unwrap_or_else(projects_root);
-                self.open_project_at(root);
+                match Command::new("xdg-open").arg(&root).spawn() {
+                    Ok(_) => {
+                        self.status_message = format!(
+                            "{} {}",
+                            self.tr("Opened project folder:", "已打开项目文件夹："),
+                            root.display()
+                        )
+                    }
+                    Err(error) => {
+                        self.status_message = format!(
+                            "{} {error}",
+                            self.tr("Could not open the project folder:", "无法打开项目文件夹：")
+                        )
+                    }
+                }
             }
         }
     }
@@ -10848,6 +11150,13 @@ impl App {
         let scale = self.scale();
         let s = move |v: i32| (v as f32 * scale).round() as i32;
         let graph_left = self.graph_left();
+        if self.about_open || self.shortcuts_open {
+            if button == 1 {
+                self.about_open = false;
+                self.shortcuts_open = false;
+            }
+            return;
+        }
         if self.syntax_colors_open {
             let (panel_x, panel_y, panel_w, _panel_h) = self.syntax_color_panel_rect();
             if button == 1 {
@@ -11013,7 +11322,28 @@ impl App {
             }
             return;
         }
-        if self.extensions_open && self.extension_category == 0 && (button == 4 || button == 5) {
+        if self.settings_open && (button == 4 || button == 5) {
+            let (menu_x, panel_y) = self.settings_panel_origin();
+            if x >= menu_x && x <= menu_x + s(390) && y >= panel_y && y <= self.height - s(12) {
+                self.settings_scroll = if button == 4 {
+                    self.settings_scroll.saturating_sub(44)
+                } else {
+                    (self.settings_scroll + 44).min(360)
+                };
+                return;
+            }
+        }
+        let extension_w = s(950);
+        let extension_x = self.width - extension_w - s(20);
+        let extension_y = self.shell_content_top() + s(6);
+        if self.extensions_open
+            && self.extension_category == 0
+            && (button == 4 || button == 5)
+            && x >= extension_x
+            && x <= extension_x + extension_w
+            && y >= extension_y
+            && y <= extension_y + s(680)
+        {
             let filtered = self.filtered_language_indices();
             let visible = 10;
             let maximum = filtered.len().saturating_sub(visible);
@@ -11256,6 +11586,15 @@ impl App {
                 return;
             }
         }
+        {
+            let (gx, gy, gw, gh) = self.graph_restore_rect();
+            if !self.graph_visible && x >= gx && x <= gx + gw && y >= gy && y <= gy + gh {
+                self.graph_visible = true;
+                self.graph_motion.velocity = 0.9;
+                self.status_message = self.tr("Call hierarchy shown", "已显示调用层级").into();
+                return;
+            }
+        }
         // The tab strip: a click selects a tab, its close button closes it,
         // and the button after the last tab opens a new document. The geometry
         // comes from the same call the drawing used.
@@ -11312,17 +11651,15 @@ impl App {
             return;
         }
         if let Some(menu) = self.open_menu {
-            let (menu_x, menu_y, menu_w, _) = self.menu_rect(menu);
+            let (menu_x, menu_y, width, height) = self.menu_dropdown_rect(menu);
             let items = menu.items();
-            let width = menu_w.max(s(240));
-            let height = s(12 + items.len() as i32 * 26);
             if button == 1
                 && x >= menu_x
                 && x <= menu_x + width
-                && y >= menu_y + s(29)
-                && y <= menu_y + s(29) + height
+                && y >= menu_y
+                && y <= menu_y + height
             {
-                let row = ((y - menu_y - s(29)) / s(26).max(1)).max(0) as usize;
+                let row = ((y - menu_y - s(6)) / s(26).max(1)).max(0) as usize;
                 if let Some(item) = items.get(row).copied() {
                     self.activate_menu_item(item);
                 }
@@ -11344,11 +11681,12 @@ impl App {
         if self.settings_open {
             let menu_x = self.width - s(410);
             let menu_y = self.settings_origin().1;
+            let panel_y = self.settings_panel_origin().1;
             if button == 1 && x >= menu_x && x <= menu_x + s(390) {
                 if x >= menu_x + s(216)
                     && x <= menu_x + s(374)
-                    && y >= menu_y + s(8)
-                    && y <= menu_y + s(36)
+                    && y >= panel_y + s(8)
+                    && y <= panel_y + s(36)
                 {
                     self.syntax_colors_open = true;
                     self.syntax_hex_focused = false;
@@ -11541,15 +11879,19 @@ impl App {
                     return;
                 }
                 let filtered = self.filtered_language_indices();
-                for visible in 0..10 {
-                    let position = self.extension_scroll + visible;
+                let scroll = self.extension_scroll_position.max(0.0);
+                let start = scroll.floor() as usize;
+                let offset = (scroll.fract() * s(47) as f32).round() as i32;
+                for visible in 0..11 {
+                    let position = start + visible;
                     if position >= filtered.len() {
                         break;
                     }
                     let index = filtered[position];
-                    let row = menu_y + s(153 + visible as i32 * 47);
+                    let row = menu_y + s(153 + visible as i32 * 47) - offset;
                     if x >= list_x && x <= list_x + s(310) && (y - row).abs() < s(20) {
                         self.selected_language = Some(index);
+                        self.refresh_language_tooling_summary();
                         self.version_menu_open = false;
                         self.extension_search_focused = false;
                         return;
@@ -11815,31 +12157,23 @@ impl App {
         if x < workspace_right {
             let rail = self.activity_rail_width();
             if x < rail && button == 1 {
-                let item = ((y - self.shell_content_top() - s(11)) / s(38).max(1)).clamp(0, 3);
+                let item = ((y - self.shell_content_top() - s(11)) / s(38).max(1)).clamp(0, 1);
                 match item {
                     0 => {
                         self.activity_section = 0;
-                        self.project_tree_expanded = true;
+                        self.graph_visible = !self.graph_visible;
+                        self.graph_motion.velocity = 0.9;
                         self.workspace_search_focused = false;
-                    }
-                    1 => {
-                        self.activity_section = 1;
-                        self.project_tree_expanded = true;
-                        self.workspace_search_focused = true;
-                        self.editor_focused = false;
-                    }
-                    2 => {
-                        self.activity_section = 2;
-                        self.status_message = self
-                            .tr(
-                                "Source control is available from the menu",
-                                "源码管理可从菜单打开",
-                            )
-                            .into();
+                        self.status_message = if self.graph_visible {
+                            self.tr("Call hierarchy shown", "已显示调用层级")
+                        } else {
+                            self.tr("Call hierarchy hidden", "已隐藏调用层级")
+                        }
+                        .into();
                     }
                     _ => {
-                        self.activity_section = 3;
-                        self.extensions_open = true;
+                        self.activity_section = 1;
+                        self.extensions_open = !self.extensions_open;
                         self.open_menu = None;
                     }
                 }
@@ -14387,11 +14721,15 @@ pub fn run() {
             workspace_context_menu: None,
             extensions_open: false,
             settings_open: false,
+            settings_scroll: 0,
             ui_chinese: preferences.chinese,
             languages: initial_languages(),
             project_plugins: Vec::new(),
             downloading: None,
             extension_scroll: 0,
+            extension_scroll_position: 0.0,
+            extension_scroll_velocity: 0.0,
+            language_tooling_cache: String::new(),
             extension_category: 0,
             extension_search: String::new(),
             extension_search_focused: false,
@@ -14413,6 +14751,7 @@ pub fn run() {
             started: Instant::now(),
         };
         app.rebuild_project_index();
+        app.refresh_language_tooling_summary();
         app.restore_session();
         app.graph_scope_position = app.graph_scope_index() as f32
             / (app.graph_scope_labels().len().saturating_sub(1).max(1) as f32);
