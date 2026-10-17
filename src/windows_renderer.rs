@@ -101,7 +101,9 @@ pub struct WindowsScene<'a> {
     pub chat_error: &'a str,
     pub ai_field_focused: Option<usize>,
     pub symbols: &'a [SymbolOccurrence],
-    pub hovered_symbol: Option<&'a SymbolOccurrence>,
+    /// Symbol retained while its relation route springs out after hover ends.
+    pub relation_symbol: Option<&'a SymbolOccurrence>,
+    pub relation_focus_motion: f32,
     /// Titles of the open documents.
     pub tabs: &'a [String],
     pub active_tab: usize,
@@ -2656,7 +2658,8 @@ impl DirectEditorRenderer {
             )
         };
 
-        if let Some(focused) = scene.hovered_symbol {
+        if let Some(focused) = scene.relation_symbol {
+            let reveal = scene.relation_focus_motion.clamp(0.0, 1.0);
             let focused_line = scene
                 .lines
                 .get(focused.line)
@@ -2669,14 +2672,17 @@ impl DirectEditorRenderer {
                 + (55.0 + Self::visual_cells(focused_line, focused.end) as f32 * self.code_cell)
                     * scale;
             let focused_top = code_top + focused.line as f32 * line_step - 3.0 * scale;
+            let focused_center = (focused_left + focused_right) * 0.5;
+            let outline_left = focused_center + (focused_left - focused_center) * reveal;
+            let outline_right = focused_center + (focused_right - focused_center) * reveal;
             unsafe {
                 Self::outline(
                     &target_base,
                     &accent,
                     D2D_RECT_F {
-                        left: focused_left,
+                        left: outline_left,
                         top: focused_top,
-                        right: focused_right,
+                        right: outline_right,
                         bottom: focused_top + 25.0 * scale,
                     },
                     5.0 * scale,
@@ -2685,13 +2691,14 @@ impl DirectEditorRenderer {
             };
             let route_x = editor_right - 13.0 * scale;
             let source_y = focused_top + 12.0 * scale;
+            let source_end = focused_right + (route_x - focused_right) * reveal;
             unsafe {
                 Self::fill(
                     &target_base,
                     &accent,
                     focused_right,
                     source_y,
-                    route_x,
+                    source_end,
                     source_y + 1.5 * scale,
                 )
             };
@@ -2718,14 +2725,22 @@ impl DirectEditorRenderer {
                         * scale;
                 let related_top = code_top + related.line as f32 * line_step - 3.0 * scale;
                 let related_y = related_top + 12.0 * scale;
+                let branch_reveal = ((reveal - 0.22) / 0.78).clamp(0.0, 1.0);
+                let related_center = (related_left + related_right) * 0.5;
+                let related_outline_left =
+                    related_center + (related_left - related_center) * branch_reveal;
+                let related_outline_right =
+                    related_center + (related_right - related_center) * branch_reveal;
+                let vertical_end = source_y + (related_y - source_y) * branch_reveal;
+                let branch_end = route_x + (related_right - route_x) * branch_reveal;
                 unsafe {
                     Self::outline(
                         &target_base,
                         &muted,
                         D2D_RECT_F {
-                            left: related_left,
+                            left: related_outline_left,
                             top: related_top,
-                            right: related_right,
+                            right: related_outline_right,
                             bottom: related_top + 25.0 * scale,
                         },
                         5.0 * scale,
@@ -2735,14 +2750,14 @@ impl DirectEditorRenderer {
                         &target_base,
                         &accent,
                         route_x,
-                        source_y.min(related_y),
+                        source_y.min(vertical_end),
                         route_x + 1.5 * scale,
-                        source_y.max(related_y) + 1.5 * scale,
+                        source_y.max(vertical_end) + 1.5 * scale,
                     );
                     Self::fill(
                         &target_base,
                         &accent,
-                        related_right,
+                        branch_end,
                         related_y,
                         route_x,
                         related_y + 1.5 * scale,
@@ -3271,33 +3286,6 @@ impl DirectEditorRenderer {
                     )
                 };
             }
-        }
-
-        if let Some(focused) = scene.hovered_symbol {
-            let value = scene
-                .lines
-                .get(focused.line)
-                .map(String::as_str)
-                .unwrap_or("");
-            let left = code_origin
-                + (49.0 + Self::visual_cells(value, focused.start) as f32 * self.code_cell) * scale;
-            let right = code_origin
-                + (55.0 + Self::visual_cells(value, focused.end) as f32 * self.code_cell) * scale;
-            let top = code_top + focused.line as f32 * line_step - 3.0 * scale;
-            unsafe {
-                Self::outline(
-                    &target_base,
-                    &accent,
-                    D2D_RECT_F {
-                        left,
-                        top,
-                        right,
-                        bottom: top + 25.0 * scale,
-                    },
-                    5.0 * scale,
-                    1.5 * scale,
-                )
-            };
         }
 
         unsafe {

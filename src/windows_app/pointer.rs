@@ -871,6 +871,9 @@ pub(super) fn handle_mouse_move(window: Hwnd, w_param: Wparam, l_param: Lparam) 
             if hovered == app.hovered_symbol {
                 false
             } else {
+                if let Some(symbol) = hovered.as_ref() {
+                    app.relation_symbol = Some(symbol.clone());
+                }
                 app.hovered_symbol = hovered;
                 app.graph_scroll = 0;
                 true

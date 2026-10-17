@@ -61,8 +61,8 @@ pub(super) fn render_window(window: Hwnd) {
                     symbol
                 })
                 .collect::<Vec<_>>();
-            let hovered_symbol = app.hovered_symbol.as_ref().and_then(|symbol| {
-                if symbol.line < first_line {
+            let relation_symbol = app.relation_symbol.as_ref().and_then(|symbol| {
+                if symbol.line < first_line || symbol.line >= first_line + visible_lines.len() {
                     return None;
                 }
                 let mut symbol = symbol.clone();
@@ -249,7 +249,8 @@ pub(super) fn render_window(window: Hwnd) {
                 chat_error: app.chat_error.as_deref().unwrap_or_default(),
                 ai_field_focused: app.ai_field_focused,
                 symbols: &symbols,
-                hovered_symbol: hovered_symbol.as_ref(),
+                relation_symbol: relation_symbol.as_ref(),
+                relation_focus_motion: app.relation_focus_motion,
                 tabs: &tabs,
                 active_tab,
                 tab_dirty: app

@@ -8,6 +8,15 @@ impl WindowsAppState {
         let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.04);
         self.last_frame = now;
         self.update_tree_rows(dt);
+        Self::step_overlay_motion(
+            &mut self.relation_focus_motion,
+            &mut self.relation_focus_velocity,
+            self.hovered_symbol.is_some(),
+            dt,
+        );
+        if self.hovered_symbol.is_none() && self.relation_focus_motion <= 0.001 {
+            self.relation_symbol = None;
+        }
         let target = if self.terminal_open { 1.0 } else { 0.0 };
         self.terminal_velocity += (target - self.terminal_motion) * 235.0 * dt;
         self.terminal_velocity *= (-17.0 * dt).exp();
