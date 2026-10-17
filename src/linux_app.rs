@@ -206,12 +206,32 @@ struct XConfigureEvent {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+union XClientMessageData {
+    longs: [c_long; 5],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct XClientMessageEvent {
+    type_: c_int,
+    serial: c_ulong,
+    send_event: c_int,
+    display: *mut Display,
+    window: Window,
+    message_type: Atom,
+    format: c_int,
+    data: XClientMessageData,
+}
+
+#[repr(C)]
 union XEvent {
     type_: c_int,
     key: XKeyEvent,
     motion: XMotionEvent,
     button: XButtonEvent,
     configure: XConfigureEvent,
+    client: XClientMessageEvent,
     pad: [c_long; 24],
 }
 
@@ -239,6 +259,14 @@ extern "C" {
     fn XStoreName(display: *mut Display, window: Window, name: *const c_char) -> c_int;
     fn XSelectInput(display: *mut Display, window: Window, mask: c_long) -> c_int;
     fn XMapWindow(display: *mut Display, window: Window) -> c_int;
+    fn XIconifyWindow(display: *mut Display, window: Window, screen: c_int) -> c_int;
+    fn XSendEvent(
+        display: *mut Display,
+        window: Window,
+        propagate: c_int,
+        event_mask: c_long,
+        event: *mut XEvent,
+    ) -> c_int;
     fn XCreateGC(
         display: *mut Display,
         drawable: Drawable,
@@ -460,6 +488,8 @@ const BUTTON_PRESS_MASK: c_long = 1 << 2;
 const POINTER_MOTION_MASK: c_long = 1 << 6;
 const EXPOSURE_MASK: c_long = 1 << 15;
 const STRUCTURE_NOTIFY_MASK: c_long = 1 << 17;
+const SUBSTRUCTURE_NOTIFY_MASK: c_long = 1 << 19;
+const SUBSTRUCTURE_REDIRECT_MASK: c_long = 1 << 20;
 const CONTROL_MASK: c_uint = 1 << 2;
 /// Shift is held down, in the state mask of a key event.
 const SHIFT_MASK: c_uint = 1 << 0;
@@ -10385,14 +10415,14 @@ impl App {
                     self.load_ai_history();
                 }
             }
-            Minimize | Zoom | ToggleFullScreen => {
-                self.status_message = self
-                    .tr(
-                        "Window controls are handled by the window manager",
-                        "窗口控制由窗口管理器负责",
-                    )
-                    .into()
-            }
+            Minimize => unsafe {
+                XIconifyWindow(self.display, self.window, XDefaultScreen(self.display));
+            },
+            Zoom => self.toggle_window_manager_state(
+                "_NET_WM_STATE_MAXIMIZED_HORZ",
+                Some("_NET_WM_STATE_MAXIMIZED_VERT"),
+            ),
+            ToggleFullScreen => self.toggle_window_manager_state("_NET_WM_STATE_FULLSCREEN", None),
             NewTerminal => self.add_terminal(),
             DetachTerminal => {
                 self.status_message = self
@@ -10422,6 +10452,59 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// Ask an EWMH-compatible window manager to toggle a window state. This
+    /// keeps maximize/fullscreen native to the desktop while making the mouse
+    /// menu perform the same real action as the keyboard path.
+    fn toggle_window_manager_state(&mut self, first: &str, second: Option<&str>) {
+        let Ok(state_name) = CString::new("_NET_WM_STATE") else {
+            return;
+        };
+        let Ok(first_name) = CString::new(first) else {
+            return;
+        };
+        let second_name = second.and_then(|value| CString::new(value).ok());
+        unsafe {
+            let message_type = XInternAtom(self.display, state_name.as_ptr(), 0);
+            let first_atom = XInternAtom(self.display, first_name.as_ptr(), 0);
+            let second_atom = second_name
+                .as_ref()
+                .map(|value| XInternAtom(self.display, value.as_ptr(), 0))
+                .unwrap_or(0);
+            let mut event = XEvent {
+                client: XClientMessageEvent {
+                    type_: CLIENT_MESSAGE,
+                    serial: 0,
+                    send_event: 1,
+                    display: self.display,
+                    window: self.window,
+                    message_type,
+                    format: 32,
+                    // 2 = toggle; 1 = normal application source.
+                    data: XClientMessageData {
+                        longs: [2, first_atom as c_long, second_atom as c_long, 1, 0],
+                    },
+                },
+            };
+            let root = XRootWindow(self.display, XDefaultScreen(self.display));
+            let sent = XSendEvent(
+                self.display,
+                root,
+                0,
+                SUBSTRUCTURE_REDIRECT_MASK | SUBSTRUCTURE_NOTIFY_MASK,
+                &mut event,
+            );
+            self.status_message = if sent != 0 {
+                self.tr("Window state updated", "窗口状态已更新").into()
+            } else {
+                self.tr(
+                    "The window manager rejected this action",
+                    "窗口管理器拒绝了此操作",
+                )
+                .into()
+            };
         }
     }
 
