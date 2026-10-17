@@ -4369,8 +4369,10 @@ impl App {
                     .get(folder)
                     .map(|motion| motion.0)
                     .unwrap_or(if expanded { 1.0 } else { 0.0 });
-                self.chevron_progress(s(18), s(row_y as i32 - 5), arrow_progress);
-                self.text(self.colors.text, s(34), s(row_y as i32), folder);
+                let depth = folder.matches('/').count() as i32;
+                self.chevron_progress(s(18 + depth * 14), s(row_y as i32 - 5), arrow_progress);
+                let label = folder.rsplit('/').next().unwrap_or(folder);
+                self.text(self.colors.text, s(34 + depth * 14), s(row_y as i32), label);
             }
             for (index, file) in self.files.iter().enumerate().filter(|(_, file)| {
                 self.workspace_search.is_empty()
@@ -4400,7 +4402,10 @@ impl App {
                 } else {
                     self.colors.muted
                 };
-                self.text(color, s(45), s(y), &self.file_tree_path(file));
+                let path = self.file_tree_path(file);
+                let depth = path.matches('/').count() as i32;
+                let label = path.rsplit('/').next().unwrap_or(path.as_str());
+                self.text(color, s(45 + depth * 14), s(y), label);
             }
         }
     }
@@ -5483,14 +5488,51 @@ impl App {
         let scope_labels = self.graph_scope_labels();
         let count = scope_labels.len() as i32;
         let scope_w = ((w - s(36)) / count.max(1)).max(s(56));
+        // Scope is a single reading rail rather than a row of unrelated
+        // buttons.  The small wave points at the active range and the labels
+        // sit on the same line, which keeps the hierarchy visually quiet.
+        let rail_y = y + s(21);
+        self.line(
+            self.colors.line,
+            1,
+            (x + s(14), rail_y),
+            (x + w - s(14), rail_y),
+        );
         for (index, label) in scope_labels.iter().enumerate() {
             let bx = x + s(14) + index as i32 * scope_w;
             let selected = index == self.graph_scope_index();
             if selected {
-                self.rect(self.colors.project, bx, y + s(8), scope_w - s(5), s(27));
+                let tip = bx + scope_w / 2;
+                self.line(self.colors.accent, 2, (bx, rail_y), (tip - s(10), rail_y));
+                self.line(
+                    self.colors.accent,
+                    2,
+                    (tip - s(10), rail_y),
+                    (tip, rail_y - s(7)),
+                );
+                self.line(
+                    self.colors.accent,
+                    2,
+                    (tip, rail_y - s(7)),
+                    (tip + s(10), rail_y),
+                );
+                self.line(
+                    self.colors.accent,
+                    2,
+                    (tip + s(10), rail_y),
+                    (bx + scope_w, rail_y),
+                );
             }
-            self.outline(self.colors.line, bx, y + s(8), scope_w - s(5), s(27));
-            self.text(self.colors.text, bx + s(7), y + s(27), label);
+            self.text(
+                if selected {
+                    self.colors.bright
+                } else {
+                    self.colors.muted
+                },
+                bx + s(7),
+                y + s(15),
+                label,
+            );
         }
         self.rect(self.colors.bg, x + s(14), y + s(43), w - s(28), s(30));
         self.outline(
@@ -10534,6 +10576,27 @@ impl App {
                 }
             }
             return;
+        }
+        // The gutter chevron is a real fold control, not just a decoration.
+        // It uses the same visible-row mapping as drawing, so clicking the v
+        // beside `main` toggles that block even when earlier lines are folded.
+        if button == 1 && x >= workspace_right && x < workspace_right + s(32) {
+            let base_y = s(119);
+            let step = self.code_line_step().max(1);
+            if y >= base_y - step / 2 && y < self.terminal_top() {
+                let screen_row = ((y - base_y + step / 2) / step).max(0) as usize;
+                let visible = self.editor_line_indices();
+                if let Some(&line) = visible.get(self.editor_scroll + screen_row) {
+                    if self
+                        .fold_regions()
+                        .iter()
+                        .any(|region| region.start_line == line)
+                    {
+                        self.toggle_fold(line);
+                        return;
+                    }
+                }
+            }
         }
         if x >= graph_left && button == 4 {
             self.graph_scroll = self.graph_scroll.saturating_sub(1);
