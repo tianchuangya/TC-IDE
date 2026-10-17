@@ -20,6 +20,27 @@ pub(super) fn self_check() -> i32 {
         }
     };
 
+    // The native Windows menu is generated from the shared menu model. Every
+    // enabled row must make a lossless round trip through WM_COMMAND; rows
+    // whose Windows view state does not exist yet are visibly disabled.
+    report(
+        "native menu command ids round trip",
+        crate::menu_core::Item::ALL.iter().all(|item| {
+            let command = platform::command_for_menu_item(*item);
+            platform::menu_item_for_command(command) == Some(*item)
+        }),
+        &mut failures,
+    );
+    report(
+        "native menu exposes no dead enabled rows",
+        crate::menu_core::Item::ALL
+            .iter()
+            .filter(|item| !platform::menu_item_supported(**item))
+            .count()
+            == 7,
+        &mut failures,
+    );
+
     // Preferences round trip.
     let preferences = workspace_core::Preferences {
         light_theme: true,

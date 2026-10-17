@@ -4,6 +4,8 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::ptr;
 
+use crate::menu_core::{Item as MenuItem, Menu};
+
 pub type Hwnd = *mut c_void;
 type Bool = i32;
 type Dword = u32;
@@ -36,11 +38,13 @@ pub const COMMAND_SETTINGS: Wparam = 1020;
 pub const COMMAND_EXTENSIONS: Wparam = 1021;
 pub const COMMAND_PACKAGE: Wparam = 1022;
 pub const COMMAND_REFRESH_PROJECT: Wparam = 1023;
+const MENU_COMMAND_BASE: Wparam = 2000;
 
 const CF_UNICODETEXT: Uint = 13;
 const GMEM_MOVEABLE: Uint = 0x0002;
 const MF_POPUP: Uint = 0x0010;
 const MF_STRING: Uint = 0x0000;
+const MF_GRAYED: Uint = 0x0001;
 const OFN_EXPLORER: Dword = 0x0008_0000;
 const OFN_FILEMUSTEXIST: Dword = 0x0000_1000;
 const OFN_PATHMUSTEXIST: Dword = 0x0000_0800;
@@ -125,6 +129,7 @@ extern "system" {
     fn GetDpiForWindow(window: Hwnd) -> Uint;
     fn GetKeyState(key: i32) -> i16;
     fn IsClipboardFormatAvailable(format: Uint) -> Bool;
+    fn MessageBoxW(window: Hwnd, text: *const u16, caption: *const u16, kind: Uint) -> i32;
     fn OpenClipboard(owner: Hwnd) -> Bool;
     fn SetClipboardData(format: Uint, memory: Handle) -> Handle;
     fn SetMenu(window: Hwnd, menu: Hmenu) -> Bool;
@@ -234,126 +239,74 @@ pub fn shift_pressed() -> bool {
     unsafe { GetKeyState(VK_SHIFT) < 0 }
 }
 
-pub fn install_native_menu(window: Hwnd) {
+/// Native id reserved for one shared menu item.
+pub fn command_for_menu_item(item: MenuItem) -> Wparam {
+    MENU_COMMAND_BASE + item.index()
+}
+
+/// Shared item represented by a native WM_COMMAND id.
+pub fn menu_item_for_command(command: Wparam) -> Option<MenuItem> {
+    command
+        .checked_sub(MENU_COMMAND_BASE)
+        .and_then(MenuItem::from_index)
+}
+
+/// Only expose an enabled native row when the Windows backend has a real
+/// action for it. Missing editor find/replace and panel-visibility state stay
+/// visible but disabled instead of pretending a click worked.
+pub fn menu_item_supported(item: MenuItem) -> bool {
+    !matches!(
+        item,
+        MenuItem::Find
+            | MenuItem::Replace
+            | MenuItem::GoToLine
+            | MenuItem::ToggleProjectTree
+            | MenuItem::ToggleGraph
+            | MenuItem::FoldAll
+            | MenuItem::ToggleFullScreen
+    )
+}
+
+pub fn install_native_menu(window: Hwnd, chinese: bool) {
     unsafe {
         let menu = CreateMenu();
-        let file_menu = CreatePopupMenu();
-        let edit_menu = CreatePopupMenu();
-        let view_menu = CreatePopupMenu();
-        let platform_menu = CreatePopupMenu();
-        let open_file = wide("Open file...\tCtrl+O");
-        let new_project = wide("New project...");
-        let new_file = wide("New file...");
-        let new_folder = wide("New folder...");
-        let open_folder = wide("Open project folder...");
-        let reveal_folder = wide("Reveal current project in Explorer");
-        let open_terminal = wide("Toggle integrated ConPTY terminal\tCtrl+T");
-        let undo = wide("Undo\tCtrl+Z");
-        let redo = wide("Redo\tCtrl+Y");
-        let select_all = wide("Select all\tCtrl+A");
-        let copy = wide("Copy\tCtrl+C");
-        let cut = wide("Cut\tCtrl+X");
-        let paste = wide("Paste\tCtrl+V");
-        let dark = wide("Dark theme");
-        let light = wide("Light theme");
-        let language = wide("English / 中文");
-        let font_increase = wide("Increase code size\tCtrl++");
-        let font_decrease = wide("Decrease code size\tCtrl+-");
-        let workspace_search = wide("Search project files\tCtrl+P");
-        let settings = wide("Settings...");
-        let extensions = wide("Extensions...");
-        let package = wide("Package project...");
-        AppendMenuW(
-            file_menu,
-            MF_STRING,
-            COMMAND_NEW_PROJECT,
-            new_project.as_ptr(),
-        );
-        AppendMenuW(view_menu, MF_STRING, COMMAND_SETTINGS, settings.as_ptr());
-        AppendMenuW(
-            view_menu,
-            MF_STRING,
-            COMMAND_EXTENSIONS,
-            extensions.as_ptr(),
-        );
-        AppendMenuW(file_menu, MF_STRING, COMMAND_NEW_FILE, new_file.as_ptr());
-        AppendMenuW(
-            file_menu,
-            MF_STRING,
-            COMMAND_NEW_FOLDER,
-            new_folder.as_ptr(),
-        );
-        AppendMenuW(file_menu, MF_STRING, COMMAND_OPEN_FILE, open_file.as_ptr());
-        AppendMenuW(file_menu, MF_STRING, COMMAND_PACKAGE, package.as_ptr());
-        AppendMenuW(
-            file_menu,
-            MF_STRING,
-            COMMAND_OPEN_FOLDER,
-            open_folder.as_ptr(),
-        );
-        AppendMenuW(
-            file_menu,
-            MF_STRING,
-            COMMAND_REVEAL_FOLDER,
-            reveal_folder.as_ptr(),
-        );
-        AppendMenuW(
-            platform_menu,
-            MF_STRING,
-            COMMAND_OPEN_TERMINAL,
-            open_terminal.as_ptr(),
-        );
-        AppendMenuW(edit_menu, MF_STRING, COMMAND_UNDO, undo.as_ptr());
-        AppendMenuW(edit_menu, MF_STRING, COMMAND_REDO, redo.as_ptr());
-        AppendMenuW(
-            edit_menu,
-            MF_STRING,
-            COMMAND_SELECT_ALL,
-            select_all.as_ptr(),
-        );
-        AppendMenuW(edit_menu, MF_STRING, COMMAND_COPY_DIAGNOSTIC, copy.as_ptr());
-        AppendMenuW(edit_menu, MF_STRING, COMMAND_CUT, cut.as_ptr());
-        AppendMenuW(edit_menu, MF_STRING, COMMAND_PASTE, paste.as_ptr());
-        AppendMenuW(view_menu, MF_STRING, COMMAND_THEME_DARK, dark.as_ptr());
-        AppendMenuW(view_menu, MF_STRING, COMMAND_THEME_LIGHT, light.as_ptr());
-        AppendMenuW(
-            view_menu,
-            MF_STRING,
-            COMMAND_LANGUAGE_TOGGLE,
-            language.as_ptr(),
-        );
-        AppendMenuW(
-            view_menu,
-            MF_STRING,
-            COMMAND_FONT_INCREASE,
-            font_increase.as_ptr(),
-        );
-        AppendMenuW(
-            view_menu,
-            MF_STRING,
-            COMMAND_FONT_DECREASE,
-            font_decrease.as_ptr(),
-        );
-        AppendMenuW(
-            view_menu,
-            MF_STRING,
-            COMMAND_WORKSPACE_SEARCH,
-            workspace_search.as_ptr(),
-        );
-        let file_label = wide("File");
-        let edit_label = wide("Edit");
-        let view_label = wide("View");
-        let platform_label = wide("Windows API");
-        AppendMenuW(menu, MF_POPUP, file_menu as Wparam, file_label.as_ptr());
-        AppendMenuW(menu, MF_POPUP, edit_menu as Wparam, edit_label.as_ptr());
-        AppendMenuW(menu, MF_POPUP, view_menu as Wparam, view_label.as_ptr());
-        AppendMenuW(
-            menu,
-            MF_POPUP,
-            platform_menu as Wparam,
-            platform_label.as_ptr(),
-        );
+        for section in Menu::ALL {
+            let popup = CreatePopupMenu();
+            for item in section.items() {
+                let mut label = if chinese {
+                    item.label_chinese().to_string()
+                } else {
+                    item.label().to_string()
+                };
+                if let Some(shortcut) = item.shortcut() {
+                    label.push('\t');
+                    label.push_str(shortcut);
+                }
+                let label = wide(&label);
+                let flags = MF_STRING
+                    | if menu_item_supported(*item) {
+                        0
+                    } else {
+                        MF_GRAYED
+                    };
+                AppendMenuW(popup, flags, command_for_menu_item(*item), label.as_ptr());
+            }
+            let title = wide(if chinese {
+                section.title_chinese()
+            } else {
+                section.title()
+            });
+            AppendMenuW(menu, MF_POPUP, popup as Wparam, title.as_ptr());
+        }
         SetMenu(window, menu);
+    }
+}
+
+pub fn show_message(window: Hwnd, title: &str, message: &str) {
+    let title = wide(title);
+    let message = wide(message);
+    unsafe {
+        MessageBoxW(window, message.as_ptr(), title.as_ptr(), 0);
     }
 }
 

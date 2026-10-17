@@ -1,5 +1,6 @@
 //! Window events: message loop plumbing, hit testing and command dispatch.
 
+use super::detached::open_detached_terminal;
 use super::keys::handle_key_down;
 use super::panel::sync_terminal_grid;
 use super::pointer::{
@@ -89,6 +90,11 @@ pub(super) fn comment_bubble_at(window: Hwnd, x: i32, y: i32) -> Option<(usize, 
 }
 
 pub(super) fn perform_command(window: Hwnd, command: Wparam) {
+    if let Some(item) = platform::menu_item_for_command(command) {
+        perform_menu_item(window, item);
+        invalidate(window);
+        return;
+    }
     APP.with(|cell| {
         let mut app = cell.borrow_mut();
         match command {
@@ -208,6 +214,169 @@ pub(super) fn perform_command(window: Hwnd, command: Wparam) {
         RENDERER.with(|cell| *cell.borrow_mut() = None);
     }
     invalidate(window);
+}
+
+/// Execute one shared menu item using the same state transitions as keyboard
+/// shortcuts and visible controls. Unsupported items are disabled by the
+/// native menu builder, so every item that reaches here has an observable
+/// action rather than being a decorative row.
+fn perform_menu_item(window: Hwnd, item: crate::menu_core::Item) {
+    use crate::menu_core::Item;
+
+    let legacy = match item {
+        Item::Undo => Some(platform::COMMAND_UNDO),
+        Item::Redo => Some(platform::COMMAND_REDO),
+        Item::OpenFile => Some(platform::COMMAND_OPEN_FILE),
+        Item::OpenFolder => Some(platform::COMMAND_OPEN_FOLDER),
+        Item::SelectAll => Some(platform::COMMAND_SELECT_ALL),
+        Item::Copy => Some(platform::COMMAND_COPY_DIAGNOSTIC),
+        Item::Paste => Some(platform::COMMAND_PASTE),
+        Item::FindInProject => Some(platform::COMMAND_WORKSPACE_SEARCH),
+        Item::ToggleTerminal => Some(platform::COMMAND_OPEN_TERMINAL),
+        Item::LargerCode => Some(platform::COMMAND_FONT_INCREASE),
+        Item::SmallerCode => Some(platform::COMMAND_FONT_DECREASE),
+        Item::Package => Some(platform::COMMAND_PACKAGE),
+        Item::ShowExtensions => Some(platform::COMMAND_EXTENSIONS),
+        Item::ShowSettings => Some(platform::COMMAND_SETTINGS),
+        _ => None,
+    };
+    if let Some(command) = legacy {
+        perform_command(window, command);
+        return;
+    }
+
+    match item {
+        Item::Save => APP.with(|cell| cell.borrow_mut().save()),
+        Item::NewWindow => match std::env::current_exe()
+            .and_then(|executable| std::process::Command::new(executable).spawn())
+        {
+            Ok(_) => APP.with(|cell| cell.borrow_mut().status = "Opened a new TC-IDE window".into()),
+            Err(error) => APP.with(|cell| {
+                cell.borrow_mut().status = format!("Could not open a new window: {error}")
+            }),
+        },
+        Item::CloseWindow => unsafe {
+            DestroyWindow(window);
+        },
+        Item::ToggleComments => APP.with(|cell| {
+            let mut app = cell.borrow_mut();
+            if app.expanded_comments.is_empty() {
+                app.expanded_comments = app
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(line, text)| {
+                        editor_core::comment_bounds(text, &app.file_name).map(|_| line)
+                    })
+                    .collect();
+                app.status = "Comment bubbles expanded".into();
+            } else {
+                app.expanded_comments.clear();
+                app.status = "Comment bubbles collapsed".into();
+            }
+        }),
+        Item::ToggleDebugInfo => APP.with(|cell| cell.borrow_mut().toggle_problems()),
+        Item::Build => APP.with(|cell| cell.borrow_mut().run_task(true)),
+        Item::Run => APP.with(|cell| cell.borrow_mut().run_task(false)),
+        Item::StopRun => APP.with(|cell| {
+            let mut app = cell.borrow_mut();
+            if let Some(terminal) = app.terminals.get(app.active_terminal) {
+                let _ = terminal.session.write("\u{3}");
+                app.status = "Interrupt sent to the active task".into();
+            } else {
+                app.status = "No running terminal task".into();
+            }
+        }),
+        Item::StartDebug => APP.with(|cell| cell.borrow_mut().start_or_continue_debugging()),
+        Item::StepOver => APP.with(|cell| {
+            cell.borrow_mut()
+                .step_debugging(dap_core::PendingRequest::Next)
+        }),
+        Item::StepInto => APP.with(|cell| {
+            cell.borrow_mut()
+                .step_debugging(dap_core::PendingRequest::StepIn)
+        }),
+        Item::StepOut => APP.with(|cell| {
+            cell.borrow_mut()
+                .step_debugging(dap_core::PendingRequest::StepOut)
+        }),
+        Item::ToggleBreakpoint => APP.with(|cell| cell.borrow_mut().toggle_breakpoint()),
+        Item::StopDebug => APP.with(|cell| cell.borrow_mut().stop_debugging()),
+        Item::ShowAiPanel => APP.with(|cell| {
+            let mut app = cell.borrow_mut();
+            app.chat_open = !app.chat_open;
+            app.chat_input_focused = app.chat_open;
+            app.status = if app.chat_open {
+                "AI panel opened".into()
+            } else {
+                "AI panel closed".into()
+            };
+        }),
+        Item::Minimize => unsafe {
+            ShowWindow(window, SW_MINIMIZE);
+        },
+        Item::Zoom => unsafe {
+            ShowWindow(window, SW_MAXIMIZE);
+        },
+        Item::NewTerminal => APP.with(|cell| {
+            let mut app = cell.borrow_mut();
+            app.terminal_open = true;
+            app.add_terminal();
+        }),
+        Item::DetachTerminal => {
+            let opened = open_detached_terminal();
+            APP.with(|cell| {
+                cell.borrow_mut().status = if opened {
+                    "Detached terminal opened".into()
+                } else {
+                    "Could not open detached terminal".into()
+                }
+            });
+        }
+        Item::ShowShortcuts => platform::show_message(
+            window,
+            "TC-IDE keyboard shortcuts",
+            "Ctrl+S Save\nCtrl+O Open file\nCtrl+P Search project\nCtrl+` Terminal\nF5 Run / debug\nF9 Breakpoint\nF10 Step over\nF11 Step into",
+        ),
+        Item::ShowAbout => platform::show_message(
+            window,
+            "About TC-IDE",
+            "TC-IDE 0.3.0\nNative semantic workspace\nhttps://github.com/tianchuangya/TC-IDE",
+        ),
+        Item::OpenProjectFolder => APP.with(|cell| {
+            let mut app = cell.borrow_mut();
+            let root = app.project_root.clone();
+            app.status = if platform::open_in_explorer(window, &root) {
+                format!("Opened Explorer at {}", root.display())
+            } else {
+                "Could not open the project folder".into()
+            };
+        }),
+        // These are disabled in the native menu until their Windows state and
+        // layout exist; retaining the arms makes the exhaustiveness explicit.
+        Item::Find
+        | Item::Replace
+        | Item::GoToLine
+        | Item::ToggleProjectTree
+        | Item::ToggleGraph
+        | Item::FoldAll
+        | Item::ToggleFullScreen => {}
+        // Already handled through the legacy command table above.
+        Item::Undo
+        | Item::Redo
+        | Item::OpenFile
+        | Item::OpenFolder
+        | Item::SelectAll
+        | Item::Copy
+        | Item::Paste
+        | Item::FindInProject
+        | Item::ToggleTerminal
+        | Item::LargerCode
+        | Item::SmallerCode
+        | Item::Package
+        | Item::ShowExtensions
+        | Item::ShowSettings => unreachable!(),
+    }
 }
 
 pub(super) fn handle_character(window: Hwnd, value: char) {

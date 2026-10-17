@@ -238,6 +238,19 @@ impl Item {
         Item::OpenProjectFolder,
     ];
 
+    /// Stable position used by native backends to allocate command ids.
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|entry| *entry == self)
+            .unwrap_or(0)
+    }
+
+    /// Recover an item from a native command offset.
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
+
     /// The word shown for the item.
     pub fn label(self) -> &'static str {
         match self {
@@ -442,6 +455,14 @@ mod tests {
                 "{item:?} reports {menu:?}, which does not list it"
             );
         }
+    }
+
+    #[test]
+    fn native_command_offsets_round_trip_every_item() {
+        for item in Item::ALL {
+            assert_eq!(Item::from_index(item.index()), Some(item));
+        }
+        assert_eq!(Item::from_index(Item::ALL.len()), None);
     }
 
     #[test]

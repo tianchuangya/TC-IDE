@@ -78,6 +78,8 @@ const CS_VREDRAW: Uint = 0x0001;
 const CW_USEDEFAULT: i32 = i32::MIN;
 const IDC_ARROW: *const u16 = 32512_usize as *const u16;
 const SW_SHOW: i32 = 5;
+const SW_MINIMIZE: i32 = 6;
+const SW_MAXIMIZE: i32 = 3;
 const WM_CHAR: Uint = 0x0102;
 const WM_CLOSE: Uint = 0x0010;
 const WM_COMMAND: Uint = 0x0111;
@@ -985,7 +987,8 @@ pub fn run() {
         if window.is_null() {
             return;
         }
-        platform::install_native_menu(window);
+        let chinese = APP.with(|cell| cell.borrow().ui_chinese);
+        platform::install_native_menu(window, chinese);
         APP.with(|cell| cell.borrow_mut().restore_session());
         SetTimer(window, 1, 16, ptr::null());
         ShowWindow(window, SW_SHOW);

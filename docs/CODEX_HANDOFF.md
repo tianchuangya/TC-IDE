@@ -201,8 +201,11 @@ Layout::workspace_pixels / graph_pixels / terminal_pixels
 
 ## 6. 下一步（按优先级）
 
-1. **把菜单语义同步到 Windows 后端**。`menu_core` 已就绪，**Windows 目前一处都没接入**
-   （`grep menu_core src/windows_app*` 为空）。这是最明显的不对等。
+1. **把菜单语义同步到 Windows 后端**。已完成：Win32 原生菜单直接由
+   `menu_core::Menu::ALL`/`Item` 生成，8 个顶级菜单与 Linux 共用顺序、中英文和快捷键；
+   保存、构建/运行/停止、调试、扩展/设置/AI、终端及帮助等已连到真实动作。
+   Windows 尚无对应视图状态的 7 项会明确置灰，不再伪装成可点击按钮；
+   `--self-check` 验证每个可用项的 `WM_COMMAND` id 可逆。
 2. **菜单子菜单展开动效**（未做）。
 3. **注释气泡 / 关系线随焦点平滑出现消失**（未做）。
 4. **拖动调整面板比例**时的吸附手感（`Layout` 已有比例，但没有拖动交互）。
