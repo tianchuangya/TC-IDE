@@ -43,6 +43,14 @@ impl WindowsAppState {
             .unwrap_or("TC-IDE 项目")
             .to_string();
         document.root = ".".into();
+        document.language = self.project_language_name().to_string();
+        document.language_version = self.project_version_name().to_string();
+        document.environment = self
+            .project_environments()
+            .get(self.project_environment)
+            .copied()
+            .unwrap_or("system")
+            .to_string();
         document.files = self
             .project_entry_paths
             .iter()

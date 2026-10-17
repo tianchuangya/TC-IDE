@@ -28,6 +28,23 @@ use crate::search_core;
 use crate::session_core;
 use crate::syntax_core;
 use crate::tcide_project;
+
+/// Make panel handles settle on a small set of useful proportions.  The
+/// tolerance is deliberately soft so dragging still feels continuous.
+fn snap_panel_fraction(value: f32, stops: &[f32]) -> f32 {
+    let value = value.clamp(0.0, 1.0);
+    stops
+        .iter()
+        .copied()
+        .min_by(|a, b| {
+            (value - *a)
+                .abs()
+                .partial_cmp(&(value - *b).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .filter(|stop| (value - *stop).abs() <= 0.025)
+        .unwrap_or(value)
+}
 use crate::terminal_core;
 use crate::text_buffer;
 use crate::theme_core;
@@ -12049,15 +12066,19 @@ impl App {
                 let minimum = self.s(260) as f32 / self.width.max(1) as f32;
                 let maximum = 1.0
                     - ((self.width as f32 * 0.17) + self.s(360) as f32) / self.width.max(1) as f32;
-                self.graph_fraction = (1.0 - x as f32 / self.width.max(1) as f32)
+                let raw = (1.0 - x as f32 / self.width.max(1) as f32)
                     .clamp(minimum, maximum.max(minimum));
+                self.graph_fraction = snap_panel_fraction(raw, &[0.24, 0.32, 0.39, 0.48]);
                 self.status_message = self
                     .tr("Resizing call hierarchy", "正在调整调用层级宽度")
                     .into();
             }
             PanelDrag::Terminal => {
-                self.terminal_height =
-                    (self.height - y).clamp(self.s(150), self.height - self.s(150));
+                let raw = (self.height - y).clamp(self.s(150), self.height - self.s(150));
+                let fraction = raw as f32 / self.height.max(1) as f32;
+                self.terminal_height = (snap_panel_fraction(fraction, &[0.2, 0.3, 0.4, 0.5])
+                    * self.height as f32)
+                    .round() as i32;
                 self.status_message = self.tr("Resizing terminal", "正在调整终端高度").into();
             }
             PanelDrag::EditorScrollbar => {

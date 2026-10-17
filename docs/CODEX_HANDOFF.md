@@ -263,3 +263,15 @@ python3 tools/windows_editor_sim.py
 **有任何不确定，先在代码里核实再写。** 本仓库的历史文档里出现过多处过期结论
 （`docs/HANDOFF.md` 第 10 节曾把已交付的文本缓冲/LSP/DAP 列为缺失，后被逐项核对重写）。
 **怀疑文档，去查代码。**
+
+## 11. 本次验收与收尾（2026-10-17）
+
+- 重新执行稳定 Rust 工具链的 `fmt --check`、`test --all-targets`、Clippy（Linux）和编辑器模拟器；当前结果为 **352 + 3 + 4 全部通过**，无 Clippy 警告。
+- 实际导出并目视检查 `menu-hover`、`typing`、`project-document` 三个 Linux 原生渲染帧：中文菜单、代码编辑区、项目树、关系图、终端和 `.tcIDE` 关系文档均可见。
+- Windows AI 请求现在会把当前项目的 `.tcIDE` 文档作为只读上下文附加到请求，最多 12KB，超长按 UTF-8 字符边界截断；聊天历史仍只保存用户原始问题，不保存密钥。
+- Linux 面板拖动增加软吸附点（关系图 24/32/39/48%，终端 20/30/40/50%），拖动仍连续，接近常用比例时会稳定落位。
+- Windows 项目同步会写入 `.tcIDE` 的主语言、版本和环境字段，不再只保存文件/符号关系。
+
+### 当前仍需真实机器完成的验收
+
+Windows 真机上的 DirectWrite/Direct2D、ConPTY、编译器/LSP/调试器和安装包签名，必须在 Windows 主机执行 `docs/REAL-MACHINE-CHECKLIST.md`；Linux 交叉编译只能证明目标代码可编译，不能替代硬件和 SDK 验收。macOS Metal/CoreText 同理。
