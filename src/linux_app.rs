@@ -872,6 +872,10 @@ struct App {
     graph_scope_velocity: f32,
     graph_relation_position: f32,
     graph_relation_velocity: f32,
+    menu_title_position: f32,
+    menu_title_velocity: f32,
+    terminal_tab_position: f32,
+    terminal_tab_velocity: f32,
     graph_content_motion: UiMotion,
     relation_focus_motion: UiMotion,
     collapsed_folders: BTreeSet<String>,
@@ -2302,6 +2306,77 @@ impl App {
         }
     }
 
+    unsafe fn rounded_outline(
+        &self,
+        color: c_ulong,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        radius: i32,
+    ) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let radius = radius.min(width / 2).min(height / 2).max(1);
+        self.set_color(color);
+        XSetLineAttributes(self.display, self.gc, 1, 0, 1, 1);
+        XDrawLine(
+            self.display,
+            self.canvas,
+            self.gc,
+            x + radius,
+            y,
+            x + width - radius,
+            y,
+        );
+        XDrawLine(
+            self.display,
+            self.canvas,
+            self.gc,
+            x + radius,
+            y + height,
+            x + width - radius,
+            y + height,
+        );
+        XDrawLine(
+            self.display,
+            self.canvas,
+            self.gc,
+            x,
+            y + radius,
+            x,
+            y + height - radius,
+        );
+        XDrawLine(
+            self.display,
+            self.canvas,
+            self.gc,
+            x + width,
+            y + radius,
+            x + width,
+            y + height - radius,
+        );
+        for (cx, cy, start) in [
+            (x + radius, y + radius, 90),
+            (x + width - radius, y + radius, 0),
+            (x + radius, y + height - radius, 180),
+            (x + width - radius, y + height - radius, 270),
+        ] {
+            XDrawArc(
+                self.display,
+                self.canvas,
+                self.gc,
+                cx - radius,
+                cy - radius,
+                (radius * 2) as u32,
+                (radius * 2) as u32,
+                start * 64,
+                90 * 64,
+            );
+        }
+    }
+
     unsafe fn floating_panel(&self, x: i32, y: i32, width: i32, height: i32) {
         let radius = self.s(11);
         self.rounded_rect(
@@ -2776,12 +2851,13 @@ impl App {
                 (layout.left, y - s(7)),
             );
         }
-        self.rect(
+        self.rounded_rect(
             self.colors.bright,
             layout.left,
             layout.top,
             layout.width,
             layout.height,
+            s(8),
         );
         if expanded {
             self.line(
@@ -2870,7 +2946,7 @@ impl App {
             (anchor_x, y - s(5)),
             (left - s(7), y - s(5)),
         );
-        self.rect(self.colors.bright, left, top, width, height);
+        self.rounded_rect(self.colors.bright, left, top, width, height, s(7));
         let tail_center = top + height / 2;
         let mut tail = [
             XPoint {
@@ -4190,7 +4266,25 @@ impl App {
         // The bar is drawn from the model, so a menu that is listed is shown
         // and a menu that is shown is clickable. Drawing five titles by hand is
         // how two of them came to be decoration.
-        let bar_left = s(MENU_BAR_LEFT);
+        let focus_menu = self.open_menu.unwrap_or(self.menu_cursor.menu);
+        let title_position = self.menu_title_position.clamp(0.0, 7.0);
+        let lower = title_position.floor() as usize;
+        let upper = title_position.ceil() as usize;
+        let blend = title_position.fract();
+        let lower_rect = self.menu_rect(menu_core::Menu::ALL[lower]);
+        let upper_rect = self.menu_rect(menu_core::Menu::ALL[upper]);
+        let focus_left =
+            (lower_rect.0 as f32 * (1.0 - blend) + upper_rect.0 as f32 * blend).round() as i32;
+        let focus_width =
+            (lower_rect.2 as f32 * (1.0 - blend) + upper_rect.2 as f32 * blend).round() as i32;
+        self.rounded_rect(
+            self.colors.panel,
+            focus_left + s(3),
+            s(7),
+            focus_width - s(6),
+            s(31),
+            s(7),
+        );
         for menu in menu_core::Menu::ALL {
             let (left, top, width, height) = self.menu_rect(menu);
             let open = self.open_menu == Some(menu);
@@ -4201,23 +4295,14 @@ impl App {
                 || (menu == menu_core::Menu::File && self.package_open);
             // The title under the pointer or the keyboard is filled, so which
             // one the arrows would act on is visible before a key is pressed.
-            let highlighted = self.menu_cursor.menu == menu;
-            if highlighted {
-                self.rect(self.colors.panel_2, left, top, width, height);
+            if open {
+                self.line(
+                    self.colors.accent,
+                    2,
+                    (left + s(8), top + height - s(2)),
+                    (left + width - s(8), top + height - s(2)),
+                );
             }
-            self.outline(
-                if open {
-                    self.colors.accent
-                } else if highlighted {
-                    self.colors.bright
-                } else {
-                    self.colors.line
-                },
-                left,
-                top,
-                width,
-                height,
-            );
             let label = if self.ui_chinese {
                 menu.title_chinese()
             } else {
@@ -4225,7 +4310,11 @@ impl App {
             };
             let text_width = self.pango_text_size(label, false).0;
             self.text(
-                self.colors.text,
+                if focus_menu == menu {
+                    self.colors.bright
+                } else {
+                    self.colors.muted
+                },
                 left + (width - text_width) / 2,
                 top + s(19),
                 label,
@@ -4235,14 +4324,13 @@ impl App {
         let bar_right = self.menu_rect(menu_core::Menu::Help).0
             + self.menu_rect(menu_core::Menu::Help).2
             + s(24);
-        let _ = bar_left;
         let path = format!(
             "{}  /  {}",
             self.project_name, self.files[self.selected_file].name
         );
         let path_x = self.width / 2 - self.pango_text_size(&path, false).0 / 2;
         self.text(self.colors.muted, path_x.max(bar_right), s(29), &path);
-        self.outline(
+        self.rounded_outline(
             if self.settings_open {
                 self.colors.accent
             } else {
@@ -4252,6 +4340,7 @@ impl App {
             s(10),
             s(120),
             s(27),
+            s(7),
         );
         self.text(
             self.colors.text,
@@ -4259,7 +4348,7 @@ impl App {
             s(29),
             self.tr("Settings", "设置"),
         );
-        self.outline(
+        self.rounded_outline(
             if self.extensions_open {
                 self.colors.accent
             } else {
@@ -4269,6 +4358,7 @@ impl App {
             s(10),
             s(126),
             s(27),
+            s(7),
         );
         self.text(
             self.colors.text,
@@ -4276,7 +4366,7 @@ impl App {
             s(29),
             self.tr("Extensions", "扩展"),
         );
-        self.outline(
+        self.rounded_outline(
             if self.package_open {
                 self.colors.accent
             } else {
@@ -4286,6 +4376,7 @@ impl App {
             s(10),
             s(118),
             s(27),
+            s(7),
         );
         self.text(
             self.colors.text,
@@ -4404,7 +4495,14 @@ impl App {
                     break;
                 }
                 if index == self.selected_file {
-                    self.rect(self.colors.panel_2, s(7), s(y - 21), width - s(14), s(27));
+                    self.rounded_rect(
+                        self.colors.panel_2,
+                        s(7),
+                        s(y - 21),
+                        width - s(14),
+                        s(27),
+                        s(7),
+                    );
                 }
                 let color = if index == self.selected_file {
                     self.colors.bright
@@ -4977,7 +5075,7 @@ impl App {
             let selected = index == self.selected_file;
             let shift = if selected { tab_shift } else { 0 };
             if selected {
-                self.rect(self.colors.panel, tab_x + shift, s(49), width, s(32));
+                self.rounded_rect(self.colors.panel, tab_x + shift, s(49), width, s(32), s(7));
                 self.line(
                     self.colors.accent,
                     2,
@@ -4987,7 +5085,7 @@ impl App {
             } else if self.tab_close_hovered == Some(index) {
                 // A tab the pointer is on lifts slightly, so it is clear which
                 // one the close button belongs to.
-                self.rect(self.colors.panel_2, tab_x, s(51), width, s(30));
+                self.rounded_rect(self.colors.panel_2, tab_x, s(51), width, s(30), s(7));
             }
             self.text(
                 if selected {
@@ -5014,12 +5112,12 @@ impl App {
             );
         }
         // The new-tab button sits after the last tab.
-        self.outline(self.colors.line, new_tab_x, s(52), s(46), s(26));
+        self.rounded_outline(self.colors.line, new_tab_x, s(52), s(46), s(26), s(7));
         self.text(self.colors.muted, new_tab_x + s(18), s(70), "+");
         let debug_x = left + s(174);
         for (index, label) in ["●  BP", "▶  F5", "→  F10", "■  STOP"].iter().enumerate() {
             let bx = debug_x + index as i32 * s(78);
-            self.outline(self.colors.line, bx, s(52), s(72), s(25));
+            self.rounded_outline(self.colors.line, bx, s(52), s(72), s(25), s(7));
             self.text(
                 if (index == 1 && self.debug_session.is_some())
                     || (index == 0
@@ -5503,6 +5601,18 @@ impl App {
         }
         let graph = self.graph();
         let content_offset = self.overlay_offset(self.graph_content_motion);
+        // Keep the field sparse: it is redrawn natively and must stay cheap
+        // enough that a large monitor does not turn decoration into CPU load.
+        let dot_step = s(32).max(12);
+        let mut dot_y = y + s(86);
+        while dot_y < y + h - s(28) {
+            let mut dot_x = x + s(12);
+            while dot_x < x + w - s(12) {
+                self.circle(self.colors.line, self.colors.line, dot_x, dot_y, 1);
+                dot_x += dot_step;
+            }
+            dot_y += dot_step;
+        }
         let focus_label = self
             .hovered_symbol
             .as_ref()
@@ -5553,8 +5663,8 @@ impl App {
             (scope_x, rail_y - s(5)),
             (scope_x, rail_y + s(5)),
         );
-        self.rect(self.colors.bg, x + s(14), y + s(43), w - s(28), s(30));
-        self.outline(
+        self.rounded_rect(self.colors.bg, x + s(14), y + s(43), w - s(28), s(30), s(7));
+        self.rounded_outline(
             if self.graph_search_focused {
                 self.colors.accent
             } else {
@@ -5564,6 +5674,7 @@ impl App {
             y + s(43),
             w - s(28),
             s(30),
+            s(7),
         );
         self.text(
             self.colors.muted,
@@ -5611,9 +5722,11 @@ impl App {
             let card_x = nx + s(12);
             let card_w = (self.width - card_x - s(16)).max(s(120));
             if active {
-                self.rect(self.colors.project, card_x, ny - s(19), card_w, s(39));
+                self.rounded_rect(self.colors.project, card_x, ny - s(19), card_w, s(39), s(7));
+            } else {
+                self.rounded_rect(self.colors.panel_2, card_x, ny - s(19), card_w, s(39), s(7));
             }
-            self.outline(
+            self.rounded_outline(
                 if active {
                     self.colors.accent
                 } else {
@@ -5623,6 +5736,7 @@ impl App {
                 ny - s(19),
                 card_w,
                 s(39),
+                s(7),
             );
             self.rect(
                 if related {
@@ -5953,31 +6067,53 @@ impl App {
                 (list_x, top + s(30)),
                 (list_x, self.height),
             );
-            self.outline(self.colors.line, list_x + s(10), top + s(38), s(76), s(27));
+            self.rounded_outline(
+                self.colors.line,
+                list_x + s(10),
+                top + s(38),
+                s(76),
+                s(27),
+                s(7),
+            );
             self.text(
                 self.colors.text,
                 list_x + s(22),
                 top + s(58),
                 self.tr("+ NEW", "+ 新建"),
             );
-            self.outline(self.colors.line, list_x + s(94), top + s(38), s(84), s(27));
+            self.rounded_outline(
+                self.colors.line,
+                list_x + s(94),
+                top + s(38),
+                s(84),
+                s(27),
+                s(7),
+            );
             self.text(
                 self.colors.text,
                 list_x + s(105),
                 top + s(58),
                 self.tr("POP OUT", "弹出"),
             );
+            let selected_y = top
+                + s(79)
+                + (self.terminal_tab_position.clamp(0.0, 3.0) * s(34) as f32).round() as i32;
+            self.rounded_rect(
+                self.colors.project,
+                list_x + s(10),
+                selected_y - s(22),
+                s(168),
+                s(29),
+                s(7),
+            );
+            self.line(
+                self.colors.accent,
+                2,
+                (list_x + s(10), selected_y + s(7)),
+                (list_x + s(178), selected_y + s(7)),
+            );
             for (index, _terminal) in self.terminals.iter().take(4).enumerate() {
                 let row = top + s(79 + index as i32 * 34);
-                if index == self.terminal_active {
-                    self.rect(
-                        self.colors.project,
-                        list_x + s(10),
-                        row - s(22),
-                        s(168),
-                        s(29),
-                    );
-                }
                 self.text(
                     if index == self.terminal_active {
                         self.colors.bright
@@ -7651,6 +7787,44 @@ impl App {
         self.update_hover();
     }
 
+    fn motion_is_running(motion: UiMotion, target: f32) -> bool {
+        (motion.value - target).abs() > 0.001 || motion.velocity.abs() > 0.01
+    }
+
+    /// Native drawing is intentionally demand-sensitive.  Springs keep the
+    /// 30 Hz animation cadence while a settled editor falls back to 10 Hz for
+    /// caret/terminal polling.  This avoids spending a core repainting an
+    /// unchanged wallpaper and is especially important on high-DPI screens.
+    fn has_active_motion(&self) -> bool {
+        let target = |shown: bool| if shown { 1.0 } else { 0.0 };
+        Self::motion_is_running(self.menu_dropdown_motion, target(self.open_menu.is_some()))
+            || Self::motion_is_running(
+                self.new_menu_motion,
+                target(self.open_menu == Some(menu_core::Menu::File)),
+            )
+            || Self::motion_is_running(self.file_switch_motion, 1.0)
+            || Self::motion_is_running(self.settings_motion, target(self.settings_open))
+            || Self::motion_is_running(self.package_motion, target(self.package_open))
+            || Self::motion_is_running(self.extensions_motion, target(self.extensions_open))
+            || Self::motion_is_running(self.create_motion, target(self.create_kind.is_some()))
+            || Self::motion_is_running(self.terminal_motion, target(self.terminal_open))
+            || Self::motion_is_running(self.graph_motion, target(self.graph_visible))
+            || Self::motion_is_running(self.graph_content_motion, 1.0)
+            || Self::motion_is_running(self.relation_focus_motion, target(self.hovered_from_code))
+            || self.project_tree_velocity.abs() > 0.01
+            || self
+                .folder_tree_motion
+                .values()
+                .any(|(_, velocity)| velocity.abs() > 0.01)
+            || self.graph_scope_velocity.abs() > 0.01
+            || self.graph_relation_velocity.abs() > 0.01
+            || self.menu_title_velocity.abs() > 0.01
+            || self.terminal_tab_velocity.abs() > 0.01
+            || !self.edit_pulses.is_empty()
+            || self.build_started.is_some()
+            || self.downloading.is_some()
+    }
+
     fn update_background(&mut self) {
         self.poll_debug_session();
         let now = Instant::now();
@@ -7729,6 +7903,18 @@ impl App {
             self.graph_relation.index() as f32,
             dt,
         );
+        Self::spring_step(
+            &mut self.menu_title_position,
+            &mut self.menu_title_velocity,
+            self.open_menu.unwrap_or(self.menu_cursor.menu).index() as f32,
+            dt,
+        );
+        Self::spring_step(
+            &mut self.terminal_tab_position,
+            &mut self.terminal_tab_velocity,
+            self.terminal_active.min(3) as f32,
+            dt,
+        );
         Self::step_ui_motion(
             &mut self.relation_focus_motion,
             self.hovered_from_code,
@@ -7789,6 +7975,31 @@ impl App {
             self.terminal_motion = UiMotion::new(0.0);
             self.terminal_motion.velocity = 0.9;
         }
+    }
+
+    /// Exported frames are design snapshots rather than animation frames.
+    /// Put every follow indicator at its semantic target so a scene such as
+    /// `menu-hover` never captures the old tab while the new menu is open.
+    fn settle_snapshot_motion(&mut self) {
+        self.file_switch_motion = UiMotion::new(1.0);
+        self.menu_dropdown_motion = UiMotion::new(if self.open_menu.is_some() { 1.0 } else { 0.0 });
+        self.new_menu_motion = UiMotion::new(if self.open_menu == Some(menu_core::Menu::File) {
+            1.0
+        } else {
+            0.0
+        });
+        self.graph_motion = UiMotion::new(if self.graph_visible { 1.0 } else { 0.0 });
+        self.terminal_motion = UiMotion::new(if self.terminal_open { 1.0 } else { 0.0 });
+        self.settings_motion = UiMotion::new(if self.settings_open { 1.0 } else { 0.0 });
+        self.package_motion = UiMotion::new(if self.package_open { 1.0 } else { 0.0 });
+        self.extensions_motion = UiMotion::new(if self.extensions_open { 1.0 } else { 0.0 });
+        self.menu_title_position = self.open_menu.unwrap_or(self.menu_cursor.menu).index() as f32;
+        self.terminal_tab_position = self.terminal_active.min(3) as f32;
+        self.graph_relation_position = self.graph_relation.index() as f32;
+        self.graph_scope_position = self.graph_scope_index() as f32
+            / self.graph_scope_labels().len().saturating_sub(1).max(1) as f32;
+        self.graph_content_motion = UiMotion::new(1.0);
+        self.relation_focus_motion = UiMotion::new(if self.hovered_from_code { 1.0 } else { 0.0 });
     }
 
     fn finish_build_preview(&mut self) {
@@ -9301,12 +9512,13 @@ impl App {
             // The item the keyboard is on is filled, so the arrows can be used
             // without a pointer.
             if index == self.menu_cursor.item {
-                self.rect(
+                self.rounded_rect(
                     self.colors.project,
                     left + s(3),
                     y - s(14),
                     width - s(6),
                     s(20),
+                    s(6),
                 );
             }
             let label = if self.ui_chinese {
@@ -13664,6 +13876,10 @@ pub fn run() {
             graph_scope_velocity: 0.0,
             graph_relation_position: 0.0,
             graph_relation_velocity: 0.0,
+            menu_title_position: 0.0,
+            menu_title_velocity: 0.0,
+            terminal_tab_position: 0.0,
+            terminal_tab_velocity: 0.0,
             graph_content_motion: UiMotion::new(1.0),
             relation_focus_motion: UiMotion::new(0.0),
             collapsed_folders: BTreeSet::new(),
@@ -13779,13 +13995,15 @@ pub fn run() {
         // Direct text and the relation graph are expensive to repaint.  A
         // 30 Hz cadence still leaves motion smooth, while preventing the
         // render thread from monopolising a CPU core during idle animation.
-        let frame = Duration::from_micros(33_333);
+        let animated_frame = Duration::from_micros(33_333);
+        let idle_frame = Duration::from_millis(100);
         if let Some(path) = frame_export {
             if let Some(scene) = frame_scene() {
                 if !app.prime_scene(&scene) {
                     eprintln!("TC-IDE: unknown render scene {scene}, drawing the editor");
                 }
             }
+            app.settle_snapshot_motion();
             app.refresh_index();
             app.poll_ai_session();
             app.refresh_matched_brackets();
@@ -13874,6 +14092,11 @@ pub fn run() {
             app.update_background();
             app.draw();
             let used = began.elapsed();
+            let frame = if app.has_active_motion() {
+                animated_frame
+            } else {
+                idle_frame
+            };
             if used < frame {
                 thread::sleep(frame - used);
             }
