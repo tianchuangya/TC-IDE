@@ -456,9 +456,6 @@ const LEFT_KEYSYM: c_ulong = 0xff51;
 const UP_KEYSYM: c_ulong = 0xff52;
 const RIGHT_KEYSYM: c_ulong = 0xff53;
 const DOWN_KEYSYM: c_ulong = 0xff54;
-/// Where the menu bar starts, in layout units.
-const MENU_BAR_LEFT: i32 = 112;
-
 const F5_KEYSYM: c_ulong = 0xffc2;
 /// F3, which steps to the next match of a search.
 const F3_KEYSYM: c_ulong = 0xffc0;
@@ -876,6 +873,9 @@ struct App {
     menu_title_velocity: f32,
     terminal_tab_position: f32,
     terminal_tab_velocity: f32,
+    activity_section: usize,
+    activity_position: f32,
+    activity_velocity: f32,
     graph_content_motion: UiMotion,
     relation_focus_motion: UiMotion,
     collapsed_folders: BTreeSet<String>,
@@ -1045,8 +1045,23 @@ impl App {
     }
 
     fn editor_visible_rows(&self) -> usize {
-        ((self.terminal_top() - self.s(119) - self.s(12)) / self.code_line_step().max(1)).max(1)
-            as usize
+        ((self.terminal_top() - self.code_baseline() - self.s(12)) / self.code_line_step().max(1))
+            .max(1) as usize
+    }
+
+    /// The approved shell has a 48 px identity bar followed by its own 30 px
+    /// menu row.  All renderer and hit-test geometry derives from these
+    /// anchors so the old single-toolbar layout cannot leak back in.
+    fn shell_content_top(&self) -> i32 {
+        self.s(78)
+    }
+
+    fn editor_tabs_bottom(&self) -> i32 {
+        self.shell_content_top() + self.s(41)
+    }
+
+    fn code_baseline(&self) -> i32 {
+        self.editor_tabs_bottom() + self.s(35)
     }
 
     fn editor_line_indices(&self) -> Vec<usize> {
@@ -1100,6 +1115,10 @@ impl App {
             (self.width - workspace - self.s(360)) as f32,
         );
         self.width - (base * self.graph_motion.value.clamp(0.0, 1.0)).round() as i32
+    }
+
+    fn activity_rail_width(&self) -> i32 {
+        self.s(44)
     }
 
     fn terminal_top(&self) -> i32 {
@@ -1921,7 +1940,7 @@ impl App {
     fn settings_origin(&self) -> (i32, i32) {
         (
             self.width - self.s(410),
-            self.s(43) + self.overlay_offset(self.settings_motion),
+            self.shell_content_top() + self.overlay_offset(self.settings_motion),
         )
     }
 
@@ -2425,7 +2444,12 @@ impl App {
         let panel_h =
             s(28) + ((expanded - s(28)) as f32 * self.terminal_motion.value.clamp(0.0, 1.0)) as i32;
         let top = self.height - panel_h;
-        (s(12), top + s(4), s(20), s(20))
+        (
+            (self.layout.workspace_pixels(self.width as f32)) as i32 + s(12),
+            top + s(4),
+            s(20),
+            s(20),
+        )
     }
 
     /// Whether the pointer is over the terminal's disclosure button.
@@ -2437,7 +2461,12 @@ impl App {
     /// The rectangle of the call hierarchy panel's disclosure button.
     fn graph_toggle_rect(&self) -> (i32, i32, i32, i32) {
         let s = |v: i32| (v as f32 * self.scale()).round() as i32;
-        (self.graph_left() + s(10), s(58), s(20), s(20))
+        (
+            self.graph_left() + s(10),
+            self.shell_content_top() + s(12),
+            s(20),
+            s(20),
+        )
     }
 
     /// Whether the pointer is over the call hierarchy's disclosure button.
@@ -3047,7 +3076,7 @@ impl App {
     fn code_symbol_bounds(&self, line: usize, start: usize, end: usize) -> (i32, i32, i32, i32) {
         let left = (self.layout.workspace_pixels(self.width as f32)) as i32;
         let row = self.editor_screen_row(line).unwrap_or(0);
-        let y = self.s(119) + row as i32 * self.code_line_step();
+        let y = self.code_baseline() + row as i32 * self.code_line_step();
         let value = &self.files[self.selected_file].lines[line];
         let x = left + self.s(52) + self.code_text_width(&value[..start]);
         let width = self.code_text_width(&value[start..end]);
@@ -3099,7 +3128,8 @@ impl App {
             return None;
         }
         let cell = s(8).max(1);
-        let column = ((x - s(24)).max(0) / cell) as usize;
+        let left = (self.layout.workspace_pixels(self.width as f32)) as i32;
+        let column = ((x - left - s(24)).max(0) / cell) as usize;
         // Row zero of the panel is the oldest of the visible lines.
         let line = self.terminal_lines().len().saturating_sub(rows) + row;
         Some(terminal_core::TerminalPoint { line, column })
@@ -3607,9 +3637,9 @@ impl App {
         let left = self.graph_left();
         (
             left,
-            self.s(82),
+            self.editor_tabs_bottom() - self.s(2),
             self.width - left,
-            self.height - self.s(112),
+            self.height - self.editor_tabs_bottom() - self.s(28),
         )
     }
 
@@ -3901,7 +3931,7 @@ impl App {
     fn file_menu_row_y(&self, index: usize) -> i32 {
         let s = |v: i32| (v as f32 * self.scale()).round() as i32;
         let offset = self.overlay_offset(self.new_menu_motion);
-        s(43) + offset + s(24 + index as i32 * FILE_MENU_ROW)
+        self.shell_content_top() + offset + s(24 + index as i32 * FILE_MENU_ROW)
     }
 
     /// Restore the previous session: project first, then its documents.
@@ -4239,8 +4269,22 @@ impl App {
 
     unsafe fn draw_header(&self) {
         let s = |v| self.s(v);
-        let header = s(46);
-        self.rect(self.colors.panel_2, 0, 0, self.width, header);
+        let identity_height = s(48);
+        let header = self.shell_content_top();
+        self.rect(self.colors.panel_2, 0, 0, self.width, identity_height);
+        self.rect(
+            self.colors.bg,
+            0,
+            identity_height,
+            self.width,
+            header - identity_height,
+        );
+        self.line(
+            self.colors.line,
+            1,
+            (0, identity_height - 1),
+            (self.width, identity_height - 1),
+        );
         self.line(
             self.colors.line,
             1,
@@ -4250,10 +4294,10 @@ impl App {
         if !self.logo_surface.is_null() {
             let image_w = cairo_image_surface_get_width(self.logo_surface).max(1) as f64;
             let image_h = cairo_image_surface_get_height(self.logo_surface).max(1) as f64;
-            let target_h = s(54) as f64;
+            let target_h = s(48) as f64;
             let scale = target_h / image_h;
             cairo_save(self.cairo);
-            cairo_translate(self.cairo, s(7) as f64, -s(4) as f64);
+            cairo_translate(self.cairo, s(8) as f64, 0.0);
             cairo_scale(self.cairo, scale, scale);
             cairo_set_source_surface(self.cairo, self.logo_surface, 0.0, 0.0);
             cairo_paint_with_alpha(self.cairo, 1.0);
@@ -4263,7 +4307,9 @@ impl App {
             self.text(self.colors.bright, s(15), s(29), "TC");
             self.text(self.colors.accent, s(42), s(29), "IDE");
         }
-        // The bar is drawn from the model, so a menu that is listed is shown
+        self.text(self.colors.bright, s(57), s(30), "TC-IDE");
+        // The menu is a quiet independent row; its focus glides between
+        // labels instead of turning the entire top bar into old-style buttons.
         // and a menu that is shown is clickable. Drawing five titles by hand is
         // how two of them came to be decoration.
         let focus_menu = self.open_menu.unwrap_or(self.menu_cursor.menu);
@@ -4280,10 +4326,10 @@ impl App {
         self.rounded_rect(
             self.colors.panel,
             focus_left + s(3),
-            s(7),
+            s(51),
             focus_width - s(6),
-            s(31),
-            s(7),
+            s(24),
+            s(5),
         );
         for menu in menu_core::Menu::ALL {
             let (left, top, width, height) = self.menu_rect(menu);
@@ -4321,111 +4367,158 @@ impl App {
             );
         }
         // The project path sits after the bar, so it never overlaps a title.
-        let bar_right = self.menu_rect(menu_core::Menu::Help).0
-            + self.menu_rect(menu_core::Menu::Help).2
-            + s(24);
         let path = format!(
             "{}  /  {}",
             self.project_name, self.files[self.selected_file].name
         );
         let path_x = self.width / 2 - self.pango_text_size(&path, false).0 / 2;
-        self.text(self.colors.muted, path_x.max(bar_right), s(29), &path);
-        self.rounded_outline(
+        self.text(self.colors.muted, path_x.max(s(150)), s(30), &path);
+        self.text(
             if self.settings_open {
                 self.colors.accent
             } else {
-                self.colors.line
+                self.colors.muted
             },
-            self.width - s(410),
-            s(10),
-            s(120),
-            s(27),
-            s(7),
-        );
-        self.text(
-            self.colors.text,
-            self.width - s(394),
-            s(29),
+            self.width - s(270),
+            s(30),
             self.tr("Settings", "设置"),
         );
-        self.rounded_outline(
+        self.text(
             if self.extensions_open {
                 self.colors.accent
             } else {
-                self.colors.line
+                self.colors.muted
             },
-            self.width - s(275),
-            s(10),
-            s(126),
-            s(27),
-            s(7),
-        );
-        self.text(
-            self.colors.text,
-            self.width - s(260),
-            s(29),
+            self.width - s(180),
+            s(30),
             self.tr("Extensions", "扩展"),
         );
-        self.rounded_outline(
+        self.text(
             if self.package_open {
                 self.colors.accent
             } else {
-                self.colors.line
+                self.colors.muted
             },
-            self.width - s(136),
-            s(10),
-            s(118),
-            s(27),
-            s(7),
-        );
-        self.text(
-            self.colors.text,
-            self.width - s(119),
-            s(29),
+            self.width - s(88),
+            s(30),
             self.tr("Package", "打包"),
         );
-        self.chevron(self.width - s(39), s(24), self.package_open);
+        self.chevron(self.width - s(27), s(24), self.package_open);
     }
 
     unsafe fn draw_workspace(&self) {
         let s = |v| self.s(v);
         let width = (self.layout.workspace_pixels(self.width as f32)) as i32;
-        self.rect(self.colors.panel, 0, s(46), width, self.height - s(70));
+        let rail = self.activity_rail_width();
+        let top = self.shell_content_top();
+        self.rect(self.colors.panel_2, 0, top, rail, self.height - top - s(24));
+        self.rect(
+            self.colors.panel,
+            rail,
+            top,
+            width - rail,
+            self.height - top - s(24),
+        );
         self.line(
             self.colors.line,
             1,
-            (width, s(46)),
+            (rail, top),
+            (rail, self.height - s(24)),
+        );
+        self.line(
+            self.colors.line,
+            1,
+            (width, top),
             (width, self.height - s(24)),
         );
-        self.rect(self.colors.bg, s(10), s(58), width - s(20), s(34));
-        self.outline(
+        let activity_top =
+            top + s(11) + (self.activity_position.clamp(0.0, 3.0) * s(38) as f32).round() as i32;
+        self.rounded_rect(self.colors.panel, s(7), activity_top, s(30), s(30), s(8));
+        self.line(
+            self.colors.accent,
+            2,
+            (s(1), activity_top + s(8)),
+            (s(1), activity_top + s(22)),
+        );
+        for index in 0..4 {
+            let item_top = top + s(11 + index as i32 * 38);
+            let cx = rail / 2;
+            let cy = item_top + s(15);
+            let color = if index == self.activity_section {
+                self.colors.accent
+            } else {
+                self.colors.muted
+            };
+            match index {
+                0 => {
+                    self.rounded_outline(color, cx - s(7), cy - s(7), s(14), s(14), s(3));
+                    self.line(color, 1, (cx - s(3), cy - s(9)), (cx + s(5), cy - s(9)));
+                }
+                1 => {
+                    self.circle(self.colors.panel_2, color, cx - s(2), cy - s(2), s(5));
+                    self.line(color, 2, (cx + s(2), cy + s(2)), (cx + s(7), cy + s(7)));
+                }
+                2 => {
+                    self.line(color, 1, (cx - s(5), cy - s(6)), (cx - s(5), cy + s(6)));
+                    self.line(color, 1, (cx - s(5), cy), (cx + s(6), cy));
+                    self.circle(self.colors.panel_2, color, cx - s(5), cy - s(7), s(2));
+                    self.circle(self.colors.panel_2, color, cx + s(6), cy, s(2));
+                    self.circle(self.colors.panel_2, color, cx - s(5), cy + s(7), s(2));
+                }
+                _ => {
+                    self.line(color, 1, (cx, cy - s(8)), (cx + s(8), cy));
+                    self.line(color, 1, (cx + s(8), cy), (cx, cy + s(8)));
+                    self.line(color, 1, (cx, cy + s(8)), (cx - s(8), cy));
+                    self.line(color, 1, (cx - s(8), cy), (cx, cy - s(8)));
+                }
+            }
+        }
+        self.rect(
+            self.colors.bg,
+            rail + s(10),
+            top + s(12),
+            width - rail - s(20),
+            s(34),
+        );
+        self.rounded_outline(
             if self.workspace_search_focused {
                 self.colors.accent
             } else {
                 self.colors.line
             },
-            s(10),
-            s(58),
-            width - s(20),
+            rail + s(10),
+            top + s(12),
+            width - rail - s(20),
             s(34),
+            s(7),
         );
         self.text(
             self.colors.muted,
-            s(22),
-            s(81),
+            rail + s(22),
+            top + s(35),
             if self.workspace_search.is_empty() {
                 self.tr("Search files", "搜索文件")
             } else {
                 &self.workspace_search
             },
         );
-        self.text(self.colors.muted, s(14), s(116), self.tr("PROJECT", "项目"));
-        self.text(self.colors.bright, s(34), s(145), &self.project_name);
-        self.chevron_progress(s(17), s(140), self.project_tree_amount);
+        self.text(
+            self.colors.muted,
+            rail + s(14),
+            top + s(70),
+            self.tr("EXPLORER", "资源管理器"),
+        );
+        self.text(
+            self.colors.bright,
+            rail + s(34),
+            top + s(99),
+            &self.project_name,
+        );
+        self.chevron_progress(rail + s(17), top + s(94), self.project_tree_amount);
         self.text(
             self.colors.muted,
             width - s(72),
-            s(145),
+            top + s(99),
             if self.project_tree_expanded {
                 self.tr("HIDE", "收起")
             } else {
@@ -4438,7 +4531,7 @@ impl App {
             1.0
         };
         if root_amount > 0.01 || !self.workspace_search.is_empty() {
-            let mut row_y = 148.0_f32;
+            let mut row_y = 180.0_f32;
             for folder in &self.folders {
                 if !self.workspace_search.is_empty()
                     && !folder
@@ -4470,9 +4563,18 @@ impl App {
                     .map(|motion| motion.0)
                     .unwrap_or(if expanded { 1.0 } else { 0.0 });
                 let depth = folder.matches('/').count() as i32;
-                self.chevron_progress(s(18 + depth * 14), s(row_y as i32 - 5), arrow_progress);
+                self.chevron_progress(
+                    rail + s(18 + depth * 14),
+                    s(row_y as i32 - 5),
+                    arrow_progress,
+                );
                 let label = folder.rsplit('/').next().unwrap_or(folder);
-                self.text(self.colors.text, s(34 + depth * 14), s(row_y as i32), label);
+                self.text(
+                    self.colors.text,
+                    rail + s(34 + depth * 14),
+                    s(row_y as i32),
+                    label,
+                );
             }
             for (index, file) in self.files.iter().enumerate().filter(|(_, file)| {
                 self.workspace_search.is_empty()
@@ -4497,9 +4599,9 @@ impl App {
                 if index == self.selected_file {
                     self.rounded_rect(
                         self.colors.panel_2,
-                        s(7),
+                        rail + s(7),
                         s(y - 21),
-                        width - s(14),
+                        width - rail - s(14),
                         s(27),
                         s(7),
                     );
@@ -4512,8 +4614,43 @@ impl App {
                 let path = self.file_tree_path(file);
                 let depth = path.matches('/').count() as i32;
                 let label = path.rsplit('/').next().unwrap_or(path.as_str());
-                self.text(color, s(45 + depth * 14), s(y), label);
+                self.circle(color, color, rail + s(34 + depth * 14), s(y - 4), s(2));
+                self.text(color, rail + s(45 + depth * 14), s(y), label);
             }
+        }
+        // A compact project card fills the otherwise empty tail of the
+        // explorer and gives the same at-a-glance context as the preview.
+        let card_y = self.terminal_top() - s(93);
+        if card_y > top + s(230) {
+            self.rounded_rect(
+                self.colors.panel_2,
+                rail + s(10),
+                card_y,
+                width - rail - s(20),
+                s(74),
+                s(8),
+            );
+            self.rounded_outline(
+                self.colors.line,
+                rail + s(10),
+                card_y,
+                width - rail - s(20),
+                s(74),
+                s(8),
+            );
+            self.text(
+                self.colors.accent,
+                rail + s(22),
+                card_y + s(23),
+                self.tr("CURRENT PROJECT", "当前项目"),
+            );
+            let language = self.language_for_file(&self.files[self.selected_file].name);
+            self.text(
+                self.colors.muted,
+                rail + s(22),
+                card_y + s(48),
+                &format!("{}  ·  {}", language, self.tr("Saved", "已保存")),
+            );
         }
     }
 
@@ -4733,7 +4870,7 @@ impl App {
     unsafe fn draw_settings_menu(&self) {
         let s = |v| self.s(v);
         let x = self.width - s(410);
-        let y = s(43) + self.overlay_offset(self.settings_motion);
+        let y = self.shell_content_top() + self.overlay_offset(self.settings_motion);
         let w = s(390);
         let h = s(830);
         self.floating_panel(x, y, w, h);
@@ -4975,8 +5112,8 @@ impl App {
 
     unsafe fn draw_new_menu(&self) {
         let s = |v| self.s(v);
-        let x = s(112);
-        let y = s(43) + self.overlay_offset(self.new_menu_motion);
+        let x = self.menu_rect(menu_core::Menu::File).0;
+        let y = self.shell_content_top() + self.overlay_offset(self.new_menu_motion);
         let w = s(300);
         let rows = self.file_menu_rows();
         let height = s(FILE_MENU_ROW * rows.len() as i32 + 12);
@@ -5043,22 +5180,46 @@ impl App {
         let s = |v| self.s(v);
         let left = (self.layout.workspace_pixels(self.width as f32)) as i32;
         let right = self.graph_left();
+        let top = self.shell_content_top();
+        let tabs_bottom = self.editor_tabs_bottom();
         self.rect(
             self.colors.bg,
             left + 1,
-            s(46),
+            top,
             right - left - 1,
-            self.height - s(70),
+            self.height - top - s(24),
         );
-        self.draw_background_region(left + 1, s(84), right - left - 1, self.height - s(154));
-        self.rect(
-            self.colors.panel_2,
+        self.draw_background_region(
             left + 1,
-            s(46),
+            tabs_bottom,
             right - left - 1,
-            s(38),
+            self.height - tabs_bottom - s(70),
         );
-        self.line(self.colors.line, 1, (left, s(84)), (right, s(84)));
+        if !self.background_surface.is_null() && self.background_opacity > 0.0 {
+            cairo_save(self.cairo);
+            cairo_rectangle(
+                self.cairo,
+                (left + 1) as f64,
+                tabs_bottom as f64,
+                (right - left - 1).max(1) as f64,
+                (self.height - tabs_bottom - s(70)).max(1) as f64,
+            );
+            cairo_clip(self.cairo);
+            if self.light_theme {
+                cairo_set_source_rgba(self.cairo, 1.0, 1.0, 1.0, 0.18);
+            } else {
+                cairo_set_source_rgba(self.cairo, 0.035, 0.045, 0.055, 0.34);
+            }
+            cairo_paint(self.cairo);
+            cairo_restore(self.cairo);
+        }
+        self.rect(self.colors.panel_2, left + 1, top, right - left - 1, s(38));
+        self.line(
+            self.colors.line,
+            1,
+            (left, tabs_bottom),
+            (right, tabs_bottom),
+        );
         // File tabs mirror the overall preview: switching files keeps the
         // editor surface stable while the active tab receives a small accent
         // lift instead of replacing the title in place.
@@ -5075,17 +5236,24 @@ impl App {
             let selected = index == self.selected_file;
             let shift = if selected { tab_shift } else { 0 };
             if selected {
-                self.rounded_rect(self.colors.panel, tab_x + shift, s(49), width, s(32), s(7));
+                self.rounded_rect(
+                    self.colors.panel,
+                    tab_x + shift,
+                    top + s(3),
+                    width,
+                    s(35),
+                    s(7),
+                );
                 self.line(
                     self.colors.accent,
                     2,
-                    (tab_x + shift, s(82)),
-                    (tab_x + width + shift, s(82)),
+                    (tab_x + shift, tabs_bottom - s(2)),
+                    (tab_x + width + shift, tabs_bottom - s(2)),
                 );
             } else if self.tab_close_hovered == Some(index) {
                 // A tab the pointer is on lifts slightly, so it is clear which
                 // one the close button belongs to.
-                self.rounded_rect(self.colors.panel_2, tab_x, s(51), width, s(30), s(7));
+                self.rounded_rect(self.colors.panel_2, tab_x, top + s(5), width, s(32), s(7));
             }
             self.text(
                 if selected {
@@ -5094,7 +5262,7 @@ impl App {
                     self.colors.muted
                 },
                 tab_x + s(12) + shift,
-                s(70),
+                top + s(24),
                 &file.name,
             );
             // The close button, at the tab's trailing edge.
@@ -5107,17 +5275,17 @@ impl App {
                     self.colors.muted
                 },
                 close_x + s(4),
-                s(70),
+                top + s(24),
                 "×",
             );
         }
         // The new-tab button sits after the last tab.
-        self.rounded_outline(self.colors.line, new_tab_x, s(52), s(46), s(26), s(7));
-        self.text(self.colors.muted, new_tab_x + s(18), s(70), "+");
+        self.rounded_outline(self.colors.line, new_tab_x, top + s(6), s(46), s(27), s(7));
+        self.text(self.colors.muted, new_tab_x + s(18), top + s(24), "+");
         let debug_x = left + s(174);
         for (index, label) in ["●  BP", "▶  F5", "→  F10", "■  STOP"].iter().enumerate() {
             let bx = debug_x + index as i32 * s(78);
-            self.rounded_outline(self.colors.line, bx, s(52), s(72), s(25), s(7));
+            self.rounded_outline(self.colors.line, bx, top + s(6), s(72), s(27), s(7));
             self.text(
                 if (index == 1 && self.debug_session.is_some())
                     || (index == 0
@@ -5131,15 +5299,15 @@ impl App {
                     self.colors.muted
                 },
                 bx + s(7),
-                s(70),
+                top + s(24),
                 label,
             );
         }
         let language = self.language_for_file(&self.files[self.selected_file].name);
-        self.text(self.colors.muted, right - s(150), s(71), &language);
+        self.text(self.colors.muted, right - s(150), top + s(25), &language);
         XSetFont(self.display, self.gc, (*self.code_font).fid);
         let detected = self.detected_language_for_file(&self.files[self.selected_file].name);
-        let base_y = s(119);
+        let base_y = self.code_baseline();
         let step = self.code_line_step();
         let show_bubbles = self.comment_bubbles && !(self.mouse_x >= 0 && self.mouse_x < left);
         // A folded block takes one row on screen, so the row is counted
@@ -5159,6 +5327,21 @@ impl App {
         {
             let line = &self.files[self.selected_file].lines[index];
             let y = base_y + screen_row as i32 * step;
+            if index == self.caret_line && self.editor_focused {
+                self.rect(
+                    self.colors.panel_2,
+                    left + s(1),
+                    y - step + s(5),
+                    right - left - s(12),
+                    step,
+                );
+                self.line(
+                    self.colors.accent,
+                    2,
+                    (left + s(1), y - step + s(5)),
+                    (left + s(1), y + s(5)),
+                );
+            }
             self.text(self.colors.line, left + s(15), y, &(index + 1).to_string());
             // A block that can be folded says so beside its number, and a
             // closed one shows the arrow pointing the other way.
@@ -5369,7 +5552,7 @@ impl App {
         // short file. This makes the affordance discoverable before scrolling
         // is needed and mirrors the other resizable panels.
         let track_x = right - s(10);
-        let track_y = s(89);
+        let track_y = tabs_bottom + s(5);
         let track_h = (self.terminal_top() - track_y - s(8)).max(s(40));
         self.rounded_rect(self.colors.panel, track_x, track_y, s(6), track_h, s(3));
         let total = visible_lines.len().max(1);
@@ -5525,12 +5708,19 @@ impl App {
     unsafe fn draw_graph(&self) {
         let s = |v| self.s(v);
         let (x, y, w, h) = self.graph_bounds();
-        self.rect(self.colors.panel, x, s(46), w, self.height - s(70));
-        self.line(self.colors.line, 1, (x, s(46)), (x, self.height - s(24)));
-        self.line(self.colors.line, 1, (x, s(84)), (self.width, s(84)));
+        let top = self.shell_content_top();
+        let tabs_bottom = self.editor_tabs_bottom();
+        self.rect(self.colors.panel, x, top, w, self.height - top - s(24));
+        self.line(self.colors.line, 1, (x, top), (x, self.height - s(24)));
+        self.line(
+            self.colors.line,
+            1,
+            (x, tabs_bottom),
+            (self.width, tabs_bottom),
+        );
         self.disclosure(
             x + s(10),
-            s(58),
+            top + s(12),
             self.graph_visible,
             self.graph_toggle_hovered(),
             1.0,
@@ -5538,7 +5728,7 @@ impl App {
         self.text(
             self.colors.text,
             x + s(38),
-            s(71),
+            top + s(25),
             self.tr("Call Hierarchy", "调用层级"),
         );
         let mode_labels = [
@@ -5553,8 +5743,8 @@ impl App {
         self.line(
             self.colors.accent,
             2,
-            (relation_x, s(77)),
-            (relation_x + mode_w - s(4), s(77)),
+            (relation_x, tabs_bottom - s(7)),
+            (relation_x + mode_w - s(4), tabs_bottom - s(7)),
         );
         for (index, label) in mode_labels.iter().enumerate() {
             let bx = modes_x + index as i32 * mode_w;
@@ -5565,7 +5755,7 @@ impl App {
                     self.colors.muted
                 },
                 bx + s(8),
-                s(70),
+                top + s(24),
                 label,
             );
         }
@@ -6022,15 +6212,18 @@ impl App {
 
     unsafe fn draw_status(&self) {
         let s = |v| self.s(v);
+        let left = (self.layout.workspace_pixels(self.width as f32)) as i32;
+        let right = self.graph_left();
+        let panel_width = (right - left).max(s(320));
         let terminal_progress = self.terminal_motion.value.clamp(0.0, 1.0);
         let expanded = self.terminal_height.clamp(s(150), self.height - s(150));
         let panel_h = s(28) + ((expanded - s(28)) as f32 * terminal_progress) as i32;
         let top = self.height - panel_h;
-        self.rect(self.colors.panel_2, 0, top, self.width, panel_h);
-        self.line(self.colors.line, 1, (0, top), (self.width, top));
+        self.rect(self.colors.panel_2, left, top, panel_width, panel_h);
+        self.line(self.colors.line, 1, (left, top), (right, top));
         // A real disclosure button, instead of a `>` typed into the title.
         self.disclosure(
-            s(12),
+            left + s(12),
             top + s(4),
             terminal_progress > 0.5,
             self.terminal_toggle_hovered(),
@@ -6038,13 +6231,13 @@ impl App {
         );
         self.text(
             self.colors.bright,
-            s(40),
+            left + s(40),
             top + s(20),
             self.tr("TERMINAL", "终端"),
         );
         self.text(
             self.colors.muted,
-            s(130),
+            left + s(130),
             top + s(20),
             self.project_path
                 .as_ref()
@@ -6053,7 +6246,7 @@ impl App {
                 .unwrap_or(self.tr("No active project", "没有活动项目")),
         );
         if terminal_progress > 0.08 {
-            let list_x = self.width - s(190);
+            let list_x = right - s(190);
             self.rect(
                 self.colors.panel,
                 list_x,
@@ -6173,7 +6366,7 @@ impl App {
             let first_line = lines.len().saturating_sub(rows);
             let visible = lines.iter().rev().take(6).collect::<Vec<_>>();
             for (offset, line) in visible.iter().rev().enumerate() {
-                let max_chars = ((list_x - s(52)) / s(8).max(1)).max(8) as usize;
+                let max_chars = ((list_x - left - s(52)) / s(8).max(1)).max(8) as usize;
                 let display_line = line.chars().take(max_chars).collect::<String>();
                 // A selected cell is filled behind the glyphs, so the choice is
                 // visible the way it is in the editor.
@@ -6192,7 +6385,7 @@ impl App {
                             // The same fill the editor uses for a selection.
                             self.rect(
                                 self.colors.project,
-                                s(24) + start as i32 * cell,
+                                left + s(24) + start as i32 * cell,
                                 top + s(45 + offset as i32 * 24),
                                 ((end - start) as i32 * cell).max(2),
                                 s(18),
@@ -6202,7 +6395,7 @@ impl App {
                 }
                 self.text(
                     self.colors.text,
-                    s(24),
+                    left + s(24),
                     top + s(55 + offset as i32 * 24),
                     &display_line,
                 );
@@ -6217,21 +6410,21 @@ impl App {
                 if selected > 0 {
                     self.text(
                         self.colors.accent,
-                        s(24),
+                        left + s(24),
                         self.height - s(18),
                         &format!("{} {selected}", self.tr("selected", "已选中")),
                     );
                 }
             }
-            self.text(self.colors.accent, s(24), self.height - s(18), "$");
+            self.text(self.colors.accent, left + s(24), self.height - s(18), "$");
             self.text(
                 self.colors.bright,
-                s(44),
+                left + s(44),
                 self.height - s(18),
                 &terminal.input,
             );
             if self.terminal_focused && blink_phase(self.started) {
-                let x = s(44) + self.pango_text_size(&terminal.input, false).0;
+                let x = left + s(44) + self.pango_text_size(&terminal.input, false).0;
                 self.line(
                     self.colors.bright,
                     1,
@@ -6245,7 +6438,7 @@ impl App {
     unsafe fn draw_package_menu(&self) {
         let s = |v| self.s(v);
         let x = self.width - s(270);
-        let y = s(48) + self.overlay_offset(self.package_motion);
+        let y = self.shell_content_top() + self.overlay_offset(self.package_motion);
         let w = s(250);
         let h = s(207);
         self.floating_panel(x, y, w, h);
@@ -6299,7 +6492,7 @@ impl App {
         let w = s(950);
         let h = s(680);
         let x = self.width - w - s(20);
-        let y = s(52) + self.overlay_offset(self.extensions_motion);
+        let y = self.shell_content_top() + s(6) + self.overlay_offset(self.extensions_motion);
         self.floating_panel(x, y, w, h);
         self.text(
             self.colors.bright,
@@ -7820,6 +8013,7 @@ impl App {
             || self.graph_relation_velocity.abs() > 0.01
             || self.menu_title_velocity.abs() > 0.01
             || self.terminal_tab_velocity.abs() > 0.01
+            || self.activity_velocity.abs() > 0.01
             || !self.edit_pulses.is_empty()
             || self.build_started.is_some()
             || self.downloading.is_some()
@@ -7915,6 +8109,12 @@ impl App {
             self.terminal_active.min(3) as f32,
             dt,
         );
+        Self::spring_step(
+            &mut self.activity_position,
+            &mut self.activity_velocity,
+            self.activity_section.min(3) as f32,
+            dt,
+        );
         Self::step_ui_motion(
             &mut self.relation_focus_motion,
             self.hovered_from_code,
@@ -7995,6 +8195,7 @@ impl App {
         self.extensions_motion = UiMotion::new(if self.extensions_open { 1.0 } else { 0.0 });
         self.menu_title_position = self.open_menu.unwrap_or(self.menu_cursor.menu).index() as f32;
         self.terminal_tab_position = self.terminal_active.min(3) as f32;
+        self.activity_position = self.activity_section.min(3) as f32;
         self.graph_relation_position = self.graph_relation.index() as f32;
         self.graph_scope_position = self.graph_scope_index() as f32
             / self.graph_scope_labels().len().saturating_sub(1).max(1) as f32;
@@ -9463,15 +9664,15 @@ impl App {
     /// and the drawing use one piece of arithmetic and cannot disagree.
     fn menu_rect(&self, menu: menu_core::Menu) -> (i32, i32, i32, i32) {
         let s = |v: i32| self.s(v);
-        let mut left = s(MENU_BAR_LEFT);
+        let mut left = s(11);
         for entry in menu_core::Menu::ALL {
             let width = s(Self::menu_title_width(entry));
             if entry == menu {
-                return (left, s(10), width, s(27));
+                return (left, s(49), width, s(27));
             }
             left += width;
         }
-        (left, s(10), s(Self::menu_title_width(menu)), s(27))
+        (left, s(49), s(Self::menu_title_width(menu)), s(27))
     }
 
     /// The menu whose title is under a point, if any.
@@ -9613,7 +9814,7 @@ impl App {
         // A pointer on the tab strip highlights the close button it is over,
         // so it is clear which tab the button belongs to.
         self.tab_close_hovered = None;
-        if y >= self.s(49) && y <= self.s(81) {
+        if y >= self.shell_content_top() && y <= self.editor_tabs_bottom() {
             let (tabs, _) = self.tab_layout();
             let close_width = menu_core::tab_close_width(self.s(7));
             if let Some(hit) = menu_core::tab_at(&tabs, close_width, x) {
@@ -9862,7 +10063,7 @@ impl App {
         let s = |v| self.s(v);
         // The panel sits under the caret's line, kept inside the editor.
         let left = (self.layout.workspace_pixels(self.width as f32)) as i32 + s(60);
-        let y = s(119)
+        let y = self.code_baseline()
             + self.editor_screen_row(self.caret_line).unwrap_or(0) as i32 * self.code_line_step()
             + s(24);
         let width = (text.chars().count() as i32 * s(8) + s(24)).min(self.width - left - s(24));
@@ -9883,7 +10084,7 @@ impl App {
         let s = |v| self.s(v);
         if !self.lsp_completions.is_empty() {
             let left = (self.layout.workspace_pixels(self.width as f32)) as i32 + s(60);
-            let top = s(119)
+            let top = self.code_baseline()
                 + self.editor_screen_row(self.caret_line).unwrap_or(0) as i32
                     * self.code_line_step()
                 + s(24);
@@ -10695,13 +10896,17 @@ impl App {
         let workspace_right = (self.layout.workspace_pixels(self.width as f32)) as i32;
         // X11 reports the wheel as buttons 4/5. Consume it in the editor before
         // graph handling, and let a click on the track jump to that position.
-        if x >= workspace_right && x < graph_left && y >= s(84) && y < self.terminal_top() {
+        if x >= workspace_right
+            && x < graph_left
+            && y >= self.editor_tabs_bottom()
+            && y < self.terminal_top()
+        {
             if button == 4 || button == 5 {
                 self.scroll_editor(if button == 4 { -3 } else { 3 });
                 return;
             }
             if button == 1 && x >= graph_left - s(18) {
-                let track_y = s(89);
+                let track_y = self.editor_tabs_bottom() + s(5);
                 let track_h = (self.terminal_top() - track_y - s(8)).max(s(40));
                 let ratio = ((y - track_y) as f32 / track_h.max(1) as f32).clamp(0.0, 1.0);
                 self.editor_scroll = (ratio * self.editor_max_scroll() as f32).round() as usize;
@@ -10710,7 +10915,12 @@ impl App {
             }
         }
         let debug_x = workspace_right + s(174);
-        if button == 1 && y >= s(52) && y <= s(77) && x >= debug_x && x < debug_x + s(312) {
+        if button == 1
+            && y >= self.shell_content_top() + s(6)
+            && y <= self.editor_tabs_bottom() - s(1)
+            && x >= debug_x
+            && x < debug_x + s(312)
+        {
             match ((x - debug_x) / s(78).max(1)).clamp(0, 3) {
                 0 => self.toggle_breakpoint(),
                 1 => self.start_or_continue_debugging(),
@@ -10727,14 +10937,18 @@ impl App {
         if button == 1
             && self.graph_visible
             && (x - graph_left).abs() <= s(7)
-            && y >= s(46)
+            && y >= self.shell_content_top()
             && y < self.terminal_top()
         {
             self.panel_drag = Some(PanelDrag::CallHierarchy);
             self.editor_focused = false;
             return;
         }
-        if button == 1 && x >= graph_left && y >= s(52) && y <= s(77) {
+        if button == 1
+            && x >= graph_left
+            && y >= self.shell_content_top() + s(6)
+            && y <= self.editor_tabs_bottom() - s(1)
+        {
             let mode_w = s(73);
             let modes_x = self.width - mode_w * 3 - s(12);
             if x >= modes_x {
@@ -10848,7 +11062,7 @@ impl App {
         // It uses the same visible-row mapping as drawing, so clicking the v
         // beside `main` toggles that block even when earlier lines are folded.
         if button == 1 && x >= workspace_right && x < workspace_right + s(32) {
-            let base_y = s(119);
+            let base_y = self.code_baseline();
             let step = self.code_line_step().max(1);
             if y >= base_y - step / 2 && y < self.terminal_top() {
                 let screen_row = ((y - base_y + step / 2) / step).max(0) as usize;
@@ -10886,7 +11100,7 @@ impl App {
         // The tab strip: a click selects a tab, its close button closes it,
         // and the button after the last tab opens a new document. The geometry
         // comes from the same call the drawing used.
-        if y >= s(49) && y <= s(84) {
+        if y >= self.shell_content_top() && y <= self.editor_tabs_bottom() {
             let (tabs, new_tab_x) = self.tab_layout();
             let close_width = menu_core::tab_close_width(s(7));
             if let Some(hit) = menu_core::tab_at(&tabs, close_width, x) {
@@ -10910,7 +11124,7 @@ impl App {
         // One handler for the whole bar, so every menu the model lists is
         // clickable. The hand written version spelled out three x ranges and
         // left the two menus added later dead.
-        if y < s(46) {
+        if y >= s(48) && y < self.shell_content_top() {
             if let Some(menu) = self.menu_at(x, y) {
                 self.toggle_menu(menu);
                 return;
@@ -10921,7 +11135,7 @@ impl App {
         // test. The model still supplies the title and the simple items, which
         // is what keeps the two from drifting apart.
         if self.open_menu == Some(menu_core::Menu::File) {
-            let menu_x = s(112);
+            let menu_x = self.menu_rect(menu_core::Menu::File).0;
             let menu_w = s(300);
             let rows = self.file_menu_rows();
             for (index, row) in rows.iter().enumerate() {
@@ -10959,7 +11173,7 @@ impl App {
             // does everywhere else.
             self.open_menu = None;
         }
-        if x >= self.width - s(410) && x <= self.width - s(290) && y < s(46) {
+        if x >= self.width - s(290) && x <= self.width - s(205) && y < s(48) {
             self.settings_open = !self.settings_open;
             self.open_menu = None;
             self.open_menu = None;
@@ -10970,7 +11184,7 @@ impl App {
         }
         if self.settings_open {
             let menu_x = self.width - s(410);
-            let menu_y = s(43);
+            let menu_y = self.settings_origin().1;
             if button == 1 && x >= menu_x && x <= menu_x + s(390) {
                 if x >= menu_x + s(216)
                     && x <= menu_x + s(374)
@@ -11029,7 +11243,7 @@ impl App {
             self.font_search_focused = false;
             self.settings_open = false;
         }
-        if x > self.width - s(290) && x < self.width - s(145) && y < s(46) {
+        if x > self.width - s(205) && x < self.width - s(105) && y < s(48) {
             self.extensions_open = !self.extensions_open;
             self.open_menu = None;
             self.open_menu = None;
@@ -11038,7 +11252,7 @@ impl App {
             self.editor_focused = false;
             return;
         }
-        if x > self.width - s(150) && y < s(46) {
+        if x > self.width - s(105) && y < s(48) {
             self.package_open = !self.package_open;
             self.open_menu = None;
             self.open_menu = None;
@@ -11051,7 +11265,7 @@ impl App {
             let w = s(950);
             let h = s(680);
             let menu_x = self.width - w - s(20);
-            let menu_y = s(52);
+            let menu_y = self.shell_content_top() + s(6);
             if x >= menu_x && x <= menu_x + w && y >= menu_y && y <= menu_y + h {
                 for category in 0..6 {
                     let row = menu_y + s(101 + category as i32 * 43);
@@ -11260,7 +11474,7 @@ impl App {
         }
         if self.package_open {
             let menu_x = self.width - s(270);
-            let menu_y = s(48);
+            let menu_y = self.shell_content_top();
             if x >= menu_x && x <= self.width - s(20) && y >= menu_y {
                 for index in 0..4 {
                     let center = menu_y + s(51 + index as i32 * 31);
@@ -11280,7 +11494,9 @@ impl App {
             self.package_open = false;
         }
         let terminal_top = self.terminal_top();
-        if y >= terminal_top {
+        let terminal_left = workspace_right;
+        let terminal_right = graph_left;
+        if y >= terminal_top && x >= terminal_left && x < terminal_right {
             if !self.terminal_open {
                 self.terminal_open = true;
                 self.terminal_focused = true;
@@ -11288,7 +11504,7 @@ impl App {
             }
             // A press in the body starts a selection; the header controls are
             // handled below, so they still work.
-            if button == 1 && y > terminal_top + s(30) && x < self.width - s(190) {
+            if button == 1 && y > terminal_top + s(30) && x < terminal_right - s(190) {
                 if let Some(point) = self.terminal_point_at(x, y) {
                     self.terminal_selection =
                         Some(terminal_core::TerminalSelection::new(point, point));
@@ -11303,12 +11519,12 @@ impl App {
                 self.terminal_focused = false;
                 return;
             }
-            if y <= terminal_top + s(30) && x < s(160) {
+            if y <= terminal_top + s(30) && x < terminal_left + s(160) {
                 self.terminal_open = false;
                 self.terminal_focused = false;
                 return;
             }
-            let list_x = self.width - s(190);
+            let list_x = terminal_right - s(190);
             if x >= list_x {
                 if y >= terminal_top + s(38) && y <= terminal_top + s(65) {
                     if x <= list_x + s(86) {
@@ -11367,7 +11583,11 @@ impl App {
             self.editor_focused = false;
             return;
         }
-        if x < workspace_right && button == 3 && y >= s(145) && y < terminal_top {
+        if x < workspace_right
+            && button == 3
+            && y >= self.shell_content_top() + s(99)
+            && y < terminal_top
+        {
             let menu_w = s(190);
             let menu_h = s(92);
             self.workspace_context_menu = Some((
@@ -11378,7 +11598,7 @@ impl App {
             return;
         }
         if x >= workspace_right && x < graph_left && button == 1 {
-            let base = s(119);
+            let base = self.code_baseline();
             let step = self.code_line_step();
             for index in 0..self.files[self.selected_file].lines.len() {
                 let Some(screen_row) = self.editor_screen_row(index) else {
@@ -11434,7 +11654,45 @@ impl App {
             }
         }
         if x < workspace_right {
-            if button == 1 && y >= s(102) && y <= s(154) {
+            let rail = self.activity_rail_width();
+            if x < rail && button == 1 {
+                let item = ((y - self.shell_content_top() - s(11)) / s(38).max(1)).clamp(0, 3);
+                match item {
+                    0 => {
+                        self.activity_section = 0;
+                        self.project_tree_expanded = true;
+                        self.workspace_search_focused = false;
+                    }
+                    1 => {
+                        self.activity_section = 1;
+                        self.project_tree_expanded = true;
+                        self.workspace_search_focused = true;
+                        self.editor_focused = false;
+                    }
+                    2 => {
+                        self.activity_section = 2;
+                        self.status_message = self
+                            .tr(
+                                "Source control is available from the menu",
+                                "源码管理可从菜单打开",
+                            )
+                            .into();
+                    }
+                    _ => {
+                        self.activity_section = 3;
+                        self.extensions_open = true;
+                        self.open_menu = None;
+                    }
+                }
+                return;
+            }
+            if x < rail {
+                return;
+            }
+            if button == 1
+                && y >= self.shell_content_top() + s(56)
+                && y <= self.shell_content_top() + s(108)
+            {
                 self.project_tree_expanded = !self.project_tree_expanded;
                 self.status_message = if self.project_tree_expanded {
                     self.tr("Project file list expanded", "项目文件列表已展开")
@@ -11444,7 +11702,7 @@ impl App {
                 .into();
                 return;
             }
-            if y >= s(58) && y <= s(92) {
+            if y >= self.shell_content_top() + s(12) && y <= self.shell_content_top() + s(46) {
                 self.workspace_search_focused = true;
                 self.editor_focused = false;
                 return;
@@ -11453,7 +11711,7 @@ impl App {
                 return;
             }
             let needle = self.workspace_search.to_ascii_lowercase();
-            let mut center = 176;
+            let mut center = 208;
             for folder in self.folders.clone() {
                 let has_match = needle.is_empty()
                     || folder.to_ascii_lowercase().contains(&needle)
@@ -11498,7 +11756,11 @@ impl App {
                 center += 29;
             }
         }
-        if x >= workspace_right && x < graph_left && y > s(85) && y < self.height - s(60) {
+        if x >= workspace_right
+            && x < graph_left
+            && y > self.editor_tabs_bottom()
+            && y < self.height - s(60)
+        {
             self.editor_focused = true;
             self.terminal_focused = false;
             self.workspace_search_focused = false;
@@ -11506,7 +11768,7 @@ impl App {
             self.extension_search_focused = false;
             self.font_search_focused = false;
             self.ai_field_focused = None;
-            let base = s(119);
+            let base = self.code_baseline();
             let step = s(28);
             let screen_row = ((y - base + step / 2) / step).max(0) as usize;
             let visible = self.editor_line_indices();
@@ -12391,8 +12653,9 @@ impl App {
             return;
         }
         let comment_bounds = self.active_comment_edit_bounds();
-        let screen_row = ((y - s(119) + self.code_line_step() / 2) / self.code_line_step().max(1))
-            .max(0) as usize;
+        let screen_row = ((y - self.code_baseline() + self.code_line_step() / 2)
+            / self.code_line_step().max(1))
+        .max(0) as usize;
         let visible = self.editor_line_indices();
         let line = visible
             .get(self.editor_scroll + screen_row)
@@ -12448,7 +12711,7 @@ impl App {
                 self.status_message = self.tr("Resizing terminal", "正在调整终端高度").into();
             }
             PanelDrag::EditorScrollbar => {
-                let track_y = self.s(89);
+                let track_y = self.editor_tabs_bottom() + self.s(5);
                 let track_h = (self.terminal_top() - track_y - self.s(8)).max(self.s(40));
                 let ratio = ((y - track_y) as f32 / track_h.max(1) as f32).clamp(0.0, 1.0);
                 self.editor_scroll = (ratio * self.editor_max_scroll() as f32).round() as usize;
@@ -12462,7 +12725,7 @@ impl App {
         let left = (self.layout.workspace_pixels(self.width as f32)) as i32;
         let graph = self.graph_left();
         if self.mouse_x >= left && self.mouse_x < graph && self.mouse_y > s(90) {
-            let screen_row = ((self.mouse_y - s(119) + self.code_line_step() / 2)
+            let screen_row = ((self.mouse_y - self.code_baseline() + self.code_line_step() / 2)
                 / self.code_line_step().max(1))
             .max(0) as usize;
             let visible = self.editor_line_indices();
@@ -13880,6 +14143,9 @@ pub fn run() {
             menu_title_velocity: 0.0,
             terminal_tab_position: 0.0,
             terminal_tab_velocity: 0.0,
+            activity_section: 0,
+            activity_position: 0.0,
+            activity_velocity: 0.0,
             graph_content_motion: UiMotion::new(1.0),
             relation_focus_motion: UiMotion::new(0.0),
             collapsed_folders: BTreeSet::new(),

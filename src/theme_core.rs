@@ -149,18 +149,19 @@ impl Palette {
     /// Palette of the dark theme.
     pub fn dark() -> Self {
         Self {
-            background: 0x000000,
-            panel: 0x1c1c1e,
-            raised: 0x2c2c2e,
-            border: 0x38383a,
-            text: 0xd1d1d6,
-            // One step lighter than the system grey: on a raised panel the
-            // original read at 4.27, just under the text minimum.
-            muted: 0x94949a,
-            bright: 0xf5f5f7,
-            accent: 0x0a84ff,
-            selection: 0x193451,
-            selected_text: 0x0a84ff,
+            // Blue-grey depth from the approved whole-app motion preview.
+            // Panels stay close in luminance; hierarchy comes from cool hue,
+            // borders and motion rather than heavy black rectangles.
+            background: 0x0d1219,
+            panel: 0x151d27,
+            raised: 0x1d2937,
+            border: 0x2b394a,
+            text: 0xd7e2ed,
+            muted: 0x91a0b2,
+            bright: 0xedf4fb,
+            accent: 0x78baff,
+            selection: 0x243d57,
+            selected_text: 0xedf4fb,
             keyword: 0x64d2ff,
             syntax_type: 0x30d158,
             function: 0xbf5af2,
@@ -173,7 +174,7 @@ impl Palette {
             preprocessor: 0xff375f,
             literal: 0xff9f0a,
             comment: 0x8e8e93,
-            shadow: 0x050506,
+            shadow: 0x070b10,
         }
     }
 
@@ -548,7 +549,7 @@ mod tests {
         assert!(dark
             .all()
             .iter()
-            .any(|(name, value)| *name == "background" && *value == 0x000000));
+            .any(|(name, value)| *name == "background" && *value == 0x0d1219));
         assert_ne!(Palette::light().background, dark.background);
     }
 
