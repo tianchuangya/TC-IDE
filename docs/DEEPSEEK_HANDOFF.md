@@ -1,6 +1,10 @@
 # TC-IDE 交接文档（给 DeepSeek）
 
-更新时间：2026-10-17  
+更新时间：2026-10-17
+
+> **接手的下一位请先读 [`docs/CODEX_HANDOFF.md`](CODEX_HANDOFF.md)**：当前状态、验证命令、三个坑、
+> 共享模型 API、下一步优先级。本文是需求原文与本会话第一批进展的记录。
+  
 仓库：`https://github.com/tianchuangya/TC-IDE`  
 工作目录：`/home/tianchuangya/桌面/TC-IDE`
 
