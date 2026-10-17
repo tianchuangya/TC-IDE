@@ -884,6 +884,10 @@ struct App {
     /// Incremental index of the open files, so the graph is not rescanned
     /// on every frame.
     project_index: index_core::IncrementalIndex,
+    /// Hash of the open buffers used to avoid rebuilding the semantic index on
+    /// every animation frame.  The old loop cloned and reparsed every line at
+    /// 60 Hz, which could pin a CPU while the graph was merely visible.
+    index_signature: u64,
     /// Terminal cells the pointer has selected, when there are any.
     terminal_selection: Option<terminal_core::TerminalSelection>,
     /// Whether the pointer is dragging a terminal selection.
@@ -3074,6 +3078,17 @@ impl App {
     /// window fell to single figure frames a second while the panel was open.
     /// The fingerprints say which files changed, so the rest are reused.
     fn refresh_index(&mut self) {
+        use std::hash::{Hash, Hasher};
+        let mut signature = std::collections::hash_map::DefaultHasher::new();
+        for file in &self.files {
+            file.name.hash(&mut signature);
+            file.lines.hash(&mut signature);
+        }
+        let signature = signature.finish();
+        if signature == self.index_signature {
+            return;
+        }
+        self.index_signature = signature;
         let fingerprints = self
             .files
             .iter()
@@ -13520,6 +13535,7 @@ pub fn run() {
             panel_drag: None,
             breakpoints: dap_core::Breakpoints::new(),
             project_index: index_core::IncrementalIndex::new(),
+            index_signature: 0,
             terminal_selection: None,
             terminal_selecting: false,
             breakpoint_prompt: None,
@@ -13611,7 +13627,11 @@ pub fn run() {
         app.restore_session();
         app.runtime_cache = load_runtime_cache();
         app.extension_upgrades = extension_upgrade_count(&app.runtime_cache, &app.project_path);
-        let frame = Duration::from_micros(16_667);
+        // Keep the native Cairo/X11 editor responsive even on machines where
+        // Direct text and the relation graph are expensive to repaint.  A
+        // 30 Hz cadence still leaves motion smooth, while preventing the
+        // render thread from monopolising a CPU core during idle animation.
+        let frame = Duration::from_micros(33_333);
         if let Some(path) = frame_export {
             if let Some(scene) = frame_scene() {
                 if !app.prime_scene(&scene) {
