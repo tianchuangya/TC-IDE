@@ -17,6 +17,29 @@ impl WindowsAppState {
         if self.hovered_symbol.is_none() && self.relation_focus_motion <= 0.001 {
             self.relation_symbol = None;
         }
+        Self::step_overlay_motion(
+            &mut self.comment_bubbles_motion,
+            &mut self.comment_bubbles_velocity,
+            self.comment_bubbles_target,
+            dt,
+        );
+        let lines = self
+            .expanded_comments
+            .iter()
+            .copied()
+            .chain(self.comment_expansion.keys().copied())
+            .collect::<std::collections::BTreeSet<_>>();
+        for line in lines {
+            let motion = self.comment_expansion.entry(line).or_insert((0.0, 0.0));
+            Self::step_overlay_motion(
+                &mut motion.0,
+                &mut motion.1,
+                self.expanded_comments.contains(&line),
+                dt,
+            );
+        }
+        self.comment_expansion
+            .retain(|line, motion| self.expanded_comments.contains(line) || motion.0 > 0.001);
         let target = if self.terminal_open { 1.0 } else { 0.0 };
         self.terminal_velocity += (target - self.terminal_motion) * 235.0 * dt;
         self.terminal_velocity *= (-17.0 * dt).exp();

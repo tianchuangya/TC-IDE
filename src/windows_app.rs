@@ -371,6 +371,12 @@ struct WindowsAppState {
     relation_focus_motion: f32,
     relation_focus_velocity: f32,
     expanded_comments: HashSet<usize>,
+    /// Comment bubbles withdraw while the pointer is over the project tree.
+    comment_bubbles_target: bool,
+    comment_bubbles_motion: f32,
+    comment_bubbles_velocity: f32,
+    /// Per-line expansion springs retained until their closing motion ends.
+    comment_expansion: BTreeMap<usize, (f32, f32)>,
     editing_comment: Option<usize>,
     pointer_x: i32,
     /// Whether the left mouse button is down, for the pressed look of a control.
@@ -700,6 +706,10 @@ impl WindowsAppState {
             relation_focus_motion: 0.0,
             relation_focus_velocity: 0.0,
             expanded_comments: HashSet::new(),
+            comment_bubbles_target: true,
+            comment_bubbles_motion: 1.0,
+            comment_bubbles_velocity: 0.0,
+            comment_expansion: BTreeMap::new(),
             editing_comment: None,
             pointer_x: -1,
             pointer_pressed: false,

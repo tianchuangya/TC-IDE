@@ -764,10 +764,15 @@ pub(super) fn handle_mouse_move(window: Hwnd, w_param: Wparam, l_param: Lparam) 
     let terminal_dragging = APP.with(|cell| cell.borrow().terminal_dragging);
     let x = (l_param as u16 as i16) as i32;
     let y = ((l_param >> 16) as u16 as i16) as i32;
+    let mut pointer_area = unsafe { std::mem::zeroed::<Rect>() };
+    unsafe { GetClientRect(window, &mut pointer_area) };
+    let pointer_scale = platform::dpi_for_window(window) as f32 / 96.0;
+    let tree_width = (pointer_area.right.max(1) as f32 * 0.19).max(220.0 * pointer_scale);
     APP.with(|cell| {
         let mut app = cell.borrow_mut();
         app.pointer_x = x;
         app.pointer_y = y;
+        app.comment_bubbles_target = x as f32 >= tree_width;
     });
     let background_dragging = APP.with(|cell| cell.borrow().background_drag.is_some());
     if background_dragging && w_param & 1 != 0 {

@@ -133,6 +133,12 @@ pub(super) fn render_window(window: Hwnd) {
                 .filter(|line| **line >= first_line)
                 .map(|line| line - first_line)
                 .collect::<Vec<_>>();
+            let comment_expansion = app
+                .comment_expansion
+                .iter()
+                .filter(|(line, _)| **line >= first_line)
+                .map(|(line, motion)| (line - first_line, motion.0))
+                .collect::<Vec<_>>();
             let create_location = app.create_location.to_string_lossy().into_owned();
             let background_path = app
                 .background_path
@@ -267,6 +273,8 @@ pub(super) fn render_window(window: Hwnd) {
                 graph_scope_label: &graph_scope_label,
                 graph_summary: &graph_summary,
                 expanded_comments: &expanded_comments,
+                comment_expansion: &comment_expansion,
+                comment_bubbles_motion: app.comment_bubbles_motion,
                 editing_comment: app
                     .editing_comment
                     .filter(|line| *line >= first_line)

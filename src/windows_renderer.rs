@@ -122,6 +122,8 @@ pub struct WindowsScene<'a> {
     pub graph_scope_label: &'a str,
     pub graph_summary: &'a str,
     pub expanded_comments: &'a [usize],
+    pub comment_expansion: &'a [(usize, f32)],
+    pub comment_bubbles_motion: f32,
     pub editing_comment: Option<usize>,
     pub pointer_x: i32,
     /// Whether the left mouse button is down while a control is hovered.
@@ -3081,19 +3083,28 @@ impl DirectEditorRenderer {
                 }
             }
         }
-        if scene.pointer_x as f32 >= tree_w {
+        let bubble_visibility = scene.comment_bubbles_motion.clamp(0.0, 1.0);
+        if bubble_visibility > 0.001 {
             for (line_index, value) in scene.lines.iter().take(max_lines).enumerate() {
                 let Some((marker_start, content_start, content_end)) =
                     editor_core::comment_bounds(value, scene.file_name)
                 else {
                     continue;
                 };
+                let expansion = scene
+                    .comment_expansion
+                    .iter()
+                    .find(|(line, _)| *line == line_index)
+                    .map(|(_, value)| value.clamp(0.0, 1.0))
+                    .unwrap_or(0.0);
                 let expanded = scene.expanded_comments.contains(&line_index);
                 let editing = scene.editing_comment == Some(line_index);
                 let y = code_top + line_index as f32 * line_step - 5.0 * scale;
                 let bubble_right = editor_right - 14.0 * scale;
-                let bubble_left = (bubble_right - 286.0 * scale).max(tree_w + 130.0 * scale);
-                let bubble_height = if expanded { 112.0 } else { 34.0 } * scale;
+                let settled_left = (bubble_right - 286.0 * scale).max(tree_w + 130.0 * scale);
+                let bubble_left =
+                    settled_left + (bubble_right - settled_left) * (1.0 - bubble_visibility);
+                let bubble_height = (34.0 + 78.0 * expansion) * scale;
                 let marker_column = value[..marker_start].chars().count();
                 let anchor_x = code_origin
                     + (52.0 + Self::visual_cells(value, marker_column) as f32 * self.code_cell)
