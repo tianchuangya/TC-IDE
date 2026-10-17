@@ -872,6 +872,7 @@ struct App {
     graph_scope_velocity: f32,
     graph_relation_position: f32,
     graph_relation_velocity: f32,
+    graph_content_motion: UiMotion,
     relation_focus_motion: UiMotion,
     collapsed_folders: BTreeSet<String>,
     terminal_open: bool,
@@ -3412,6 +3413,8 @@ impl App {
             Some(graph_core::GraphScope::from_index(index - 1))
         };
         self.graph_scroll = 0;
+        self.graph_content_motion = UiMotion::new(0.0);
+        self.graph_content_motion.velocity = 0.9;
         true
     }
 
@@ -5499,6 +5502,7 @@ impl App {
             return;
         }
         let graph = self.graph();
+        let content_offset = self.overlay_offset(self.graph_content_motion);
         let focus_label = self
             .hovered_symbol
             .as_ref()
@@ -5595,7 +5599,8 @@ impl App {
             let Some(node) = graph.nodes.get(index) else {
                 continue;
             };
-            let (nx, ny) = self.node_position(&graph, index);
+            let (nx, node_y) = self.node_position(&graph, index);
+            let ny = node_y + content_offset;
             let active = self.hovered == Some(index);
             let related = self
                 .hovered_symbol
@@ -7730,6 +7735,7 @@ impl App {
             dt,
             MotionRole::Follow,
         );
+        Self::step_ui_motion(&mut self.graph_content_motion, true, dt, MotionRole::Follow);
         for folder in self.folders.clone() {
             let target = if self.collapsed_folders.contains(&folder) {
                 0.0
@@ -10522,6 +10528,8 @@ impl App {
             if x >= modes_x {
                 self.graph_relation = graph_core::GraphRelation::ALL
                     [((x - modes_x) / mode_w.max(1)).clamp(0, 2) as usize];
+                self.graph_content_motion = UiMotion::new(0.0);
+                self.graph_content_motion.velocity = 0.9;
                 self.status_message = match self.graph_relation.index() {
                     1 => self.tr(
                         "Showing callers of the focused symbol",
@@ -13656,6 +13664,7 @@ pub fn run() {
             graph_scope_velocity: 0.0,
             graph_relation_position: 0.0,
             graph_relation_velocity: 0.0,
+            graph_content_motion: UiMotion::new(1.0),
             relation_focus_motion: UiMotion::new(0.0),
             collapsed_folders: BTreeSet::new(),
             terminal_open: false,
