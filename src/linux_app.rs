@@ -7792,7 +7792,7 @@ impl App {
     }
 
     /// Native drawing is intentionally demand-sensitive.  Springs keep the
-    /// 30 Hz animation cadence while a settled editor falls back to 5 Hz for
+    /// 60 Hz animation cadence while a settled editor falls back to 5 Hz for
     /// caret/terminal polling.  This avoids spending a core repainting an
     /// unchanged wallpaper and is especially important on high-DPI screens.
     fn has_active_motion(&self) -> bool {
@@ -13993,9 +13993,9 @@ pub fn run() {
         app.extension_upgrades = extension_upgrade_count(&app.runtime_cache, &app.project_path);
         // Keep the native Cairo/X11 editor responsive even on machines where
         // Direct text and the relation graph are expensive to repaint.  A
-        // 30 Hz cadence still leaves motion smooth, while preventing the
-        // render thread from monopolising a CPU core during idle animation.
-        let animated_frame = Duration::from_micros(33_333);
+        // Interactive springs run at monitor-friendly 60 Hz; once every
+        // motion settles, the loop drops to the idle cadence below.
+        let animated_frame = Duration::from_micros(16_667);
         let idle_frame = Duration::from_millis(200);
         if let Some(path) = frame_export {
             if let Some(scene) = frame_scene() {
