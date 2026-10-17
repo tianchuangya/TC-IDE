@@ -7792,7 +7792,7 @@ impl App {
     }
 
     /// Native drawing is intentionally demand-sensitive.  Springs keep the
-    /// 30 Hz animation cadence while a settled editor falls back to 10 Hz for
+    /// 30 Hz animation cadence while a settled editor falls back to 5 Hz for
     /// caret/terminal polling.  This avoids spending a core repainting an
     /// unchanged wallpaper and is especially important on high-DPI screens.
     fn has_active_motion(&self) -> bool {
@@ -13996,7 +13996,7 @@ pub fn run() {
         // 30 Hz cadence still leaves motion smooth, while preventing the
         // render thread from monopolising a CPU core during idle animation.
         let animated_frame = Duration::from_micros(33_333);
-        let idle_frame = Duration::from_millis(100);
+        let idle_frame = Duration::from_millis(200);
         if let Some(path) = frame_export {
             if let Some(scene) = frame_scene() {
                 if !app.prime_scene(&scene) {
