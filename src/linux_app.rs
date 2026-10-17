@@ -867,6 +867,9 @@ struct App {
     create_motion: UiMotion,
     terminal_motion: UiMotion,
     graph_motion: UiMotion,
+    /// Animated position of the active graph scope indicator.
+    graph_scope_position: f32,
+    graph_scope_velocity: f32,
     collapsed_folders: BTreeSet<String>,
     terminal_open: bool,
     terminal_height: i32,
@@ -5501,28 +5504,6 @@ impl App {
         for (index, label) in scope_labels.iter().enumerate() {
             let bx = x + s(14) + index as i32 * scope_w;
             let selected = index == self.graph_scope_index();
-            if selected {
-                let tip = bx + scope_w / 2;
-                self.line(self.colors.accent, 2, (bx, rail_y), (tip - s(10), rail_y));
-                self.line(
-                    self.colors.accent,
-                    2,
-                    (tip - s(10), rail_y),
-                    (tip, rail_y - s(7)),
-                );
-                self.line(
-                    self.colors.accent,
-                    2,
-                    (tip, rail_y - s(7)),
-                    (tip + s(10), rail_y),
-                );
-                self.line(
-                    self.colors.accent,
-                    2,
-                    (tip + s(10), rail_y),
-                    (bx + scope_w, rail_y),
-                );
-            }
             self.text(
                 if selected {
                     self.colors.bright
@@ -5534,6 +5515,24 @@ impl App {
                 label,
             );
         }
+        let scope_track_left = x + s(14);
+        let scope_track_right = x + w - s(14);
+        let scope_x = scope_track_left
+            + ((scope_track_right - scope_track_left) as f32
+                * self.graph_scope_position.clamp(0.0, 1.0))
+            .round() as i32;
+        self.line(
+            self.colors.accent,
+            2,
+            (scope_track_left, rail_y),
+            (scope_x, rail_y),
+        );
+        self.line(
+            self.colors.accent,
+            2,
+            (scope_x, rail_y - s(5)),
+            (scope_x, rail_y + s(5)),
+        );
         self.rect(self.colors.bg, x + s(14), y + s(43), w - s(28), s(30));
         self.outline(
             if self.graph_search_focused {
@@ -7682,6 +7681,14 @@ impl App {
             self.graph_visible,
             dt,
             MotionRole::Drawer,
+        );
+        let scope_count = self.graph_scope_labels().len().saturating_sub(1).max(1) as f32;
+        let scope_target = self.graph_scope_index() as f32 / scope_count;
+        Self::spring_step(
+            &mut self.graph_scope_position,
+            &mut self.graph_scope_velocity,
+            scope_target,
+            dt,
         );
         for folder in self.folders.clone() {
             let target = if self.collapsed_folders.contains(&folder) {
@@ -13605,6 +13612,8 @@ pub fn run() {
             create_motion: UiMotion::new(0.0),
             terminal_motion: UiMotion::new(0.0),
             graph_motion: UiMotion::new(1.0),
+            graph_scope_position: 0.0,
+            graph_scope_velocity: 0.0,
             collapsed_folders: BTreeSet::new(),
             terminal_open: false,
             terminal_height: (230.0 * (width as f32 / 1440.0).clamp(0.85, 2.0)).round() as i32,
@@ -13709,6 +13718,8 @@ pub fn run() {
         };
         app.rebuild_project_index();
         app.restore_session();
+        app.graph_scope_position = app.graph_scope_index() as f32
+            / (app.graph_scope_labels().len().saturating_sub(1).max(1) as f32);
         app.start_intro_motion();
         app.runtime_cache = load_runtime_cache();
         app.extension_upgrades = extension_upgrade_count(&app.runtime_cache, &app.project_path);
