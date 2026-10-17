@@ -7675,6 +7675,27 @@ impl App {
         }
     }
 
+    /// Give the real application the same composed entrance as the design
+    /// preview.  The preview used to show these springs only in exported
+    /// scenes, so a normal launch appeared static even though the components
+    /// had motion implementations.
+    fn start_intro_motion(&mut self) {
+        self.file_switch_motion = UiMotion::new(0.0);
+        self.file_switch_motion.velocity = 1.0;
+        if self.project_tree_expanded {
+            self.project_tree_amount = 0.28;
+            self.project_tree_velocity = 0.8;
+        }
+        if self.graph_visible {
+            self.graph_motion = UiMotion::new(0.0);
+            self.graph_motion.velocity = 0.9;
+        }
+        if self.terminal_open {
+            self.terminal_motion = UiMotion::new(0.0);
+            self.terminal_motion.velocity = 0.9;
+        }
+    }
+
     fn finish_build_preview(&mut self) {
         let output = self.active_root().join("dist");
         if let Err(error) = fs::create_dir_all(&output) {
@@ -13625,6 +13646,7 @@ pub fn run() {
         };
         app.rebuild_project_index();
         app.restore_session();
+        app.start_intro_motion();
         app.runtime_cache = load_runtime_cache();
         app.extension_upgrades = extension_upgrade_count(&app.runtime_cache, &app.project_path);
         // Keep the native Cairo/X11 editor responsive even on machines where
