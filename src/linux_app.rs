@@ -872,6 +872,7 @@ struct App {
     graph_scope_velocity: f32,
     graph_relation_position: f32,
     graph_relation_velocity: f32,
+    relation_focus_motion: UiMotion,
     collapsed_folders: BTreeSet<String>,
     terminal_open: bool,
     terminal_height: i32,
@@ -5679,6 +5680,7 @@ impl App {
             return;
         };
         let s = |v| self.s(v);
+        let relation_offset = self.overlay_offset(self.relation_focus_motion);
         let editor_left = (self.layout.workspace_pixels(self.width as f32)) as i32;
         let symbol = &self.files[self.selected_file].lines[line][start_byte..end_byte];
         if symbol.len() < 2 {
@@ -5694,7 +5696,12 @@ impl App {
             start.1,
             s(4),
         );
-        self.line(self.colors.accent, 2, start, (gutter, start.1));
+        self.line(
+            self.colors.accent,
+            2,
+            (start.0, start.1),
+            (gutter + relation_offset, start.1),
+        );
         let mut drawn = 0;
         for (file_index, file) in self.files.iter().enumerate() {
             let mut file_has_relation = false;
@@ -5725,11 +5732,17 @@ impl App {
                     let (target_x, target_y, target_w, target_h) =
                         self.code_symbol_bounds(target_line, target_start, target_end);
                     let end = (target_x, target_y + target_h / 2);
-                    self.line(self.colors.accent, 1, (gutter, start.1), (gutter, end.1));
+                    let relation_gutter = gutter + relation_offset;
                     self.line(
                         self.colors.accent,
                         1,
-                        (gutter, end.1),
+                        (relation_gutter, start.1),
+                        (relation_gutter, end.1),
+                    );
+                    self.line(
+                        self.colors.accent,
+                        1,
+                        (relation_gutter, end.1),
                         (end.0 - s(7), end.1),
                     );
                     self.outline(self.colors.accent, target_x, target_y, target_w, target_h);
@@ -5777,7 +5790,7 @@ impl App {
             self.line(
                 self.colors.accent,
                 1,
-                (gutter, start.1),
+                (gutter + relation_offset, start.1),
                 (editor_left, start.1),
             );
             self.line(
@@ -7710,6 +7723,12 @@ impl App {
             &mut self.graph_relation_velocity,
             self.graph_relation.index() as f32,
             dt,
+        );
+        Self::step_ui_motion(
+            &mut self.relation_focus_motion,
+            self.hovered_from_code,
+            dt,
+            MotionRole::Follow,
         );
         for folder in self.folders.clone() {
             let target = if self.collapsed_folders.contains(&folder) {
@@ -13637,6 +13656,7 @@ pub fn run() {
             graph_scope_velocity: 0.0,
             graph_relation_position: 0.0,
             graph_relation_velocity: 0.0,
+            relation_focus_motion: UiMotion::new(0.0),
             collapsed_folders: BTreeSet::new(),
             terminal_open: false,
             terminal_height: (230.0 * (width as f32 / 1440.0).clamp(0.85, 2.0)).round() as i32,
