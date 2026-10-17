@@ -1018,6 +1018,8 @@ struct App {
     /// Completions the server offered, and which one is selected.
     lsp_completions: Vec<String>,
     lsp_completion_index: usize,
+    /// Selected row in the always-available local completion list.
+    completion_index: usize,
     /// New name being typed for a rename, and whether it has the keyboard.
     rename_prompt: Option<String>,
     rename_focused: bool,
@@ -1182,13 +1184,18 @@ impl App {
 
     fn terminal_top(&self) -> i32 {
         if self.terminal_open {
-            self.height
+            self.terminal_bottom()
                 - self
                     .terminal_height
                     .clamp(self.s(150), self.height - self.s(150))
         } else {
-            self.height - self.s(28)
+            self.terminal_bottom() - self.s(28)
         }
+    }
+
+    /// Keep terminal text and controls clear of the physical window edge.
+    fn terminal_bottom(&self) -> i32 {
+        self.height - self.s(14)
     }
 
     fn active_breakpoint_path(&self) -> String {
@@ -2237,7 +2244,7 @@ impl App {
 
     fn current_prefix(&self) -> String {
         let line = &self.files[self.selected_file].lines[self.caret_line];
-        let upto = &line[..self.caret_column.min(line.len())];
+        let upto = &line[..valid_byte_column(line, self.caret_column)];
         upto.chars()
             .rev()
             .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
@@ -2279,13 +2286,22 @@ impl App {
     }
 
     fn accept_completion(&mut self) {
-        if let Some(candidate) = self.completions().first().cloned() {
+        let completions = self.completions();
+        let selected = self
+            .completion_index
+            .min(completions.len().saturating_sub(1));
+        if let Some(candidate) = completions.get(selected).cloned() {
             let prefix = self.current_prefix();
             let suffix = &candidate[prefix.len()..];
-            let start = self.caret_column;
-            self.files[self.selected_file].lines[self.caret_line]
-                .insert_str(self.caret_column, suffix);
+            let column = valid_byte_column(
+                &self.files[self.selected_file].lines[self.caret_line],
+                self.caret_column,
+            );
+            self.caret_column = column;
+            let start = column;
+            self.files[self.selected_file].lines[self.caret_line].insert_str(column, suffix);
             self.caret_column += suffix.len();
+            self.completion_index = 0;
             self.note_edit(
                 motion_core::EditKind::Insert,
                 self.caret_line,
@@ -2294,6 +2310,84 @@ impl App {
             );
             self.status_message = format!("Completed {candidate}");
         }
+    }
+
+    /// Human-readable metadata shown on the second line of a local candidate.
+    /// Project declarations include their file, kind, and source signature;
+    /// language keywords say where they came from instead of looking like a
+    /// user variable.
+    fn completion_detail(&self, candidate: &str) -> String {
+        let active_name = &self.files[self.selected_file].name;
+        for file in &self.files {
+            let scan = syntax_core::scan(&file.lines, &file.name);
+            if let Some(declaration) = scan
+                .declarations
+                .iter()
+                .find(|declaration| declaration.name == candidate)
+            {
+                let kind = match declaration.kind {
+                    editor_core::SymbolKind::Class => self.tr("class/type", "类 / 类型"),
+                    editor_core::SymbolKind::Function => self.tr("function", "函数"),
+                    editor_core::SymbolKind::Variable => self.tr("variable", "变量"),
+                    editor_core::SymbolKind::Other => self.tr("symbol", "符号"),
+                };
+                let source = if &file.name == active_name {
+                    self.tr("current file", "当前文件").to_string()
+                } else {
+                    file.name.clone()
+                };
+                let signature = file
+                    .lines
+                    .get(declaration.line)
+                    .map(|line| {
+                        line.trim()
+                            .trim_end_matches('{')
+                            .trim_end_matches(';')
+                            .trim()
+                            .chars()
+                            .take(54)
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default();
+                return format!("{kind} · {source} · {signature}");
+            }
+        }
+        // Lightweight scanners intentionally do not model every declaration
+        // form in every language.  A project identifier must still be
+        // distinguished from a built-in keyword, so fall back to the source
+        // line that contributed the candidate. This also gives the user a
+        // useful type/signature preview for declarations the scanner has not
+        // learned yet (for example a simple C++ `int value = 0`).
+        for file in &self.files {
+            if let Some(line) = file.lines.iter().find(|line| {
+                identifiers_in(line)
+                    .iter()
+                    .any(|identifier| identifier == candidate)
+            }) {
+                let source = if &file.name == active_name {
+                    self.tr("current file", "当前文件").to_string()
+                } else {
+                    file.name.clone()
+                };
+                let signature = line
+                    .trim()
+                    .trim_end_matches('{')
+                    .trim_end_matches(';')
+                    .trim()
+                    .chars()
+                    .take(54)
+                    .collect::<String>();
+                return format!(
+                    "{} · {source} · {signature}",
+                    self.tr("project symbol", "项目符号")
+                );
+            }
+        }
+        format!(
+            "{} · {}",
+            self.tr("language keyword", "语言关键字"),
+            self.detected_language_for_file(active_name)
+        )
     }
 
     fn comment_parts<'a>(&self, line: &'a str) -> Option<ParsedComment<'a>> {
@@ -2508,7 +2602,7 @@ impl App {
         let expanded = self.terminal_height.clamp(s(150), self.height - s(150));
         let panel_h =
             s(28) + ((expanded - s(28)) as f32 * self.terminal_motion.value.clamp(0.0, 1.0)) as i32;
-        let top = self.height - panel_h;
+        let top = self.terminal_bottom() - panel_h;
         (
             (self.layout.workspace_pixels(self.width as f32)) as i32 + s(12),
             top + s(4),
@@ -3211,7 +3305,7 @@ impl App {
         let s = |v: i32| (v as f32 * self.scale()).round() as i32;
         let top = self.terminal_top();
         let step = s(24);
-        if y < top + s(30) || step <= 0 {
+        if y < top + s(30) || y >= self.terminal_bottom() || step <= 0 {
             return None;
         }
         let rows = self.terminal_visible_rows();
@@ -3230,7 +3324,7 @@ impl App {
     /// How many terminal rows the panel shows.
     fn terminal_visible_rows(&self) -> usize {
         let s = |v: i32| (v as f32 * self.scale()).round() as i32;
-        let height = self.height - self.terminal_top() - s(34);
+        let height = self.terminal_bottom() - self.terminal_top() - s(34);
         ((height / s(24).max(1)).max(1)) as usize
     }
 
@@ -5717,11 +5811,8 @@ impl App {
                 }
             }
             if self.editor_focused && index == self.caret_line && blink_phase(self.started) {
-                let caret_x = left
-                    + s(52)
-                    + self.code_text_width(
-                        &self.files[self.selected_file].lines[index][..self.caret_column],
-                    );
+                let column = valid_byte_column(line, self.caret_column);
+                let caret_x = left + s(52) + self.code_text_width(&line[..column]);
                 self.line(
                     self.colors.bright,
                     1,
@@ -5799,46 +5890,54 @@ impl App {
         if self.editor_focused {
             let completions = self.completions();
             if !completions.is_empty() {
-                let popup_x = left
-                    + s(52)
-                    + self.code_text_width(
-                        &self.files[self.selected_file].lines[self.caret_line][..self.caret_column],
-                    );
-                let popup_y = self
+                let line = &self.files[self.selected_file].lines[self.caret_line];
+                let column = valid_byte_column(line, self.caret_column);
+                let popup_x = left + s(52) + self.code_text_width(&line[..column]);
+                let popup_h = s(48) * completions.len() as i32 + self.s(8);
+                let desired_y = self
                     .editor_screen_row(self.caret_line)
                     .map(|row| base_y + (row as i32 + 1) * step)
-                    .unwrap_or(base_y)
-                    .min(self.height - s(180));
-                let popup_w = s(210);
-                let popup_h = s(30) * completions.len() as i32 + self.s(10);
+                    .unwrap_or(base_y);
+                let popup_y = desired_y
+                    .min(self.terminal_top() - popup_h - s(8))
+                    .max(self.editor_tabs_bottom() + s(4));
+                let popup_w = s(430).min((right - popup_x - s(12)).max(s(250)));
                 self.rect(self.colors.panel_2, popup_x, popup_y, popup_w, popup_h);
                 self.outline(self.colors.line, popup_x, popup_y, popup_w, popup_h);
                 for (index, item) in completions.iter().enumerate() {
-                    if index == 0 {
+                    let selected = index
+                        == self
+                            .completion_index
+                            .min(completions.len().saturating_sub(1));
+                    let row_y = popup_y + s(4) + index as i32 * s(48);
+                    if selected {
                         self.rect(
                             self.colors.project,
                             popup_x + s(3),
-                            popup_y + s(3),
+                            row_y,
                             popup_w - s(6),
-                            s(27),
+                            s(45),
                         );
                     }
                     self.text(
-                        if index == 0 {
+                        if selected {
                             self.colors.bright
                         } else {
                             self.colors.text
                         },
                         popup_x + s(12),
-                        popup_y + s(23) + index as i32 * s(30),
+                        row_y + s(19),
                         item,
                     );
+                    let detail = self.completion_detail(item);
+                    let short = detail.chars().take(62).collect::<String>();
+                    self.text(self.colors.muted, popup_x + s(12), row_y + s(39), &short);
                 }
                 self.text(
                     self.colors.muted,
-                    popup_x + popup_w - s(44),
-                    popup_y + s(23),
-                    "TAB",
+                    popup_x + popup_w - s(94),
+                    popup_y - s(7),
+                    "↑↓ / TAB",
                 );
             }
         }
@@ -6506,8 +6605,17 @@ impl App {
         let terminal_progress = self.terminal_motion.value.clamp(0.0, 1.0);
         let expanded = self.terminal_height.clamp(s(150), self.height - s(150));
         let panel_h = s(28) + ((expanded - s(28)) as f32 * terminal_progress) as i32;
-        let top = self.height - panel_h;
+        let bottom = self.terminal_bottom();
+        let top = bottom - panel_h;
         self.rect(self.colors.panel_2, left, top, panel_width, panel_h);
+        self.rounded_outline(
+            self.colors.line,
+            left + s(5),
+            top,
+            panel_width - s(10),
+            panel_h,
+            s(9),
+        );
         self.line(self.colors.line, 1, (left, top), (right, top));
         let grip_x = left + panel_width / 2;
         let grip_hovered =
@@ -6567,12 +6675,7 @@ impl App {
                 panel_h - s(38),
                 s(9),
             );
-            self.line(
-                self.colors.line,
-                1,
-                (list_x, top + s(30)),
-                (list_x, self.height),
-            );
+            self.line(self.colors.line, 1, (list_x, top + s(30)), (list_x, bottom));
             self.rounded_rect(
                 if self.mouse_x >= list_x + s(10)
                     && self.mouse_x <= list_x + s(86)
@@ -6740,16 +6843,16 @@ impl App {
                     self.text(
                         self.colors.accent,
                         left + s(24),
-                        self.height - s(18),
+                        bottom - s(12),
                         &format!("{} {selected}", self.tr("selected", "已选中")),
                     );
                 }
             }
-            self.text(self.colors.accent, left + s(24), self.height - s(18), "$");
+            self.text(self.colors.accent, left + s(24), bottom - s(12), "$");
             self.text(
                 self.colors.bright,
                 left + s(44),
-                self.height - s(18),
+                bottom - s(12),
                 &terminal.input,
             );
             if self.terminal_focused && blink_phase(self.started) {
@@ -6757,8 +6860,8 @@ impl App {
                 self.line(
                     self.colors.bright,
                     1,
-                    (x, self.height - s(36)),
-                    (x, self.height - s(12)),
+                    (x, bottom - s(30)),
+                    (x, bottom - s(6)),
                 );
             }
         }
@@ -7625,6 +7728,28 @@ impl App {
                 .unwrap_or_else(Instant::now)
         };
         match name {
+            "completion" => {
+                self.files = vec![FileBuffer::new(
+                    "main.cpp".into(),
+                    PathBuf::from("/tmp/tc-ide-preview/main.cpp"),
+                    vec![
+                        "#include <iostream>".into(),
+                        "int AAAA = 0;".into(),
+                        "int AAAB = 1;".into(),
+                        "int main() {".into(),
+                        "    AAA".into(),
+                        "}".into(),
+                    ],
+                )];
+                self.selected_file = 0;
+                self.caret_line = 4;
+                // Deliberately stale: this was the real crash reported from
+                // moving through completion rows after editing a shorter line.
+                self.caret_column = 99;
+                self.completion_index = 1;
+                self.editor_focused = true;
+                true
+            }
             "extensions" => {
                 self.extensions_open = true;
                 self.extensions_motion = UiMotion::new(1.0);
@@ -8983,15 +9108,23 @@ impl App {
         // Only the label goes in, not the detail that follows it.
         let label = word.split("  ").next().unwrap_or(&word).to_string();
         self.delete_selection();
-        self.files[self.selected_file]
-            .buffer
-            .insert(self.caret_line, self.caret_column, &label);
-        self.caret_column += label.len();
+        let prefix = self.current_prefix();
+        let column = valid_byte_column(
+            &self.files[self.selected_file].lines[self.caret_line],
+            self.caret_column,
+        );
+        let start = column.saturating_sub(prefix.len());
+        self.files[self.selected_file].buffer.replace(
+            (self.caret_line, start),
+            (self.caret_line, column),
+            &label,
+        );
+        self.caret_column = start + label.len();
         self.files[self.selected_file].sync();
         self.note_edit(
             motion_core::EditKind::Insert,
             self.caret_line,
-            self.caret_column - label.len(),
+            start,
             self.caret_column,
         );
         self.lsp_completions.clear();
@@ -10614,23 +10747,30 @@ impl App {
                     * self.code_line_step()
                 + s(24);
             let rows = self.lsp_completions.len().min(8) as i32;
-            let width = s(340);
-            let height = rows * s(20) + s(10);
+            let width = s(460);
+            let height = rows * s(38) + s(10);
             self.rect(self.colors.panel_2, left, top, width, height);
             self.outline(self.colors.line, left, top, width, height);
             for (index, entry) in self.lsp_completions.iter().take(8).enumerate() {
-                let row = top + s(16 + index as i32 * 20);
+                let row = top + s(17 + index as i32 * 38);
                 if index == self.lsp_completion_index {
                     self.rect(
                         self.colors.project,
                         left + s(2),
                         row - s(13),
                         width - s(4),
-                        s(19),
+                        s(36),
                     );
                 }
-                let short: String = entry.chars().take(44).collect();
-                self.text(self.colors.text, left + s(10), row, &short);
+                let (label, detail) = entry.split_once("  ").unwrap_or((entry.as_str(), ""));
+                self.text(self.colors.text, left + s(10), row, label);
+                let detail = if detail.is_empty() {
+                    self.tr("language server symbol", "语言服务器符号")
+                } else {
+                    detail
+                };
+                let short: String = detail.chars().take(58).collect();
+                self.text(self.colors.muted, left + s(10), row + s(17), &short);
             }
         }
         let Some(prompt) = self.rename_prompt.as_ref() else {
@@ -12080,7 +12220,11 @@ impl App {
         let terminal_top = self.terminal_top();
         let terminal_left = workspace_right;
         let terminal_right = graph_left;
-        if y >= terminal_top && x >= terminal_left && x < terminal_right {
+        if y >= terminal_top
+            && y < self.terminal_bottom()
+            && x >= terminal_left
+            && x < terminal_right
+        {
             if !self.terminal_open {
                 self.terminal_open = true;
                 self.terminal_focused = true;
@@ -12498,6 +12642,65 @@ impl App {
         // F12 goes to the definition, Ctrl+I shows what the symbol is and
         // Ctrl+R walks the places that use it, the keys Windows uses.
         if self.editor_focused {
+            // Completion navigation takes precedence over caret movement while
+            // a popup is visible. Enter accepts; Tab/Shift+Tab and arrows walk
+            // the rows without editing the document.
+            if !self.lsp_completions.is_empty() {
+                match keysym {
+                    UP_KEYSYM => {
+                        self.lsp_completion_index = self
+                            .lsp_completion_index
+                            .checked_sub(1)
+                            .unwrap_or(self.lsp_completions.len() - 1);
+                        return true;
+                    }
+                    DOWN_KEYSYM | TAB_KEYSYM => {
+                        let backwards = keysym == TAB_KEYSYM && event.state & SHIFT_MASK != 0;
+                        self.lsp_completion_index = if backwards {
+                            self.lsp_completion_index
+                                .checked_sub(1)
+                                .unwrap_or(self.lsp_completions.len() - 1)
+                        } else {
+                            (self.lsp_completion_index + 1) % self.lsp_completions.len()
+                        };
+                        return true;
+                    }
+                    RETURN_KEYSYM => {
+                        self.accept_server_completion();
+                        return true;
+                    }
+                    _ => {}
+                }
+            } else {
+                let local = self.completions();
+                if !local.is_empty() {
+                    match keysym {
+                        UP_KEYSYM => {
+                            self.completion_index = self
+                                .completion_index
+                                .checked_sub(1)
+                                .unwrap_or(local.len() - 1);
+                            return true;
+                        }
+                        DOWN_KEYSYM | TAB_KEYSYM => {
+                            let backwards = keysym == TAB_KEYSYM && event.state & SHIFT_MASK != 0;
+                            self.completion_index = if backwards {
+                                self.completion_index
+                                    .checked_sub(1)
+                                    .unwrap_or(local.len() - 1)
+                            } else {
+                                (self.completion_index + 1) % local.len()
+                            };
+                            return true;
+                        }
+                        RETURN_KEYSYM => {
+                            self.accept_completion();
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
             // F2 renames the symbol at the caret through the server.
             if keysym == F2_KEYSYM {
                 self.begin_rename();
@@ -12523,10 +12726,6 @@ impl App {
             // what the list is on while it is open.
             if control && keysym == SPACE_KEYSYM {
                 self.request_completions();
-                return true;
-            }
-            if keysym == TAB_KEYSYM && !self.lsp_completions.is_empty() {
-                self.accept_server_completion();
                 return true;
             }
         }
@@ -13034,9 +13233,17 @@ impl App {
         if !self.editor_focused {
             return true;
         }
+        // Mouse clicks, line joins and asynchronous completion responses can
+        // leave a byte column that belonged to a longer previous line. Clamp
+        // once before *every* editing/navigation command so no key path can
+        // slice a shorter UTF-8 string with stale state.
+        let current_line = &self.files[self.selected_file].lines[self.caret_line];
+        self.caret_column = valid_byte_column(current_line, self.caret_column);
         match keysym {
             TAB_KEYSYM => self.accept_completion(),
             BACKSPACE_KEYSYM => {
+                self.completion_index = 0;
+                self.lsp_completions.clear();
                 if !self.delete_selection() {
                     let lower_bound = self
                         .active_comment_edit_bounds()
@@ -13072,6 +13279,8 @@ impl App {
                 }
             }
             DELETE_KEYSYM => {
+                self.completion_index = 0;
+                self.lsp_completions.clear();
                 if !self.delete_selection() {
                     let len = self.files[self.selected_file].lines[self.caret_line].len();
                     let upper_bound = self
@@ -13102,6 +13311,8 @@ impl App {
                 }
             }
             RETURN_KEYSYM => {
+                self.completion_index = 0;
+                self.lsp_completions.clear();
                 if self.active_comment_edit_bounds().is_some() {
                     self.status_message = self
                         .tr(
@@ -13162,8 +13373,8 @@ impl App {
                 if self.active_comment_edit_bounds().is_some() {
                     return true;
                 }
-                let visual = self.files[self.selected_file].lines[self.caret_line]
-                    [..self.caret_column]
+                let line = &self.files[self.selected_file].lines[self.caret_line];
+                let visual = line[..valid_byte_column(line, self.caret_column)]
                     .chars()
                     .count();
                 self.caret_line = self.caret_line.saturating_sub(1);
@@ -13178,8 +13389,8 @@ impl App {
                 if self.active_comment_edit_bounds().is_some() {
                     return true;
                 }
-                let visual = self.files[self.selected_file].lines[self.caret_line]
-                    [..self.caret_column]
+                let line = &self.files[self.selected_file].lines[self.caret_line];
+                let visual = line[..valid_byte_column(line, self.caret_column)]
                     .chars()
                     .count();
                 self.caret_line =
@@ -13193,9 +13404,16 @@ impl App {
             }
             _ => {
                 if count > 0 && !input.chars().any(char::is_control) {
+                    self.completion_index = 0;
+                    self.lsp_completions.clear();
                     self.delete_selection();
                     let line = self.caret_line;
-                    let start = self.caret_column;
+                    let column = valid_byte_column(
+                        &self.files[self.selected_file].lines[self.caret_line],
+                        self.caret_column,
+                    );
+                    self.caret_column = column;
+                    let start = column;
                     // The edit goes into the piece table so it can be undone,
                     // and the lines are read back out of it.
                     self.files[self.selected_file].buffer.insert(
@@ -13279,12 +13497,10 @@ impl App {
                     .into();
             }
             PanelDrag::Terminal => {
-                let raw = (self.height - y).clamp(self.s(150), self.height - self.s(150));
-                let fraction = raw as f32 / self.height.max(1) as f32;
-                self.terminal_height = (snap_panel_fraction(fraction, &[0.2, 0.3, 0.4, 0.5])
-                    * self.height as f32)
-                    .round() as i32;
-                self.status_message = self.tr("Resizing terminal", "正在调整终端高度").into();
+                // Follow every pointer pixel while dragging. Snapping at each
+                // event created visible pauses around 20/30/40/50 percent.
+                self.terminal_height =
+                    (self.terminal_bottom() - y).clamp(self.s(150), self.height - self.s(150));
             }
             PanelDrag::EditorScrollbar => {
                 let track_y = self.editor_tabs_bottom() + self.s(5);
@@ -13904,6 +14120,15 @@ fn char_to_byte_index(value: &str, character: usize) -> usize {
         .nth(character)
         .map(|(index, _)| index)
         .unwrap_or(value.len())
+}
+
+/// Clamp a possibly stale caret byte offset after edits or vertical movement.
+fn valid_byte_column(value: &str, column: usize) -> usize {
+    let mut column = column.min(value.len());
+    while column > 0 && !value.is_char_boundary(column) {
+        column -= 1;
+    }
+    column
 }
 
 fn previous_char_boundary(value: &str, index: usize) -> usize {
@@ -14783,6 +15008,7 @@ pub fn run() {
             lsp_reference_index: 0,
             lsp_completions: Vec::new(),
             lsp_completion_index: 0,
+            completion_index: 0,
             rename_prompt: None,
             rename_focused: false,
             ai_open: false,
@@ -15189,6 +15415,8 @@ mod tests {
         assert_eq!(char_to_byte_index(value, 2), 4);
         assert_eq!(previous_char_boundary(value, 4), 1);
         assert_eq!(next_char_boundary(value, 1), 4);
+        assert_eq!(valid_byte_column(value, 99), value.len());
+        assert_eq!(valid_byte_column(value, 3), 1);
     }
 
     #[test]

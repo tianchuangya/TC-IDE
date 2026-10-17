@@ -77,6 +77,10 @@ jobs:
           xvfb-run -a cargo run -- --render-frame /tmp/tc-menu-keyboard.png --render-scene menu-keyboard
           xvfb-run -a cargo run -- --render-frame /tmp/tc-menu-hover.png --render-scene menu-hover
           xvfb-run -a cargo run -- --render-frame /tmp/tc-typing.png --render-scene typing
+          # Deliberately primes a stale caret column and local completion
+          # navigation; rendering this frame guards the crash reported when
+          # repeatedly pressing Up/Down in the suggestion list.
+          xvfb-run -a cargo run -- --render-frame /tmp/tc-completion.png --render-scene completion
           xvfb-run -a cargo run -- --render-frame /tmp/tc-projdoc.png --render-scene project-document
           python3 - <<'PY'
           import os

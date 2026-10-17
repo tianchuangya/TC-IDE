@@ -1812,7 +1812,10 @@ pub fn fold_regions(scan: &FileScan) -> Vec<FoldRegion> {
     let mut regions = scan
         .scopes
         .iter()
-        .filter(|scope| scope.end_line > scope.start_line)
+        // The synthetic file scope starts at line zero, which made a leading
+        // `#include` appear foldable and allowed it to hide the whole file.
+        // Only real classes, functions, and brace/indent blocks get markers.
+        .filter(|scope| scope.kind != ScopeKind::File && scope.end_line > scope.start_line)
         .map(|scope| FoldRegion {
             start_line: scope.start_line,
             end_line: scope.end_line,
@@ -1941,6 +1944,22 @@ mod fold_tests {
         // The struct and the impl both start at column zero.
         assert!(regions.iter().any(|region| region.start_line == 0));
         assert!(regions.iter().any(|region| region.start_line == 4));
+    }
+
+    #[test]
+    fn a_preprocessor_line_never_folds_the_whole_file() {
+        let scan = scan(
+            &[
+                "#include <iostream>".into(),
+                "int main() {".into(),
+                "    return 0;".into(),
+                "}".into(),
+            ],
+            "main.cpp",
+        );
+        let regions = fold_regions(&scan);
+        assert!(!regions.iter().any(|region| region.start_line == 0));
+        assert!(regions.iter().any(|region| region.start_line == 1));
     }
 
     #[test]
