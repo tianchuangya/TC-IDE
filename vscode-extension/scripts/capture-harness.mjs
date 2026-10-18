@@ -119,7 +119,7 @@ async function main() {
   }
   console.log(`using browser: ${chromium}`);
   const port = 7789;
-  const { url } = await serve(port);
+  const { url, close } = await serve(port);
   await mkdir(join(ROOT, 'harness-shots'), { recursive: true });
 
   // Puppeteer is used rather than the browser's own --screenshot flag: that
@@ -146,6 +146,9 @@ async function main() {
     console.log(`shot ${scenario.name}`);
   }
   await browser.close();
+  // The server keeps the process alive; without closing it the script finishes
+  // its work and then hangs until it is killed.
+  await close();
 }
 
 await main();

@@ -1076,3 +1076,21 @@ DeepSeek 提交给 Codex/项目所有者前逐项回答“是/否/不适用”�
 
 **下一步**：把 `harness-shots/` 交给项目所有者或 Codex 做视觉批准；并行可开始阶段 B 的
 Call Hierarchy 双向联动与阶段 C 的 Decoration。
+
+### 2026-10-18 / 阶段 A 后续修正
+
+**完成**：
+
+- 截图脚本跑完后**不退出**（HTTP server 未关闭，进程挂住直到被 kill）→ 关闭 server，现在正常 `exit 0`。
+- `graph-loading` 截图在**首次**运行时不稳定：spinner 在旋转，截图会落在不同角度。现在 harness 页面在
+  `body[data-frozen="true"]` 下把 spinner 固定在 90°，两次运行逐字节一致（已连续三次验证）。
+- CI 的浏览器步骤补上 **Chromium 所需系统库**（`libnss3`/`libatk*`/`libgbm1` 等）。缺库时启动会报
+  缺 shared library，看起来像布局失败，实际是环境问题。
+
+**验证**：`typecheck` / `lint` 通过；`npm test` **30/30**；`geometry-check` **187/187**；
+`verify-package` 通过（9 文件 5 命令）；截图 10 张、连续三次运行逐字节一致。
+
+**仍未解决**：GitHub Actions 的失败原因我仍**无法读到**（无 admin 权限，页面 HTML 不含步骤结论）。
+本地把 CI 的每一步都复现过并全部通过，包括从 `git clone` 干净树开始。原生 `build.yml` 的失败
+在我动手之前就已存在（`81bd44d` 与 `c90b…` 系列的运行同样是红的）。**需要项目所有者打开一次 Actions
+日志确认是哪一步**，我不再靠猜测修改工作流。

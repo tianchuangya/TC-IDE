@@ -44,12 +44,20 @@ jobs:
       - name: Build bundles
         run: npm run build
 
-      - name: Install the browser for the harness
-        # Chromium is a 200MB download and the mirror can be slow or fail. It is
-        # installed in its own step with a generous timeout so a flaky download
-        # is reported as such instead of looking like a layout failure.
-        timeout-minutes: 12
+      - name: Install the browser and its system libraries
+        # Chromium needs shared libraries that a bare runner does not carry, and
+        # the download is large. Installing the libraries is the documented way
+        # to make a headless browser work on ubuntu-24.04; skipping it makes the
+        # launch fail with a missing-library message that reads like a layout
+        # bug. Both are in their own step with a long timeout so a slow download
+        # is reported as a download problem.
+        timeout-minutes: 15
         run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+            libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+            libgbm1 libpango-1.0-0 libcairo2 libasound2t64
           npx puppeteer browsers install chrome
           node -e "console.log(require('puppeteer').executablePath())"
 

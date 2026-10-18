@@ -371,6 +371,10 @@ html, body {
   animation: spin 0.9s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* A screenshot has to be the same picture every run, so when the page is being
+   captured the spinner holds a fixed angle instead of rotating: an animated
+   ring lands on a different frame each time and the baseline never matches. */
+body[data-frozen="true"] .spinner { animation: none; transform: rotate(90deg); }
 .state.error { color: var(--tc-error); }
 .state .state-action {
   height: ${metrics.primaryButton}px;

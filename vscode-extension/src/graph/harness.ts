@@ -212,7 +212,8 @@ export function harnessPage(scenario: HarnessScenario): string {
 </style>
 </head>
 <body data-reduced-motion="${scenario.reducedMotion === true}"
-      data-high-contrast="${scenario.theme === 'high-contrast'}">
+      data-high-contrast="${scenario.theme === 'high-contrast'}"
+      data-frozen="true">
 ${markup()}
 <script nonce="${nonce}">window.__TC_HARNESS__ = ${JSON.stringify(boot)};</script>
 <script nonce="${nonce}" src="/harness.js"></script>
