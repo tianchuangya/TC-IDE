@@ -2,6 +2,9 @@
 # else - sources, the individual compiled modules, the harness, its screenshots
 # - is development material and would only make the download bigger.
 src/**
+# The development host configuration is for working on the extension, not
+# for using it; a user does not want our launch and task files in their copy.
+.vscode/**
 scripts/**
 fixtures/**
 node_modules/**
