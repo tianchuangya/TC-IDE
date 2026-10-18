@@ -27,7 +27,11 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # Pinned to a version the scripts are actually tested against. The
+          # unit-test runner used to pass a glob to `node --test`, which Node 20
+          # does not expand: it looked for a file literally named `*.test.js`
+          # and failed, so CI was red while a newer local Node passed.
+          node-version: '20.20.2'
 
       - name: Install dependencies
         run: npm ci || npm install --no-audit --no-fund

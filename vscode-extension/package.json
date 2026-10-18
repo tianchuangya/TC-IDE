@@ -226,7 +226,7 @@
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --max-warnings 0",
-    "test": "tsc --outDir dist/modules && node --test \"dist/modules/test/*.test.js\"",
+    "test": "tsc --outDir dist/modules && node scripts/run-tests.mjs",
     "vscode:prepublish": "npm run build",
     "package": "vsce package --no-dependencies --out tc-ide-companion.vsix",
     "verify:package": "node scripts/verify-package.mjs",
