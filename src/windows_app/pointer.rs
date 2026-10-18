@@ -416,9 +416,10 @@ pub(super) fn handle_left_button_down(window: Hwnd, l_param: Lparam) -> Lresult 
         }
     }
     // Document tabs sit in the editor header.
-    let tab_width = 132.0 * scale;
-    let tab_top = 48.0 * scale + 4.0 * scale;
-    let tab_bottom = 48.0 * scale + 30.0 * scale;
+    let tab_width = theme_core::chrome::TAB_WIDTH * scale;
+    let tab_top = theme_core::chrome::TOP_BAR_HEIGHT * scale + 4.0 * scale;
+    let tab_bottom =
+        theme_core::chrome::TOP_BAR_HEIGHT * scale + theme_core::chrome::CONTROL_HEIGHT * scale;
     let tab_left = (area.right as f32 * 0.19).max(220.0 * scale) + 16.0 * scale;
     let graph_panel_left = graph_left(&area, scale);
     if (y as f32) >= tab_top && (y as f32) <= tab_bottom && (x as f32) >= tab_left {

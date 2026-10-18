@@ -298,5 +298,8 @@ Windows 真机上的 DirectWrite/Direct2D、ConPTY、编译器/LSP/调试器和�
   macOS 的顶栏/状态栏/标签/代码槽已改为引用这些共享值。
 - macOS 不再用直角块假装相同组件：标签、设置控件、扩展行、打包行和三种浮层通过
   CoreGraphics `CGPathCreateWithRoundedRect` 实际绘制共享 8px 圆角，不引入 WebView 或第三方 UI 框架。
+- 三端文档标签现在都使用 136px 槽位和共享关闭按钮命中规则：Linux 的长文件名会在
+  关闭按钮前裁剪，Windows 绘制和鼠标命中不再分别使用 136/132 造成误点，macOS 补上了
+  可点击的 `×` 并直接调用共享 `menu_core::tab_at`。
 - “UI 统一”不等于放弃平台习惯：Windows/macOS 保留原生系统菜单，Linux 使用客户区菜单；
   但编辑器客户区的比例、颜色、动效角色与控件状态必须共用。

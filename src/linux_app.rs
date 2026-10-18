@@ -2900,19 +2900,16 @@ impl App {
         let s = |v: i32| self.s(v);
         let left = (self.layout.workspace_pixels(self.width as f32)) as i32;
         let right = self.graph_left();
-        let close_width = menu_core::tab_close_width(s(7));
         let mut tab_x = left + s(10);
         let mut tabs = Vec::new();
-        for file in &self.files {
-            let name_width = self.pango_text_size(&file.name, false).0;
-            let width = menu_core::tab_width(name_width, s(28), s(58));
+        let width = s(theme_core::chrome::TAB_WIDTH as i32);
+        for _ in &self.files {
             if tab_x + width > right - s(180) {
                 break;
             }
             tabs.push((tab_x, width));
             tab_x += width + s(2);
         }
-        let _ = close_width;
         (tabs, tab_x + s(4))
     }
 
@@ -4600,7 +4597,7 @@ impl App {
                     s(8),
                     width - s(8),
                     s(31),
-                    s(7),
+                    s(theme_core::chrome::CONTROL_RADIUS as i32),
                 );
             }
             if active {
@@ -5529,8 +5526,24 @@ impl App {
             } else if self.tab_close_hovered == Some(index) {
                 // A tab the pointer is on lifts slightly, so it is clear which
                 // one the close button belongs to.
-                self.rounded_rect(self.colors.panel_2, tab_x, top + s(5), width, s(32), s(7));
+                self.rounded_rect(
+                    self.colors.panel_2,
+                    tab_x,
+                    top + s(5),
+                    width,
+                    s(theme_core::chrome::CONTROL_HEIGHT as i32),
+                    s(theme_core::chrome::CONTROL_RADIUS as i32),
+                );
             }
+            cairo_save(self.cairo);
+            cairo_rectangle(
+                self.cairo,
+                (tab_x + s(8)) as f64,
+                top as f64,
+                (width - close_width - s(12)).max(1) as f64,
+                s(theme_core::chrome::TAB_STRIP_HEIGHT as i32) as f64,
+            );
+            cairo_clip(self.cairo);
             self.text(
                 if selected {
                     self.colors.bright
@@ -5541,6 +5554,7 @@ impl App {
                 top + s(24),
                 &file.name,
             );
+            cairo_restore(self.cairo);
             // The close button, at the tab's trailing edge.
             let close_x = tab_x + width - close_width - s(4) + shift;
             let hovered = self.tab_close_hovered == Some(index);

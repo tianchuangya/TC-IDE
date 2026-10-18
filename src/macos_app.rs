@@ -27,6 +27,7 @@ use crate::editor_session;
 use crate::extension_core;
 use crate::graph_core::{self, Graph, GraphNode, GraphRelation, GraphScope};
 use crate::lsp_core;
+use crate::menu_core;
 use crate::motion_core;
 use crate::syntax_core;
 use crate::terminal_core::{
@@ -1909,11 +1910,19 @@ impl MacShell {
     }
 
     /// The tab a point of the header is over.
-    fn tab_at(&self, x: f64, y: f64) -> Option<usize> {
+    fn tab_at(&self, x: f64, y: f64) -> Option<menu_core::TabHit> {
         if y > self.header_height() {
             return None;
         }
-        tab_index_at(x, self.session.documents().len(), self.tab_width())
+        let width = self.tab_width().round() as i32;
+        let tabs = (0..self.session.documents().len())
+            .map(|index| (TAB_MARGIN as i32 + index as i32 * width, width))
+            .collect::<Vec<_>>();
+        menu_core::tab_at(
+            &tabs,
+            menu_core::tab_close_width(theme_core::chrome::CONTROL_RADIUS as i32),
+            x.round() as i32,
+        )
     }
 
     /// Rebuild the graph when the documents changed.
@@ -2600,8 +2609,15 @@ impl MacShell {
 
     /// Place the caret at a point of the view.
     fn click_at(&mut self, x: f64, y: f64) {
-        if let Some(index) = self.tab_at(x, y) {
-            if self.session.activate(index) {
+        if let Some(hit) = self.tab_at(x, y) {
+            if hit.close {
+                if !self.session.close_document(hit.index) {
+                    self.status = "The last document stays open".into();
+                } else {
+                    let name = self.session.document().name.clone();
+                    self.status = format!("Closed a tab; now on {name}");
+                }
+            } else if self.session.activate(hit.index) {
                 let name = self.session.document().name.clone();
                 self.status = format!("Switched to {name}");
             }
@@ -2822,6 +2838,14 @@ unsafe fn draw_frame(shell: &mut MacShell) {
             } else {
                 palette.muted
             },
+            false,
+        );
+        draw_text(
+            "×",
+            left + tab_width - 22.0,
+            16.0,
+            13.0,
+            palette.muted,
             false,
         );
     }
