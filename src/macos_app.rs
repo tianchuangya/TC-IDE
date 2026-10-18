@@ -1719,8 +1719,15 @@ impl MacShell {
         }
     }
 
-    fn header_height(&self) -> f64 {
+    fn identity_height(&self) -> f64 {
         theme_core::chrome::TOP_BAR_HEIGHT as f64
+    }
+
+    /// Complete client-area chrome above the editor. The native macOS menu bar
+    /// stays native, while the window itself uses the same identity + document
+    /// tab split as the other TC-IDE backends.
+    fn header_height(&self) -> f64 {
+        self.identity_height() + theme_core::chrome::TAB_STRIP_HEIGHT as f64
     }
 
     fn status_height(&self) -> f64 {
@@ -1911,7 +1918,7 @@ impl MacShell {
 
     /// The tab a point of the header is over.
     fn tab_at(&self, x: f64, y: f64) -> Option<menu_core::TabHit> {
-        if y > self.header_height() {
+        if y < self.identity_height() || y > self.header_height() {
             return None;
         }
         let width = self.tab_width().round() as i32;
@@ -2791,7 +2798,6 @@ unsafe fn draw_text(value: &str, x: f64, y: f64, size: f64, color: u32, monospac
 unsafe fn draw_frame(shell: &mut MacShell) {
     let width = shell.view_width();
     let height = shell.view_height();
-    let header = shell.header_height();
     let status = shell.status_height();
     let step = shell.line_step();
     let font = shell.code_font_size();
@@ -2804,7 +2810,21 @@ unsafe fn draw_frame(shell: &mut MacShell) {
         palette.background,
         1.0,
     );
-    fill_rect(CGRect::new(0.0, 0.0, width, header), palette.panel, 1.0);
+    fill_rect(
+        CGRect::new(0.0, 0.0, width, shell.identity_height()),
+        palette.raised,
+        1.0,
+    );
+    fill_rect(
+        CGRect::new(
+            0.0,
+            shell.identity_height(),
+            width,
+            theme_core::chrome::TAB_STRIP_HEIGHT as f64,
+        ),
+        palette.panel,
+        1.0,
+    );
     fill_rect(
         CGRect::new(0.0, height - status, width, status),
         palette.panel,
@@ -2815,11 +2835,27 @@ unsafe fn draw_frame(shell: &mut MacShell) {
     let titles = shell.session.titles();
     let active = shell.session.active();
     let tab_width = shell.tab_width();
+    draw_text("TC-IDE", 16.0, 16.0, 14.0, palette.bright, false);
+    let path = document.name.clone();
+    draw_text(
+        &path,
+        (width * 0.5 - path.chars().count() as f64 * 3.4).max(96.0),
+        16.0,
+        12.0,
+        palette.muted,
+        false,
+    );
     for (index, title) in titles.iter().enumerate() {
         let left = TAB_MARGIN + index as f64 * tab_width;
         let selected = index == active;
+        let tab_top = shell.identity_height() + 4.0;
         fill_rounded_rect(
-            CGRect::new(left, 6.0, tab_width - 6.0, header - 12.0),
+            CGRect::new(
+                left,
+                tab_top,
+                tab_width - 6.0,
+                theme_core::chrome::CONTROL_HEIGHT as f64,
+            ),
             theme_core::chrome::CONTROL_RADIUS as f64,
             if selected {
                 palette.raised
@@ -2831,7 +2867,7 @@ unsafe fn draw_frame(shell: &mut MacShell) {
         draw_text(
             title,
             left + 8.0,
-            16.0,
+            tab_top + 9.0,
             13.0,
             if selected {
                 palette.bright
@@ -2843,7 +2879,7 @@ unsafe fn draw_frame(shell: &mut MacShell) {
         draw_text(
             "×",
             left + tab_width - 22.0,
-            16.0,
+            tab_top + 9.0,
             13.0,
             palette.muted,
             false,
