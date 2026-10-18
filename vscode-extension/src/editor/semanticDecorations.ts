@@ -12,19 +12,26 @@ export function registerSemanticDecorations(context: vscode.ExtensionContext): v
   const reference = vscode.window.createTextEditorDecorationType({
     backgroundColor: 'rgba(183, 116, 255, .13)', borderRadius: '2px', overviewRulerColor: '#b774ff', overviewRulerLane: vscode.OverviewRulerLane.Right,
   });
-  const pulse = vscode.window.createTextEditorDecorationType({ border: '2px solid rgba(96, 185, 255, .98)', borderRadius: '4px', backgroundColor: 'rgba(54, 155, 255, .24)' });
-  const glow = vscode.window.createTextEditorDecorationType({ border: '1px solid rgba(151, 102, 255, .92)', borderRadius: '4px', backgroundColor: 'rgba(166, 100, 255, .20)', overviewRulerColor: '#A664FF', overviewRulerLane: vscode.OverviewRulerLane.Center });
+  // VS Code decorations cannot run CSS transitions in the editor. These three
+  // frames are deliberately distinct, then swapped on a short timer: this is
+  // a visible fade-in → peak → fade-out rather than a one-frame outline.
+  const pulseIn = vscode.window.createTextEditorDecorationType({ border: '1px solid rgba(96, 185, 255, .24)', borderRadius: '4px', backgroundColor: 'rgba(54, 155, 255, .05)' });
+  const pulsePeak = vscode.window.createTextEditorDecorationType({ border: '2px solid rgba(96, 185, 255, 1)', borderRadius: '4px', backgroundColor: 'rgba(54, 155, 255, .30)' });
+  const pulseOut = vscode.window.createTextEditorDecorationType({ border: '1px solid rgba(96, 185, 255, .20)', borderRadius: '4px', backgroundColor: 'rgba(54, 155, 255, .035)' });
+  const glowIn = vscode.window.createTextEditorDecorationType({ border: '1px solid rgba(176, 115, 255, .22)', borderRadius: '4px', backgroundColor: 'rgba(166, 100, 255, .04)' });
+  const glowPeak = vscode.window.createTextEditorDecorationType({ border: '2px solid rgba(176, 115, 255, .96)', borderRadius: '4px', backgroundColor: 'rgba(166, 100, 255, .28)', overviewRulerColor: '#A664FF', overviewRulerLane: vscode.OverviewRulerLane.Center });
+  const glowOut = vscode.window.createTextEditorDecorationType({ border: '1px solid rgba(176, 115, 255, .18)', borderRadius: '4px', backgroundColor: 'rgba(166, 100, 255, .03)' });
   const deleted = vscode.window.createTextEditorDecorationType({ before: { contentText: '│', color: '#78BAFF', fontWeight: 'bold' } });
   const bubble = vscode.window.createTextEditorDecorationType({
     after: { margin: '0 0 0 14px', color: 'var(--vscode-descriptionForeground)', backgroundColor: 'var(--vscode-editorWidget-background)', border: '1px solid var(--vscode-widget-border)' },
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let flashTimer: ReturnType<typeof setTimeout> | undefined;
+  const flashTimers: ReturnType<typeof setTimeout>[] = [];
   let sequence = 0;
 
   const clear = (): void => {
     for (const editor of vscode.window.visibleTextEditors) {
-      editor.setDecorations(focus, []); editor.setDecorations(definition, []); editor.setDecorations(reference, []); editor.setDecorations(pulse, []); editor.setDecorations(glow, []); editor.setDecorations(deleted, []); editor.setDecorations(bubble, []);
+      editor.setDecorations(focus, []); editor.setDecorations(definition, []); editor.setDecorations(reference, []); clearTypingFrames(editor); editor.setDecorations(deleted, []); editor.setDecorations(bubble, []);
     }
   };
   const update = (): void => {
@@ -68,12 +75,13 @@ export function registerSemanticDecorations(context: vscode.ExtensionContext): v
     }
     const effect = vscode.workspace.getConfiguration('tcIde.editor').get<string>('typingEffect', 'pulse');
     if (effect === 'none') return;
-    const active = effect === 'glow' ? glow : pulse;
-    editor.setDecorations(pulse, active === pulse ? inserted : []);
-    editor.setDecorations(glow, active === glow ? inserted : []);
+    const frames: [vscode.TextEditorDecorationType, vscode.TextEditorDecorationType, vscode.TextEditorDecorationType] = effect === 'glow' ? [glowIn, glowPeak, glowOut] : [pulseIn, pulsePeak, pulseOut];
+    clearTypingFrames(editor);
+    editor.setDecorations(frames[0], inserted);
     editor.setDecorations(deleted, removed);
-    if (flashTimer) clearTimeout(flashTimer);
-    flashTimer = setTimeout(() => { editor.setDecorations(pulse, []); editor.setDecorations(glow, []); editor.setDecorations(deleted, []); }, 150);
+    flashTimers.push(setTimeout(() => { editor.setDecorations(frames[0], []); editor.setDecorations(frames[1], inserted); }, 42));
+    flashTimers.push(setTimeout(() => { editor.setDecorations(frames[1], []); editor.setDecorations(frames[2], inserted); }, 108));
+    flashTimers.push(setTimeout(() => { editor.setDecorations(frames[2], []); editor.setDecorations(deleted, []); }, 185));
   };
   const codeLens = vscode.languages.registerCodeLensProvider({ scheme: 'file' }, {
     async provideCodeLenses(document) {
@@ -83,13 +91,17 @@ export function registerSemanticDecorations(context: vscode.ExtensionContext): v
       }));
     },
   });
-  const disposables: vscode.Disposable[] = [focus, definition, reference, pulse, glow, deleted, bubble, codeLens,
+  const clearTypingFrames = (editor: vscode.TextEditor): void => {
+    while (flashTimers.length) clearTimeout(flashTimers.pop());
+    for (const frame of [pulseIn, pulsePeak, pulseOut, glowIn, glowPeak, glowOut]) editor.setDecorations(frame, []);
+  };
+  const disposables: vscode.Disposable[] = [focus, definition, reference, pulseIn, pulsePeak, pulseOut, glowIn, glowPeak, glowOut, deleted, bubble, codeLens,
     vscode.window.onDidChangeTextEditorSelection(update), vscode.window.onDidChangeActiveTextEditor(update),
     vscode.workspace.onDidChangeTextDocument((event) => { flash(event); update(); }),
     vscode.workspace.onDidChangeConfiguration((event) => { if (event.affectsConfiguration('tcIde.editor')) update(); }),
   ];
   update();
-  const disposable = new vscode.Disposable(() => { if (timer) clearTimeout(timer); if (flashTimer) clearTimeout(flashTimer); clear(); disposables.forEach((item) => item.dispose()); });
+  const disposable = new vscode.Disposable(() => { if (timer) clearTimeout(timer); while (flashTimers.length) clearTimeout(flashTimers.pop()); clear(); disposables.forEach((item) => item.dispose()); });
   context.subscriptions.push(disposable);
   return disposable;
 }
