@@ -35,7 +35,19 @@ if [ -z "$GCCDIR" ] || [ ! -d "$GCCDIR" ]; then
     echo "mingw libgcc not found under $MINGW" >&2
     exit 2
 fi
+# The mingw tools have to be findable by name: rustc calls `dlltool` for the
+# import libraries, and it does not take a path. Putting the prefix's bin
+# directory on PATH is what makes a locally unpacked runtime work the same way
+# as one installed by the distribution packages.
+if [ -d "$MINGW/usr/bin" ]; then
+    PATH="$MINGW/usr/bin:$PATH"
+    export PATH
+fi
 command -v wine >/dev/null || { echo "wine is required" >&2; exit 2; }
+command -v x86_64-w64-mingw32-dlltool >/dev/null || {
+    echo "x86_64-w64-mingw32-dlltool not found; is the mingw bin directory on PATH?" >&2
+    exit 2
+}
 
 # A library crate is built instead of the binary, because the binary would
 # need a desktop; the check is reached through a small entry point.
@@ -53,8 +65,10 @@ edition = "2021"
 name = "tc_ide"
 path = "src/lib.rs"
 TOML
-# keep the dependency table from the real manifest
-sed -n '/^\[target/,$p' "$ROOT/Cargo.toml" >> "$WORK/Cargo.toml"
+# Keep every dependency table from the real manifest, not only the target
+# sections: the shared cores use serde_json, and a scratch crate without it
+# fails to compile for a reason that has nothing to do with the Windows port.
+sed -n '/^\[dependencies\]/,$p' "$ROOT/Cargo.toml" >> "$WORK/Cargo.toml"
 
 cat > "$WORK/.cargo/config.toml" <<TOML
 [target.x86_64-pc-windows-gnu]
