@@ -4383,6 +4383,7 @@ impl App {
 
     /// Focus the symbol a graph node represents.
     fn focus_graph_node(&mut self, node: &graph_core::GraphNode) {
+        self.relation_code_span = None;
         let Some(target) = node.target.as_ref() else {
             self.hovered_symbol = None;
             return;
@@ -4403,6 +4404,29 @@ impl App {
                 editor_core::SymbolRole::Reference
             },
         });
+        // A graph focus should be able to drive the same semantic rail back
+        // into the editor as a code hover.  Only retain a span when the node
+        // points into the active document and its bytes still name the symbol;
+        // an index can otherwise be briefly stale while a file is edited.
+        let current_file = &self.files[self.selected_file];
+        let same_file = current_file.name == target.file
+            || target.file.ends_with(&current_file.name)
+            || current_file.path.ends_with(&target.file);
+        let end = target.column.saturating_add(name.len());
+        if same_file
+            && current_file
+                .lines
+                .get(target.line)
+                .and_then(|line| line.get(target.column..end))
+                == Some(name.as_str())
+        {
+            self.relation_code_span = Some((target.line, target.column, end));
+        }
+    }
+
+    fn relation_focus_active(&self) -> bool {
+        self.hovered_from_code
+            || (self.graph_visible && self.hovered.is_some() && self.relation_code_span.is_some())
     }
 
     unsafe fn draw(&self) {
@@ -6414,7 +6438,13 @@ impl App {
         let s = |v| self.s(v);
         let relation_offset = self.overlay_offset(self.relation_focus_motion);
         let editor_left = (self.layout.workspace_pixels(self.width as f32)) as i32;
-        let symbol = &self.files[self.selected_file].lines[line][start_byte..end_byte];
+        let Some(symbol) = self.files[self.selected_file]
+            .lines
+            .get(line)
+            .and_then(|value| value.get(start_byte..end_byte))
+        else {
+            return;
+        };
         if symbol.len() < 2 {
             return;
         }
@@ -8450,11 +8480,20 @@ impl App {
                     end: declaration.column + declaration.name.len(),
                     role: editor_core::SymbolRole::Declaration,
                 });
+                self.relation_code_span = Some((
+                    declaration.line,
+                    declaration.column,
+                    declaration.column + declaration.name.len(),
+                ));
                 self.graph_relation = graph_core::GraphRelation::Callees;
                 // The panel has to be on screen, or the frame primed here is
                 // the plain editor.
                 self.graph_visible = true;
                 self.graph_motion = UiMotion::new(1.0);
+                let graph = self.graph();
+                self.hovered = graph.nodes.iter().position(|node| {
+                    node.label.trim_end_matches("()") == declaration.name && node.edge.is_some()
+                });
                 true
             }
             "syntax-colors" => {
@@ -8681,7 +8720,10 @@ impl App {
             || Self::motion_is_running(self.terminal_motion, target(self.terminal_open))
             || Self::motion_is_running(self.graph_motion, target(self.graph_visible))
             || Self::motion_is_running(self.graph_content_motion, 1.0)
-            || Self::motion_is_running(self.relation_focus_motion, target(self.hovered_from_code))
+            || Self::motion_is_running(
+                self.relation_focus_motion,
+                target(self.relation_focus_active()),
+            )
             || self.project_tree_velocity.abs() > 0.01
             || self
                 .folder_tree_motion
@@ -8801,13 +8843,14 @@ impl App {
             self.extension_scroll as f32,
             dt,
         );
+        let relation_focus_active = self.relation_focus_active();
         Self::step_ui_motion(
             &mut self.relation_focus_motion,
-            self.hovered_from_code,
+            relation_focus_active,
             dt,
             MotionRole::Follow,
         );
-        if !self.hovered_from_code && self.relation_focus_motion.value <= 0.01 {
+        if !self.relation_focus_active() && self.relation_focus_motion.value <= 0.01 {
             self.relation_code_span = None;
         }
         Self::step_ui_motion(&mut self.graph_content_motion, true, dt, MotionRole::Follow);
@@ -8889,7 +8932,11 @@ impl App {
         self.graph_scope_position = self.graph_scope_index() as f32
             / self.graph_scope_labels().len().saturating_sub(1).max(1) as f32;
         self.graph_content_motion = UiMotion::new(1.0);
-        self.relation_focus_motion = UiMotion::new(if self.hovered_from_code { 1.0 } else { 0.0 });
+        self.relation_focus_motion = UiMotion::new(if self.relation_focus_active() {
+            1.0
+        } else {
+            0.0
+        });
     }
 
     fn finish_build_preview(&mut self) {

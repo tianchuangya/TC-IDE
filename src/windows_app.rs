@@ -50,6 +50,7 @@ mod motion;
 mod packaging;
 mod panel;
 mod pointer;
+mod pointer_geometry;
 mod scene;
 mod selfcheck;
 mod workspace;
@@ -498,6 +499,41 @@ impl WindowsAppState {
             })
             .map(|(index, _)| index)
             .collect()
+    }
+
+    /// Resolve a graph node back to an exact symbol in the active document.
+    /// Graph indexes update asynchronously, so stale line/column data is
+    /// rejected instead of being handed to DirectWrite as a bogus span.
+    fn relation_symbol_for_graph_node(
+        &self,
+        node: &graph_core::GraphNode,
+    ) -> Option<editor_core::SymbolOccurrence> {
+        let target = node.target.as_ref()?;
+        let name = node.label.trim_end_matches("()");
+        if name.is_empty() || node.edge.is_none() {
+            return None;
+        }
+        let same_file = self.file_name == target.file
+            || target.file.ends_with(&self.file_name)
+            || self
+                .file_path
+                .as_ref()
+                .is_some_and(|path| path.ends_with(&target.file));
+        let end = target.column.checked_add(name.len())?;
+        if !same_file || self.lines.get(target.line)?.get(target.column..end)? != name {
+            return None;
+        }
+        Some(editor_core::SymbolOccurrence {
+            name: name.to_string(),
+            line: target.line,
+            start: target.column,
+            end,
+            role: if node.edge == Some(graph_core::GraphEdge::Declaration) {
+                editor_core::SymbolRole::Declaration
+            } else {
+                editor_core::SymbolRole::Reference
+            },
+        })
     }
 
     fn project_language_name(&self) -> &'static str {

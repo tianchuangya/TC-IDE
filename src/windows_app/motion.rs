@@ -11,10 +11,14 @@ impl WindowsAppState {
         Self::step_overlay_motion(
             &mut self.relation_focus_motion,
             &mut self.relation_focus_velocity,
-            self.hovered_symbol.is_some(),
+            self.hovered_symbol.is_some()
+                || (self.graph_selected.is_some() && self.relation_symbol.is_some()),
             dt,
         );
-        if self.hovered_symbol.is_none() && self.relation_focus_motion <= 0.001 {
+        if self.hovered_symbol.is_none()
+            && self.graph_selected.is_none()
+            && self.relation_focus_motion <= 0.001
+        {
             self.relation_symbol = None;
         }
         Self::step_overlay_motion(

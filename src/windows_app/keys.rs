@@ -550,6 +550,10 @@ pub(super) fn handle_key_down(window: Hwnd, w_param: Wparam) -> Lresult {
                 _ => current,
             };
             app.graph_selected = Some(index);
+            app.relation_symbol = graph
+                .nodes
+                .get(index)
+                .and_then(|node| app.relation_symbol_for_graph_node(node));
             let first = graph.clamped_scroll(app.graph_scroll, columns);
             if index < first {
                 app.graph_scroll += first - index;
@@ -570,6 +574,12 @@ pub(super) fn handle_key_down(window: Hwnd, w_param: Wparam) -> Lresult {
                         app.caret_line = line.min(app.lines.len().saturating_sub(1));
                         app.caret_column = column;
                         app.clamp_caret();
+                        app.relation_symbol = editor_core::symbol_at(
+                            &app.lines,
+                            &app.file_name,
+                            app.caret_line,
+                            app.caret_column,
+                        );
                         app.status = format!("Jumped to relation at {}", app.file_name);
                     }
                 }

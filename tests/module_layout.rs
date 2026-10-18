@@ -4,15 +4,15 @@
 //! painter in one file of more than seven thousand lines, and the renderer kept
 //! a single function of more than two thousand lines. Both were split into
 //! regions: window events, keys, pointer, editor, workspace, language,
-//! extensions, packaging, terminal panel, detached terminal, scene, motion and
-//! AI modules, plus one painter per scene region. This test keeps that split
+//! extensions, packaging, terminal panel, detached terminal, pointer geometry,
+//! scene, motion and AI modules, plus one painter per scene region. This test keeps that split
 //! honest, because it is exactly the kind of structure that quietly decays.
 
 use std::fs;
 use std::path::PathBuf;
 
 /// `(module, the region it owns)` of the Windows app.
-const WINDOWS_MODULES: [(&str, &str); 15] = [
+const WINDOWS_MODULES: [(&str, &str); 16] = [
     ("ai", "the AI chat panel and its transcript"),
     ("debug", "DAP sessions, breakpoints and stepping"),
     ("detached", "the standalone ConPTY window"),
@@ -31,6 +31,10 @@ const WINDOWS_MODULES: [(&str, &str); 15] = [
     ),
     ("panel", "the bottom terminal panel"),
     ("pointer", "mouse handling per region"),
+    (
+        "pointer_geometry",
+        "pointer and background-preview geometry",
+    ),
     ("scene", "scene assembly and graph geometry"),
     ("selfcheck", "the scriptable state layer check"),
     ("workspace", "project scanning, templates and sessions"),

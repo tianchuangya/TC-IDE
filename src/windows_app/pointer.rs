@@ -3,65 +3,14 @@
 use super::detached::open_detached_terminal;
 use super::events::{comment_bubble_at, editor_position_at, perform_command};
 use super::panel::{terminal_buffer, terminal_point_at};
+use super::pointer_geometry::{
+    background_crop_on_screen, background_preview_rect, background_view_size,
+};
 use super::scene::{
     build_graph, graph_left, graph_scope_rect, graph_search_rect, graph_visible_rows,
 };
 use super::workspace::save_session;
 use super::*;
-
-fn background_preview_rect(area: &Rect, scale: f32) -> background_core::Rect {
-    let left = area.right as f32 - 410.0 * scale;
-    let top = 58.0 * scale;
-    background_core::Rect::new(
-        (left + 18.0 * scale) as f64,
-        (top + 444.0 * scale) as f64,
-        (358.0 * scale) as f64,
-        (132.0 * scale) as f64,
-    )
-}
-
-fn background_view_size(app: &WindowsAppState, area: &Rect, scale: f32) -> (f64, f64) {
-    let width = area.right as f32;
-    let height = area.bottom as f32;
-    let tree = (width * 0.19).max(220.0 * scale);
-    let graph = (width * 0.27).max(300.0 * scale);
-    let panel = terminal_core::panel_metrics(width, height, scale, app.terminal_motion);
-    (
-        (width - graph - tree).max(1.0) as f64,
-        (height - panel.height - 86.0 * scale).max(1.0) as f64,
-    )
-}
-
-fn background_crop_on_screen(
-    app: &WindowsAppState,
-    area: &Rect,
-    scale: f32,
-    image: (f64, f64),
-) -> (background_core::Rect, background_core::Placement) {
-    let preview_rect = background_preview_rect(area, scale);
-    let preview =
-        background_core::preview_placement(image, (preview_rect.width, preview_rect.height));
-    let view = background_view_size(app, area, scale);
-    let placed = background_core::placement(
-        image,
-        view,
-        app.background_zoom as f64,
-        (
-            app.background_offset_x as f64,
-            app.background_offset_y as f64,
-        ),
-    );
-    let crop = preview.project(&placed.crop(view, image));
-    (
-        background_core::Rect::new(
-            preview_rect.x + crop.x,
-            preview_rect.y + crop.y,
-            crop.width,
-            crop.height,
-        ),
-        preview,
-    )
-}
 
 /// Mouse press: overlays, terminal tabs, the graph, the tree and the editor.
 pub(super) fn handle_left_button_down(window: Hwnd, l_param: Lparam) -> Lresult {
@@ -517,6 +466,7 @@ pub(super) fn handle_left_button_down(window: Hwnd, l_param: Lparam) -> Lresult 
             }
             app.graph_selected = Some(index);
             app.graph_keyboard_active = true;
+            app.relation_symbol = app.relation_symbol_for_graph_node(node);
             let Some(target) = node.target.as_ref() else {
                 return (false, None);
             };
@@ -540,6 +490,12 @@ pub(super) fn handle_left_button_down(window: Hwnd, l_param: Lparam) -> Lresult 
                 app.caret_line = line.min(app.lines.len().saturating_sub(1));
                 app.caret_column = column;
                 app.clamp_caret();
+                app.relation_symbol = editor_core::symbol_at(
+                    &app.lines,
+                    &app.file_name,
+                    app.caret_line,
+                    app.caret_column,
+                );
                 app.graph_search_focused = false;
                 app.status = format!(
                     "Jumped to relation at {}:{}",
@@ -877,9 +833,14 @@ pub(super) fn handle_mouse_move(window: Hwnd, w_param: Wparam, l_param: Lparam) 
         let position = editor_position_at(window, x, y);
         let changed = APP.with(|cell| {
             let mut app = cell.borrow_mut();
+            let in_editor = position.is_some();
             let hovered = position.and_then(|position| {
                 editor_core::symbol_at(&app.lines, &app.file_name, position.line, position.column)
             });
+            if in_editor {
+                app.graph_selected = None;
+                app.graph_keyboard_active = false;
+            }
             if hovered == app.hovered_symbol {
                 false
             } else {
