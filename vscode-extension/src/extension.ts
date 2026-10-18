@@ -14,6 +14,7 @@ import { registerSemanticDecorations } from './editor/semanticDecorations';
 import { TaskRunner, type TcTaskKind } from './tasks/taskRunner';
 import { PackagePanel } from './package/packagePanel';
 import { SettingsViewProvider } from './settings/settingsViewProvider';
+import { DynamicEditorProvider } from './editor/dynamicEditorProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new GraphViewProvider(context);
@@ -21,6 +22,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const packagePanel = new PackagePanel();
   const settings = new SettingsViewProvider(context);
   context.subscriptions.push(tasks, registerSemanticDecorations(context));
+  context.subscriptions.push(DynamicEditorProvider.register(context));
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(GraphViewProvider.viewType, provider, {
       // The view is worth keeping alive: tearing it down on every hide would
@@ -110,6 +112,11 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showInformationMessage(`已创建 ${folder.name}.tcIDE`);
     }),
     vscode.commands.registerCommand('tcIde.openSettings', () => settings.reveal()),
+    vscode.commands.registerCommand('tcIde.openDynamicEditor', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) { void vscode.window.showWarningMessage('请先打开一个代码文件。'); return; }
+      await vscode.commands.executeCommand('vscode.openWith', editor.document.uri, DynamicEditorProvider.viewType, vscode.ViewColumn.Active);
+    }),
     vscode.commands.registerCommand('tcIde.build', () => runTask(tasks, 'build')),
     vscode.commands.registerCommand('tcIde.run', () => runTask(tasks, 'run')),
     vscode.commands.registerCommand('tcIde.package', async () => {

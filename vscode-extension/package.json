@@ -27,6 +27,8 @@
     "onCommand:tcIde.build",
     "onCommand:tcIde.run",
     "onCommand:tcIde.package",
+    "onCommand:tcIde.openDynamicEditor",
+    "onCustomEditor:tcIde.dynamicEditor",
     "onView:tcIde.graphView"
   ],
   "contributes": {
@@ -201,6 +203,12 @@
         "icon": "$(settings-gear)"
       },
       {
+        "command": "tcIde.openDynamicEditor",
+        "title": "用 TC 动态编辑器打开当前文件",
+        "category": "TC-IDE",
+        "icon": "$(symbol-key)"
+      },
+      {
         "command": "tcIde.build",
         "title": "编译项目",
         "category": "TC-IDE",
@@ -298,6 +306,21 @@
         "label": "TC-IDE Light",
         "uiTheme": "vs",
         "path": "./themes/tc-ide-light-color-theme.json"
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "tcIde.dynamicEditor",
+        "displayName": "TC 动态编辑器",
+        "selector": [
+          { "filenamePattern": "*.c" }, { "filenamePattern": "*.h" },
+          { "filenamePattern": "*.cc" }, { "filenamePattern": "*.cpp" },
+          { "filenamePattern": "*.hpp" }, { "filenamePattern": "*.rs" },
+          { "filenamePattern": "*.py" }, { "filenamePattern": "*.ts" },
+          { "filenamePattern": "*.tsx" }, { "filenamePattern": "*.js" },
+          { "filenamePattern": "*.java" }, { "filenamePattern": "*.go" }
+        ],
+        "priority": "option"
       }
     ]
   },
