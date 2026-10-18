@@ -4523,16 +4523,7 @@ impl App {
         let focus_menu = self
             .open_menu
             .or_else(|| self.menu_at(self.mouse_x, self.mouse_y));
-        let title_position = self.menu_title_position.clamp(0.0, 7.0);
-        let lower = title_position.floor() as usize;
-        let upper = title_position.ceil() as usize;
-        let blend = title_position.fract();
-        let lower_rect = self.menu_rect(menu_core::Menu::ALL[lower]);
-        let upper_rect = self.menu_rect(menu_core::Menu::ALL[upper]);
-        let focus_left =
-            (lower_rect.0 as f32 * (1.0 - blend) + upper_rect.0 as f32 * blend).round() as i32;
-        let focus_width =
-            (lower_rect.2 as f32 * (1.0 - blend) + upper_rect.2 as f32 * blend).round() as i32;
+        let (focus_left, focus_width) = self.animated_menu_title_rect();
         if focus_menu.is_some() {
             self.rounded_rect(
                 self.colors.panel,
@@ -10252,9 +10243,36 @@ impl App {
         })
     }
 
+    /// Horizontal geometry of the spring that follows the active menu title.
+    /// Menu titles have different widths, so interpolating an index and then
+    /// multiplying by a fixed cell width would drift away from the real bar.
+    fn animated_menu_title_rect(&self) -> (i32, i32) {
+        let position = self
+            .menu_title_position
+            .clamp(0.0, (menu_core::Menu::ALL.len() - 1) as f32);
+        let lower = position.floor() as usize;
+        let upper = position.ceil() as usize;
+        let blend = position.fract();
+        let lower_rect = self.menu_rect(menu_core::Menu::ALL[lower]);
+        let upper_rect = self.menu_rect(menu_core::Menu::ALL[upper]);
+        (
+            (lower_rect.0 as f32 * (1.0 - blend) + upper_rect.0 as f32 * blend).round() as i32,
+            (lower_rect.2 as f32 * (1.0 - blend) + upper_rect.2 as f32 * blend).round() as i32,
+        )
+    }
+
     /// Animated dropdown geometry shared by painting, hover, and clicking.
     fn menu_dropdown_rect(&self, menu: menu_core::Menu) -> (i32, i32, i32, i32) {
-        let (left, top, _, _) = self.menu_rect(menu);
+        let (semantic_left, top, _, _) = self.menu_rect(menu);
+        // Once a dropdown is open it follows the same spring as the blue menu
+        // indicator. Switching File -> Edit -> View now visibly travels along
+        // the bar instead of destroying one panel and teleporting another.
+        // Hit testing calls this method too, so the moving panel stays usable.
+        let left = if self.open_menu == Some(menu) {
+            self.animated_menu_title_rect().0
+        } else {
+            semantic_left
+        };
         let row = self.s(26);
         (
             left,
