@@ -66,10 +66,21 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  refreshAppearance(): void {
+    if (this.view) this.view.webview.html = this.html(this.view.webview);
+  }
+
   private html(webview: vscode.Webview): string {
     const nonce = makeNonce();
     const bundle = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview.js'));
     const csp = contentSecurityPolicy(bundle.toString(), nonce);
+    const configuredImage = vscode.workspace.getConfiguration('tcIde').get<string>('appearance.backgroundImage', '');
+    const opacity = Math.min(1, Math.max(0, vscode.workspace.getConfiguration('tcIde').get<number>('appearance.backgroundOpacity', 0.12)));
+    let imageCss = '';
+    if (configuredImage) {
+      const imageUri = webview.asWebviewUri(vscode.Uri.file(configuredImage));
+      imageCss = `body::before{content:'';position:fixed;inset:0;pointer-events:none;background:url('${imageUri}') center/cover no-repeat;opacity:${opacity};filter:blur(0px);z-index:-1}`;
+    }
     return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -77,6 +88,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 <meta http-equiv="Content-Security-Policy" content="${csp}" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style nonce="${nonce}">${styles({ nonce })}</style>
+<style nonce="${nonce}">${imageCss}</style>
 </head>
 <body>
 ${markup()}

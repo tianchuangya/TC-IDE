@@ -13,11 +13,13 @@ import { defaultDocument, documentPath, serialiseDocument } from './project/tcid
 import { registerSemanticDecorations } from './editor/semanticDecorations';
 import { TaskRunner, type TcTaskKind } from './tasks/taskRunner';
 import { PackagePanel } from './package/packagePanel';
+import { SettingsViewProvider } from './settings/settingsViewProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new GraphViewProvider(context);
   const tasks = new TaskRunner();
   const packagePanel = new PackagePanel();
+  const settings = new SettingsViewProvider(context);
   context.subscriptions.push(tasks, registerSemanticDecorations(context));
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(GraphViewProvider.viewType, provider, {
@@ -26,6 +28,7 @@ export function activate(context: vscode.ExtensionContext): void {
       webviewOptions: { retainContextWhenHidden: true },
     }),
   );
+  context.subscriptions.push(vscode.window.registerWebviewViewProvider(SettingsViewProvider.viewType, settings, { webviewOptions: { retainContextWhenHidden: true } }));
 
   // Only the Extension Development Host opens the view automatically. Released
   // installs stay quiet until the user opens TC-IDE from the Activity Bar.
@@ -106,6 +109,7 @@ export function activate(context: vscode.ExtensionContext): void {
       await vscode.window.showTextDocument(opened);
       void vscode.window.showInformationMessage(`已创建 ${folder.name}.tcIDE`);
     }),
+    vscode.commands.registerCommand('tcIde.openSettings', () => settings.reveal()),
     vscode.commands.registerCommand('tcIde.build', () => runTask(tasks, 'build')),
     vscode.commands.registerCommand('tcIde.run', () => runTask(tasks, 'run')),
     vscode.commands.registerCommand('tcIde.package', async () => {
@@ -141,6 +145,9 @@ export function activate(context: vscode.ExtensionContext): void {
       provider.post({ type: 'setTheme', theme: currentTokens() });
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration('tcIde.appearance')) {
+        provider.refreshAppearance();
+      }
       if (event.affectsConfiguration('tcIde.graph.defaultScope')) {
         provider.setScope(vscode.workspace.getConfiguration('tcIde.graph').get('defaultScope', 'auto'));
       }

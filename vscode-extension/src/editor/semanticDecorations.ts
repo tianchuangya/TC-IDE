@@ -16,13 +16,16 @@ export function registerSemanticDecorations(context: vscode.ExtensionContext): v
     border: '1px solid rgba(68, 190, 255, .9)', borderRadius: '3px',
     backgroundColor: 'rgba(68, 190, 255, .18)',
   });
+  const bubble = vscode.window.createTextEditorDecorationType({
+    after: { margin: '0 0 0 14px', color: 'var(--vscode-descriptionForeground)', backgroundColor: 'var(--vscode-editorWidget-background)', border: '1px solid var(--vscode-widget-border)' },
+  });
   let timer: ReturnType<typeof setTimeout> | undefined;
   let flashTimer: ReturnType<typeof setTimeout> | undefined;
   let sequence = 0;
 
   const clear = (): void => {
     for (const editor of vscode.window.visibleTextEditors) {
-      editor.setDecorations(focus, []); editor.setDecorations(definition, []); editor.setDecorations(reference, []);
+      editor.setDecorations(focus, []); editor.setDecorations(definition, []); editor.setDecorations(reference, []); editor.setDecorations(bubble, []);
     }
   };
   const update = (): void => {
@@ -37,6 +40,7 @@ export function registerSemanticDecorations(context: vscode.ExtensionContext): v
     if (!range) { clear(); return; }
     const current = ++sequence;
     editor.setDecorations(focus, [range]);
+    renderCommentBubbles(editor, bubble);
     const max = vscode.workspace.getConfiguration('tcIde.editor').get<number>('maxDecorations', 12);
     try {
       const [definitions, highlights] = await Promise.all([
@@ -58,6 +62,8 @@ export function registerSemanticDecorations(context: vscode.ExtensionContext): v
       const end = new vscode.Position(change.range.start.line, change.range.start.character + Math.max(1, first.length));
       return new vscode.Range(change.range.start, end);
     });
+    const effect = vscode.workspace.getConfiguration('tcIde.editor').get<string>('typingEffect', 'pulse');
+    if (effect === 'none') return;
     editor.setDecorations(changed, options);
     if (flashTimer) clearTimeout(flashTimer);
     flashTimer = setTimeout(() => editor.setDecorations(changed, []), 240);
@@ -70,7 +76,7 @@ export function registerSemanticDecorations(context: vscode.ExtensionContext): v
       }));
     },
   });
-  const disposables: vscode.Disposable[] = [focus, definition, reference, changed, codeLens,
+  const disposables: vscode.Disposable[] = [focus, definition, reference, changed, bubble, codeLens,
     vscode.window.onDidChangeTextEditorSelection(update), vscode.window.onDidChangeActiveTextEditor(update),
     vscode.workspace.onDidChangeTextDocument((event) => { flash(event); update(); }),
     vscode.workspace.onDidChangeConfiguration((event) => { if (event.affectsConfiguration('tcIde.editor')) update(); }),
@@ -79,4 +85,28 @@ export function registerSemanticDecorations(context: vscode.ExtensionContext): v
   const disposable = new vscode.Disposable(() => { if (timer) clearTimeout(timer); if (flashTimer) clearTimeout(flashTimer); clear(); disposables.forEach((item) => item.dispose()); });
   context.subscriptions.push(disposable);
   return disposable;
+}
+
+function renderCommentBubbles(editor: vscode.TextEditor, decoration: vscode.TextEditorDecorationType): void {
+  const config = vscode.workspace.getConfiguration('tcIde.editor');
+  if (!config.get('commentBubbles', true)) { editor.setDecorations(decoration, []); return; }
+  const style = config.get<string>('commentBubbleStyle', 'soft');
+  const pattern = commentPattern(editor.document.languageId);
+  if (!pattern) { editor.setDecorations(decoration, []); return; }
+  const options: vscode.DecorationOptions[] = [];
+  for (let line = 0; line < Math.min(editor.document.lineCount, 600) && options.length < 12; line += 1) {
+    const text = editor.document.lineAt(line).text;
+    const match = pattern.exec(text); pattern.lastIndex = 0;
+    if (!match || !match[1]) continue;
+    const label = match[1].trim().replace(/\s+/g, ' ').slice(0, 42);
+    if (!label) continue;
+    options.push({ range: new vscode.Range(line, text.length, line, text.length), renderOptions: { after: { contentText: ` ${style === 'minimal' ? '注释' : label} ` } } });
+  }
+  editor.setDecorations(decoration, options);
+}
+
+function commentPattern(language: string): RegExp | undefined {
+  if (['python', 'shellscript', 'yaml', 'toml', 'makefile'].includes(language)) return /#\s*(.*)$/;
+  if (['c', 'cpp', 'java', 'javascript', 'typescript', 'rust', 'go', 'csharp'].includes(language)) return /\/\/\s*(.*)$/;
+  return undefined;
 }

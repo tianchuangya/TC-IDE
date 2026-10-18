@@ -267,6 +267,16 @@ html, body {
   overflow-y: auto;
   overflow-x: hidden;
 }
+.viewport[data-layout="radial"] { overflow: hidden; }
+.radial { position:absolute; inset:0; display:none; }
+.viewport[data-layout="radial"] .rows { display:none; }
+.viewport[data-layout="radial"] .radial { display:block; }
+.radial svg { width:100%; height:100%; overflow:visible; }
+.radial-link { stroke:var(--tc-border); stroke-width:1.2; fill:none; opacity:.86; }
+.radial-node { cursor:pointer; transition:transform .18s cubic-bezier(.2,.8,.2,1); }
+.radial-node:hover { transform:scale(1.08); }
+.radial-dot { fill:var(--tc-raised); stroke:var(--tc-accent); stroke-width:1.5; }
+.radial-label { fill:var(--tc-text); font:12px var(--tc-ui-font); dominant-baseline:middle; }
 .rows { position: relative; }
 
 .row {
@@ -425,6 +435,7 @@ export function markup(): string {
     <span class="spacer"></span>
     <button class="icon-button" id="search-toggle" type="button" aria-label="搜索" title="搜索">⌕</button>
     <button class="icon-button" id="follow-toggle" type="button" aria-label="跟随光标" title="跟随光标" aria-pressed="true">◎</button>
+    <button class="icon-button" id="layout-toggle" type="button" aria-label="切换径向关系图" title="切换树形 / 径向关系图" aria-pressed="false">◌</button>
     <button class="icon-button" id="refresh" type="button" aria-label="刷新关系图" title="刷新关系图">⟳</button>
   </div>
 
@@ -453,6 +464,7 @@ export function markup(): string {
 
   <div class="viewport" id="viewport">
     <div class="rows" id="rows"></div>
+    <div class="radial" id="radial" aria-label="径向调用关系图"></div>
 
     <div class="state" id="state-loading" hidden>
       <div class="spinner"></div>

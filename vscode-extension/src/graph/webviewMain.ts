@@ -62,6 +62,7 @@ interface ViewState {
   folded: Set<string>;
   /** Time frozen by the screenshot harness, or null to use the clock. */
   frozenTime: number | null;
+  layout: 'tree' | 'radial';
 }
 
 const state: ViewState = {
@@ -72,6 +73,7 @@ const state: ViewState = {
   query: '',
   folded: new Set<string>(),
   frozenTime: null,
+  layout: 'tree',
 };
 
 const railSpring = newSpring(0);
@@ -239,6 +241,8 @@ function renderRows(): void {
   const rows = el('rows');
   const viewport = el('viewport');
   const nodes = visibleNodes();
+  viewport.dataset['layout'] = state.layout;
+  if (state.layout === 'radial') { renderRadial(nodes); return; }
   const mode = widthModeFor(document.documentElement.clientWidth);
   const budget = mode === 'comfortable' ? 16 : mode === 'expanded' ? Number.POSITIVE_INFINITY : 0;
 
@@ -363,6 +367,20 @@ function renderRows(): void {
   el('breadcrumb').textContent = selected ? `${selected.title} · ${selected.subtitle}` : '';
 
   updateStates(nodes.length);
+}
+
+/** Obsidian-style radial view; edges retain the exact tree parent relation. */
+function renderRadial(nodes: GraphNodeDTO[]): void {
+  const host = el('radial'); host.replaceChildren();
+  const rect = host.getBoundingClientRect(); const width = Math.max(260, rect.width); const height = Math.max(260, rect.height);
+  const ns = 'http://www.w3.org/2000/svg'; const svg = document.createElementNS(ns, 'svg'); svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  const center = { x: width / 2, y: height / 2 }; const positions = new Map<string, { x: number; y: number }>();
+  const maxDepth = Math.max(1, ...nodes.map((node) => node.depth));
+  nodes.forEach((node, index) => { const angle = -Math.PI / 2 + (index / Math.max(1, nodes.length)) * Math.PI * 2; const r = node.depth === 0 ? 0 : 48 + (node.depth / maxDepth) * Math.min(width, height) * .31; positions.set(node.id, { x: center.x + Math.cos(angle) * r, y: center.y + Math.sin(angle) * r }); });
+  let parent: GraphNodeDTO | undefined;
+  for (const node of nodes) { const point = positions.get(node.id); if (!point) continue; while (parent && parent.depth >= node.depth) parent = undefined; const candidate = [...nodes.slice(0, nodes.indexOf(node))].reverse().find((item) => item.depth < node.depth); if (candidate) { const from = positions.get(candidate.id); if (from) { const link = document.createElementNS(ns, 'line'); link.setAttribute('class', 'radial-link'); link.setAttribute('x1', String(from.x)); link.setAttribute('y1', String(from.y)); link.setAttribute('x2', String(point.x)); link.setAttribute('y2', String(point.y)); svg.appendChild(link); } }
+    const group = document.createElementNS(ns, 'g'); group.setAttribute('class', 'radial-node'); group.setAttribute('transform', `translate(${point.x} ${point.y})`); const dot = document.createElementNS(ns, 'circle'); dot.setAttribute('class', 'radial-dot'); dot.setAttribute('r', node.depth === 0 ? '13' : '8'); if (state.tokens) dot.setAttribute('stroke', levelColor(state.tokens, node.level)); group.appendChild(dot); const label = document.createElementNS(ns, 'text'); label.setAttribute('class', 'radial-label'); label.setAttribute('x', point.x < center.x ? '-12' : '12'); label.setAttribute('text-anchor', point.x < center.x ? 'end' : 'start'); label.textContent = node.title.length > 22 ? `${node.title.slice(0, 22)}…` : node.title; group.appendChild(label); group.addEventListener('click', () => { state.selectedId = node.id; if (node.location) post({ version: 1, type: 'openLocation', ...node.location }); renderRadial(nodes); }); svg.appendChild(group); parent = node; }
+  host.appendChild(svg); el('footer-left').textContent = `径向显示 ${nodes.length} / ${state.graph.total}`; el('footer-right').textContent = '径向关系图';
 }
 
 function cutPath(text: string, budget: number): string {
@@ -502,6 +520,7 @@ function showError(text: string): void {
 
 function wireControls(): void {
   el('refresh').addEventListener('click', () => post({ version: 1, type: 'refresh' }));
+  el('layout-toggle').addEventListener('click', () => { state.layout = state.layout === 'tree' ? 'radial' : 'tree'; el('layout-toggle').setAttribute('aria-pressed', String(state.layout === 'radial')); el('layout-toggle').textContent = state.layout === 'radial' ? '≡' : '◌'; renderRows(); });
   el('search-toggle').addEventListener('click', () => {
     const row = el('search-row');
     row.hidden = !row.hidden;

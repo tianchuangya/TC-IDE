@@ -112,6 +112,35 @@
           "maximum": 50,
           "description": "同时高亮的关系数量上限；超出后只在关系图显示。"
         },
+        "tcIde.editor.typingEffect": {
+          "type": "string",
+          "enum": ["none", "glow", "pulse"],
+          "default": "pulse",
+          "description": "输入或删除时的微动效；不会替换 VS Code 原生文字渲染。"
+        },
+        "tcIde.editor.commentBubbles": {
+          "type": "boolean",
+          "default": true,
+          "description": "在识别到的代码注释末尾显示可读的注释气泡。"
+        },
+        "tcIde.editor.commentBubbleStyle": {
+          "type": "string",
+          "enum": ["soft", "outline", "minimal"],
+          "default": "soft",
+          "description": "注释气泡样式。"
+        },
+        "tcIde.appearance.backgroundImage": {
+          "type": "string",
+          "default": "",
+          "description": "TC-IDE 插件页面背景图片的本地绝对路径。"
+        },
+        "tcIde.appearance.backgroundOpacity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.12,
+          "description": "TC-IDE 插件页面背景图不透明度。"
+        },
         "tcIde.package.animate": {
           "type": "boolean",
           "default": true,
@@ -166,6 +195,12 @@
         "icon": "$(new-file)"
       },
       {
+        "command": "tcIde.openSettings",
+        "title": "打开 TC-IDE 设置",
+        "category": "TC-IDE",
+        "icon": "$(settings-gear)"
+      },
+      {
         "command": "tcIde.build",
         "title": "编译项目",
         "category": "TC-IDE",
@@ -201,6 +236,12 @@
           "name": "调用层级",
           "icon": "media/icons/tc-ide.svg",
           "contextualTitle": "TC-IDE 调用层级"
+        },
+        {
+          "type": "webview",
+          "id": "tcIde.settingsView",
+          "name": "外观与动效",
+          "icon": "media/icons/tc-ide.svg"
         }
       ]
     },
@@ -221,6 +262,11 @@
           "command": "tcIde.focusScope",
           "when": "view == tcIde.graphView",
           "group": "navigation@2"
+        },
+        {
+          "command": "tcIde.openSettings",
+          "when": "view == tcIde.graphView",
+          "group": "navigation@3"
         }
       ],
       "commandPalette": [
