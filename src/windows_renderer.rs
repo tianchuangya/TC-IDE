@@ -2783,24 +2783,82 @@ impl DirectEditorRenderer {
                 },
             )
         };
-        unsafe {
-            Self::text(
-                &target_base,
-                &self.small_format,
-                &accent,
-                if scene.package_running {
-                    "Packaging..."
+        // The same three quiet quick actions as the Linux identity bar. Their
+        // panels remain native to each backend, but the discoverability and
+        // state treatment no longer change with the operating system.
+        let quick_actions = [
+            (
+                width - 290.0 * scale,
+                85.0 * scale,
+                if scene.ui_chinese {
+                    "设置"
                 } else {
-                    "Package  v"
+                    "Settings"
                 },
-                D2D_RECT_F {
-                    left: width - 142.0 * scale,
-                    top: 15.0 * scale,
-                    right: width - 16.0 * scale,
-                    bottom: header_h,
+                scene.settings_motion > 0.01,
+            ),
+            (
+                width - 205.0 * scale,
+                100.0 * scale,
+                if scene.ui_chinese {
+                    "扩展"
+                } else {
+                    "Extensions"
                 },
-            )
-        };
+                scene.extensions_motion > 0.01,
+            ),
+            (
+                width - 105.0 * scale,
+                100.0 * scale,
+                if scene.package_running {
+                    if scene.ui_chinese {
+                        "打包中…"
+                    } else {
+                        "Packaging…"
+                    }
+                } else if scene.ui_chinese {
+                    "打包  ›"
+                } else {
+                    "Package  ›"
+                },
+                scene.package_motion > 0.01,
+            ),
+        ];
+        for (left, action_width, label, active) in quick_actions {
+            let hovered = scene.pointer_y as f32 >= 8.0 * scale
+                && scene.pointer_y as f32 <= 40.0 * scale
+                && scene.pointer_x as f32 >= left
+                && scene.pointer_x as f32 <= left + action_width;
+            if hovered || active {
+                unsafe {
+                    Self::rounded(
+                        &target_base,
+                        if active { &selection } else { &panel },
+                        D2D_RECT_F {
+                            left: left + 4.0 * scale,
+                            top: 8.0 * scale,
+                            right: left + action_width - 4.0 * scale,
+                            bottom: 40.0 * scale,
+                        },
+                        theme_core::chrome::CONTROL_RADIUS * scale,
+                    )
+                };
+            }
+            unsafe {
+                Self::text(
+                    &target_base,
+                    &self.small_format,
+                    if active { &accent } else { &muted },
+                    label,
+                    D2D_RECT_F {
+                        left: left + 14.0 * scale,
+                        top: 15.0 * scale,
+                        right: left + action_width - 6.0 * scale,
+                        bottom: header_h,
+                    },
+                )
+            };
+        }
         unsafe {
             Self::text(
                 &target_base,

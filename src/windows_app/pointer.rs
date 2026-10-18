@@ -65,7 +65,6 @@ fn background_crop_on_screen(
 
 /// Mouse press: overlays, terminal tabs, the graph, the tree and the editor.
 pub(super) fn handle_left_button_down(window: Hwnd, l_param: Lparam) -> Lresult {
-    // A control shows the pressed look while the button stays down.
     APP.with(|cell| cell.borrow_mut().pointer_pressed = true);
     let x = (l_param as u16 as i16) as i32;
     let y = ((l_param >> 16) as u16 as i16) as i32;
@@ -137,12 +136,20 @@ pub(super) fn handle_left_button_down(window: Hwnd, l_param: Lparam) -> Lresult 
         }
         return 0;
     }
-    if y as f32 <= 48.0 * scale && x as f32 >= area.right as f32 - 155.0 * scale {
+    if y as f32 <= theme_core::chrome::TOP_BAR_HEIGHT * scale
+        && x as f32 >= area.right as f32 - 290.0 * scale
+    {
         APP.with(|cell| {
             let mut app = cell.borrow_mut();
-            app.package_open = !app.package_open;
-            app.settings_open = false;
-            app.extensions_open = false;
+            let local_x = x as f32 - (area.right as f32 - 290.0 * scale);
+            let action = [85.0, 185.0]
+                .into_iter()
+                .position(|edge| local_x < edge * scale)
+                .unwrap_or(2);
+            let was_open = [app.settings_open, app.extensions_open, app.package_open][action];
+            app.settings_open = action == 0 && !was_open;
+            app.extensions_open = action == 1 && !was_open;
+            app.package_open = action == 2 && !was_open;
         });
         invalidate(window);
         return 0;
@@ -415,7 +422,6 @@ pub(super) fn handle_left_button_down(window: Hwnd, l_param: Lparam) -> Lresult 
             return 0;
         }
     }
-    // Document tabs sit in the editor header.
     let tab_width = theme_core::chrome::TAB_WIDTH * scale;
     let tab_top = theme_core::chrome::TOP_BAR_HEIGHT * scale + 4.0 * scale;
     let tab_bottom =
