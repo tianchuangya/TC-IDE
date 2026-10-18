@@ -1105,6 +1105,10 @@ impl App {
         (self.s(28) + self.code_zoom * self.s(2)).max(self.s(20))
     }
 
+    fn code_gutter_width(&self) -> i32 {
+        self.s(theme_core::chrome::CODE_GUTTER_WIDTH as i32)
+    }
+
     fn editor_visible_rows(&self) -> usize {
         ((self.terminal_top() - self.code_baseline() - self.s(12)) / self.code_line_step().max(1))
             .max(1) as usize
@@ -1114,11 +1118,11 @@ impl App {
     /// menu row.  All renderer and hit-test geometry derives from these
     /// anchors so the old single-toolbar layout cannot leak back in.
     fn shell_content_top(&self) -> i32 {
-        self.s(78)
+        self.s((theme_core::chrome::TOP_BAR_HEIGHT + theme_core::chrome::MENU_BAR_HEIGHT) as i32)
     }
 
     fn editor_tabs_bottom(&self) -> i32 {
-        self.shell_content_top() + self.s(41)
+        self.shell_content_top() + self.s(theme_core::chrome::TAB_STRIP_HEIGHT as i32)
     }
 
     fn code_baseline(&self) -> i32 {
@@ -3264,7 +3268,7 @@ impl App {
         let row = self.editor_screen_row(line).unwrap_or(0);
         let y = self.code_baseline() + row as i32 * self.code_line_step();
         let value = &self.files[self.selected_file].lines[line];
-        let x = left + self.s(52) + self.code_text_width(&value[..start]);
+        let x = left + self.code_gutter_width() + self.code_text_width(&value[..start]);
         let width = self.code_text_width(&value[start..end]);
         (x - self.s(4), y - self.s(21), width + self.s(8), self.s(27))
     }
@@ -4474,7 +4478,7 @@ impl App {
 
     unsafe fn draw_header(&self) {
         let s = |v| self.s(v);
-        let identity_height = s(48);
+        let identity_height = s(theme_core::chrome::TOP_BAR_HEIGHT as i32);
         let header = self.shell_content_top();
         self.rect(self.colors.panel_2, 0, 0, self.width, identity_height);
         self.rect(
@@ -4499,7 +4503,7 @@ impl App {
         if !self.logo_surface.is_null() {
             let image_w = cairo_image_surface_get_width(self.logo_surface).max(1) as f64;
             let image_h = cairo_image_surface_get_height(self.logo_surface).max(1) as f64;
-            let target_h = s(48) as f64;
+            let target_h = s(theme_core::chrome::TOP_BAR_HEIGHT as i32) as f64;
             let scale = target_h / image_h;
             cairo_save(self.cairo);
             cairo_translate(self.cairo, s(8) as f64, 0.0);
@@ -5664,7 +5668,7 @@ impl App {
                 if index >= start.0 && index <= end.0 {
                     let from = if index == start.0 { start.1 } else { 0 };
                     let to = if index == end.0 { end.1 } else { line.len() };
-                    let sx = left + s(52) + self.code_text_width(&line[..from]);
+                    let sx = left + self.code_gutter_width() + self.code_text_width(&line[..from]);
                     let sw = self.code_text_width(&line[from..to]).max(s(4));
                     self.rect(self.colors.project, sx, y - s(20), sw, s(25));
                 }
@@ -5694,7 +5698,9 @@ impl App {
                         .next()
                         .map(|character| character.len_utf8())
                         .unwrap_or(1);
-                    let bx = left + s(52) + self.code_text_width(&text_line[..before]);
+                    let bx = left
+                        + self.code_gutter_width()
+                        + self.code_text_width(&text_line[..before]);
                     let bw = self
                         .code_text_width(&text_line[before..before + width])
                         .max(s(4));
@@ -5708,7 +5714,7 @@ impl App {
                 }
             }
             if let Some(comment) = self.comment_parts(line) {
-                self.highlighted_text(left + s(52), y, comment.code, detected);
+                self.highlighted_text(left + self.code_gutter_width(), y, comment.code, detected);
                 let raw_anchor = left + s(58) + self.code_text_width(comment.code);
                 if show_bubbles {
                     let expanded = self
@@ -5737,7 +5743,7 @@ impl App {
                         && line.is_char_boundary(pulse.end)
                 }) {
                     let eased = pulse.eased();
-                    let code_x = left + s(52);
+                    let code_x = left + self.code_gutter_width();
                     let before = &line[..pulse.start];
                     let inserted = &line[pulse.start..pulse.end];
                     let after = &line[pulse.end..];
@@ -5802,12 +5808,13 @@ impl App {
                         }
                     }
                 } else {
-                    self.highlighted_text(left + s(52), y, line, detected);
+                    self.highlighted_text(left + self.code_gutter_width(), y, line, detected);
                 }
             }
             if self.editor_focused && index == self.caret_line && blink_phase(self.started) {
                 let column = valid_byte_column(line, self.caret_column);
-                let caret_x = left + s(52) + self.code_text_width(&line[..column]);
+                let caret_x =
+                    left + self.code_gutter_width() + self.code_text_width(&line[..column]);
                 self.line(
                     self.colors.bright,
                     1,
@@ -5887,7 +5894,8 @@ impl App {
             if !completions.is_empty() {
                 let line = &self.files[self.selected_file].lines[self.caret_line];
                 let column = valid_byte_column(line, self.caret_column);
-                let popup_x = left + s(52) + self.code_text_width(&line[..column]);
+                let popup_x =
+                    left + self.code_gutter_width() + self.code_text_width(&line[..column]);
                 let popup_h = s(48) * completions.len() as i32 + self.s(8);
                 let desired_y = self
                     .editor_screen_row(self.caret_line)
@@ -5958,7 +5966,7 @@ impl App {
             else {
                 continue;
             };
-            let anchor_x = left + self.s(52) + self.code_text_width(&line[..start]);
+            let anchor_x = left + self.code_gutter_width() + self.code_text_width(&line[..start]);
             let anchor_w = self.code_text_width(&line[start..end]);
             let label = format!("{} = {}", variable.name, variable.value);
             let label_w = (self.pango_text_size(&label, false).0 + self.s(20)).min(self.s(250));
@@ -6793,7 +6801,8 @@ impl App {
             let first_line = lines.len().saturating_sub(rows);
             let visible = lines.iter().rev().take(6).collect::<Vec<_>>();
             for (offset, line) in visible.iter().rev().enumerate() {
-                let max_chars = ((list_x - left - s(52)) / s(8).max(1)).max(8) as usize;
+                let max_chars =
+                    ((list_x - left - self.code_gutter_width()) / s(8).max(1)).max(8) as usize;
                 let display_line = line.chars().take(max_chars).collect::<String>();
                 // A selected cell is filled behind the glyphs, so the choice is
                 // visible the way it is in the editor.
@@ -12518,7 +12527,7 @@ impl App {
                 .get(self.editor_scroll + screen_row)
                 .copied()
                 .unwrap_or_else(|| self.files[self.selected_file].lines.len().saturating_sub(1));
-            let text_x = workspace_right + s(52);
+            let text_x = workspace_right + self.code_gutter_width();
             self.caret_column = self.byte_index_at_code_x(
                 &self.files[self.selected_file].lines[self.caret_line],
                 (x - text_x).max(0),
@@ -13479,7 +13488,7 @@ impl App {
             .unwrap_or(self.files[self.selected_file].lines.len() - 1);
         let column = self.byte_index_at_code_x(
             &self.files[self.selected_file].lines[line],
-            (x - left - s(52)).max(0),
+            (x - left - self.code_gutter_width()).max(0),
         );
         if let Some((start, end)) = comment_bounds {
             let column = if line < self.caret_line {
@@ -13549,9 +13558,13 @@ impl App {
                 return;
             };
             if let Some(line) = self.files[self.selected_file].lines.get(row) {
-                let byte = self.byte_index_at_code_x(line, (self.mouse_x - left - s(52)).max(0));
+                let byte = self.byte_index_at_code_x(
+                    line,
+                    (self.mouse_x - left - self.code_gutter_width()).max(0),
+                );
                 if let Some((start, end)) = identifier_span_at(line, byte) {
-                    let symbol_x = left + s(52) + self.code_text_width(&line[..start]);
+                    let symbol_x =
+                        left + self.code_gutter_width() + self.code_text_width(&line[..start]);
                     let symbol_right = symbol_x + self.code_text_width(&line[start..end]);
                     if self.mouse_x >= symbol_x - s(3) && self.mouse_x <= symbol_right + s(3) {
                         let symbol = &line[start..end];

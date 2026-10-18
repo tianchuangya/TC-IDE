@@ -1,6 +1,6 @@
 //! Shared colour palette and the contrast rules it has to satisfy.
 //!
-//! Both backends drew from the same design tokens — one background, one panel, a
+//! All three backends draw from the same design tokens — one background, one panel, a
 //! quiet border, three text weights, an accent, a selection and three syntax
 //! colours — but each kept its own copy of the numbers. The light theme drifted:
 //! its syntax colours were still the dark ones, so a keyword was a light blue on
@@ -17,6 +17,33 @@
 pub const TEXT_MINIMUM: f64 = 4.5;
 /// Contrast a decoration, an accent or a border needs.
 pub const DECORATION_MINIMUM: f64 = 3.0;
+
+/// Platform-independent geometry of the TC-IDE shell, in logical pixels.
+///
+/// Backends still convert these values through their own DPI mechanism, but
+/// the proportions must come from here. Keeping the window chrome beside the
+/// palette prevents Linux, Windows and macOS from slowly becoming three
+/// different products while individual panels are developed.
+pub mod chrome {
+    /// Brand/title strip at the top of the client area.
+    pub const TOP_BAR_HEIGHT: f32 = 48.0;
+    /// Linux's in-client menu row. Windows and macOS use their native menu bar.
+    pub const MENU_BAR_HEIGHT: f32 = 30.0;
+    /// Editor document-tab strip.
+    pub const TAB_STRIP_HEIGHT: f32 = 40.0;
+    /// Compact information strip at the bottom of the window.
+    pub const STATUS_BAR_HEIGHT: f32 = 28.0;
+    /// Preferred width for fixed-width tabs; adaptive backends may grow it.
+    pub const TAB_WIDTH: f32 = 136.0;
+    /// Line-number and breakpoint gutter before source text.
+    pub const CODE_GUTTER_WIDTH: f32 = 52.0;
+    /// Standard interactive row/control height.
+    pub const CONTROL_HEIGHT: f32 = 32.0;
+    /// Standard corner radius for controls and compact cards.
+    pub const CONTROL_RADIUS: f32 = 8.0;
+    /// Outer margin used by floating panels.
+    pub const PANEL_MARGIN: f32 = 16.0;
+}
 
 /// Syntax categories a person can customise independently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -407,6 +434,19 @@ pub fn meets_contrast(foreground: u32, background: u32, minimum: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_chrome_has_one_coherent_scale() {
+        assert_eq!(chrome::TOP_BAR_HEIGHT, 48.0);
+        assert_eq!(chrome::MENU_BAR_HEIGHT, 30.0);
+        assert_eq!(chrome::TAB_STRIP_HEIGHT, 40.0);
+        assert_eq!(chrome::STATUS_BAR_HEIGHT, 28.0);
+        assert_eq!(chrome::TAB_WIDTH, 136.0);
+        assert_eq!(chrome::CODE_GUTTER_WIDTH, 52.0);
+        assert_eq!(chrome::CONTROL_HEIGHT, 32.0);
+        assert_eq!(chrome::CONTROL_RADIUS, 8.0);
+        assert_eq!(chrome::PANEL_MARGIN, 16.0);
+    }
 
     #[test]
     fn syntax_roles_and_hex_rgb_are_stable() {

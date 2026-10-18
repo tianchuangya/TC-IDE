@@ -2538,8 +2538,8 @@ impl DirectEditorRenderer {
         let width = width as f32;
         let height = height as f32;
         let scale = self.dpi / 96.0;
-        let header_h = 48.0 * scale;
-        let status_h = 28.0 * scale;
+        let header_h = theme_core::chrome::TOP_BAR_HEIGHT * scale;
+        let status_h = theme_core::chrome::STATUS_BAR_HEIGHT * scale;
         let terminal_progress = scene.terminal_progress.clamp(0.0, 1.0);
         let terminal_panel = terminal_core::panel_metrics(width, height, scale, terminal_progress);
         let terminal_h = terminal_panel.height;
@@ -2553,6 +2553,7 @@ impl DirectEditorRenderer {
         // tree stay put, and the column is clipped while it is drawn.
         let scroll_x = scene.scroll_columns as f32 * self.code_cell * scale;
         let code_origin = tree_w - scroll_x;
+        let code_gutter = theme_core::chrome::CODE_GUTTER_WIDTH;
         // Breakpoints the user set, drawn as dots before the code column.
         for line in scene.breakpoint_lines.iter().take(200) {
             let top = code_top + *line as f32 * line_step;
@@ -2960,9 +2961,9 @@ impl DirectEditorRenderer {
                         Self::fill(
                             &target_base,
                             &selected_text,
-                            code_origin + (52.0 + left_cells * self.code_cell) * scale,
+                            code_origin + (code_gutter + left_cells * self.code_cell) * scale,
                             y - 2.0 * scale,
-                            code_origin + (52.0 + right_cells * self.code_cell) * scale,
+                            code_origin + (code_gutter + right_cells * self.code_cell) * scale,
                             y + 21.0 * scale,
                         )
                     };
@@ -2990,7 +2991,7 @@ impl DirectEditorRenderer {
                 .filter(|_| index == scene.caret_line)
                 .map(|amount| amount * 7.0 * scale)
                 .unwrap_or(0.0);
-            let mut token_x = code_origin + 52.0 * scale + edit_offset;
+            let mut token_x = code_origin + code_gutter * scale + edit_offset;
             for token in editor_core::syntax_tokens(value, scene.file_name) {
                 if token.kind == TokenKind::Comment {
                     unsafe {
@@ -3107,7 +3108,8 @@ impl DirectEditorRenderer {
                 let bubble_height = (34.0 + 78.0 * expansion) * scale;
                 let marker_column = value[..marker_start].chars().count();
                 let anchor_x = code_origin
-                    + (52.0 + Self::visual_cells(value, marker_column) as f32 * self.code_cell)
+                    + (code_gutter
+                        + Self::visual_cells(value, marker_column) as f32 * self.code_cell)
                         * scale;
                 unsafe {
                     Self::fill(
@@ -3161,7 +3163,7 @@ impl DirectEditorRenderer {
             .get(scene.caret_line)
             .map(|line| Self::visual_cells(line, scene.caret_column))
             .unwrap_or(0);
-        let caret_x = code_origin + (52.0 + caret_cells as f32 * self.code_cell) * scale;
+        let caret_x = code_origin + (code_gutter + caret_cells as f32 * self.code_cell) * scale;
         let caret_y = code_top + scene.caret_line as f32 * line_step;
         if (scene.animation_seconds * 2.0) as u32 & 1 == 0 {
             unsafe {
@@ -3386,9 +3388,9 @@ impl DirectEditorRenderer {
         };
         // Document tabs across the editor header.
         {
-            let tab_width = 132.0 * scale;
+            let tab_width = theme_core::chrome::TAB_WIDTH * scale;
             let tab_top = header_h + 4.0 * scale;
-            let tab_bottom = header_h + 30.0 * scale;
+            let tab_bottom = header_h + theme_core::chrome::CONTROL_HEIGHT * scale;
             let mut tab_x = tree_w + 16.0 * scale;
             for (index, title) in scene.tabs.iter().enumerate() {
                 if tab_x + tab_width > editor_right - 8.0 * scale {
@@ -3405,7 +3407,7 @@ impl DirectEditorRenderer {
                             right: tab_x + tab_width - 6.0 * scale,
                             bottom: tab_bottom,
                         },
-                        6.0 * scale,
+                        theme_core::chrome::CONTROL_RADIUS * scale,
                     )
                 };
                 let dirty = scene.tab_dirty.get(index).copied().unwrap_or(false);

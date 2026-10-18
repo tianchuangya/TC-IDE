@@ -70,6 +70,15 @@ extern "C" {
         alpha: c_double,
     );
     fn CGContextFillRect(context: Id, rect: CGRect);
+    fn CGPathCreateWithRoundedRect(
+        rect: CGRect,
+        corner_width: c_double,
+        corner_height: c_double,
+        transform: *const c_void,
+    ) -> Id;
+    fn CGContextAddPath(context: Id, path: Id);
+    fn CGContextFillPath(context: Id);
+    fn CGPathRelease(path: Id);
 }
 
 /// A rectangle in the coordinates AppKit draws in.
@@ -338,7 +347,7 @@ fn token_color(palette: &theme_core::Palette, kind: editor_core::TokenKind) -> u
 }
 
 /// Width of one document tab in the header, in points.
-const TAB_WIDTH: f64 = 150.0;
+const TAB_WIDTH: f64 = theme_core::chrome::TAB_WIDTH as f64;
 /// Left margin of the first tab.
 const TAB_MARGIN: f64 = 12.0;
 
@@ -346,7 +355,7 @@ const TAB_MARGIN: f64 = 12.0;
 const EDIT_LIFT: f64 = 7.0;
 
 /// Width of the line number gutter, in points.
-const GUTTER_WIDTH: f64 = 54.0;
+const GUTTER_WIDTH: f64 = theme_core::chrome::CODE_GUTTER_WIDTH as f64;
 /// Width of one character of the code font, in points.
 const TEXT_CELL: f64 = 7.4;
 
@@ -1154,7 +1163,7 @@ impl SettingsPanel {
     /// Rectangle of a control, in panel coordinates.
     fn rect(control: Setting) -> CGRect {
         let row = SETTINGS_ROW_HEIGHT;
-        let height = row - 8.0;
+        let height = theme_core::chrome::CONTROL_HEIGHT as f64;
         match control {
             Setting::ThemeDark => CGRect::new(16.0, SETTINGS_FIRST_ROW, 140.0, height),
             Setting::ThemeLight => CGRect::new(164.0, SETTINGS_FIRST_ROW, 140.0, height),
@@ -1172,7 +1181,10 @@ impl SettingsPanel {
 
     /// Height the panel needs.
     fn height() -> f64 {
-        SETTINGS_FIRST_ROW + SETTINGS_ROW_HEIGHT * 3.0 + SETTINGS_ROW_HEIGHT + 16.0
+        SETTINGS_FIRST_ROW
+            + SETTINGS_ROW_HEIGHT * 3.0
+            + SETTINGS_ROW_HEIGHT
+            + theme_core::chrome::PANEL_MARGIN as f64
     }
 
     /// The control a point of the panel is over.
@@ -1385,7 +1397,7 @@ impl ExtensionsPanel {
 /// Height of the extensions panel header.
 const EXTENSIONS_HEADER_HEIGHT: f64 = 52.0;
 /// Height of one extensions row.
-const EXTENSIONS_ROW_HEIGHT: f64 = 32.0;
+const EXTENSIONS_ROW_HEIGHT: f64 = theme_core::chrome::CONTROL_HEIGHT as f64;
 /// Width of the extensions panel.
 const EXTENSIONS_WIDTH: f64 = 420.0;
 
@@ -1477,7 +1489,7 @@ impl PackagePanel {
 /// Height of the packaging panel header.
 const PACKAGE_HEADER_HEIGHT: f64 = 56.0;
 /// Height of one packaging row.
-const PACKAGE_ROW_HEIGHT: f64 = 30.0;
+const PACKAGE_ROW_HEIGHT: f64 = theme_core::chrome::CONTROL_HEIGHT as f64;
 /// Width of the packaging panel.
 const PACKAGE_WIDTH: f64 = 460.0;
 
@@ -1707,11 +1719,11 @@ impl MacShell {
     }
 
     fn header_height(&self) -> f64 {
-        46.0
+        theme_core::chrome::TOP_BAR_HEIGHT as f64
     }
 
     fn status_height(&self) -> f64 {
-        26.0
+        theme_core::chrome::STATUS_BAR_HEIGHT as f64
     }
 
     fn line_step(&self) -> f64 {
@@ -2127,7 +2139,7 @@ impl MacShell {
     fn settings_rect(&self) -> CGRect {
         CGRect::new(
             (self.view_width() - SETTINGS_WIDTH) * 0.5,
-            12.0,
+            theme_core::chrome::PANEL_MARGIN as f64,
             SETTINGS_WIDTH,
             SettingsPanel::height(),
         )
@@ -2254,11 +2266,11 @@ impl MacShell {
     fn extensions_rect(&self) -> CGRect {
         CGRect::new(
             (self.view_width() - EXTENSIONS_WIDTH).max(0.0) * 0.5,
-            12.0,
+            theme_core::chrome::PANEL_MARGIN as f64,
             EXTENSIONS_WIDTH,
             EXTENSIONS_HEADER_HEIGHT
                 + EXTENSIONS_ROW_HEIGHT * EXTENSION_LANGUAGES.len() as f64
-                + 12.0,
+                + theme_core::chrome::PANEL_MARGIN as f64,
         )
     }
 
@@ -2331,9 +2343,11 @@ impl MacShell {
     fn packaging_rect(&self) -> CGRect {
         CGRect::new(
             (self.view_width() - PACKAGE_WIDTH).max(0.0) * 0.5,
-            12.0,
+            theme_core::chrome::PANEL_MARGIN as f64,
             PACKAGE_WIDTH,
-            PACKAGE_HEADER_HEIGHT + PACKAGE_ROW_HEIGHT * self.package.steps.len() as f64 + 12.0,
+            PACKAGE_HEADER_HEIGHT
+                + PACKAGE_ROW_HEIGHT * self.package.steps.len() as f64
+                + theme_core::chrome::PANEL_MARGIN as f64,
         )
     }
 
@@ -2690,6 +2704,36 @@ unsafe fn fill_rect(rect: CGRect, color: u32, alpha: f64) {
     CGContextFillRect(graphics, rect);
 }
 
+/// Fill a rounded card using CoreGraphics. Geometry and hit testing keep using
+/// the same rectangle; only the visible corners change, matching the compact
+/// cards drawn by the Linux and Windows backends.
+///
+/// # Safety
+/// Requires a current AppKit graphics context.
+unsafe fn fill_rounded_rect(rect: CGRect, radius: f64, color: u32, alpha: f64) {
+    let context = msg_id(class("NSGraphicsContext"), "currentContext");
+    if context.is_null() {
+        return;
+    }
+    let graphics = msg_id(context, "CGContext");
+    if graphics.is_null() {
+        return;
+    }
+    let red = ((color >> 16) & 0xff) as f64 / 255.0;
+    let green = ((color >> 8) & 0xff) as f64 / 255.0;
+    let blue = (color & 0xff) as f64 / 255.0;
+    CGContextSetRGBFillColor(graphics, red, green, blue, alpha.clamp(0.0, 1.0));
+    let radius = radius.max(0.0).min(rect.width.min(rect.height) * 0.5);
+    let path = CGPathCreateWithRoundedRect(rect, radius, radius, ptr::null());
+    if path.is_null() {
+        CGContextFillRect(graphics, rect);
+        return;
+    }
+    CGContextAddPath(graphics, path);
+    CGContextFillPath(graphics);
+    CGPathRelease(path);
+}
+
 /// Build a text attribute dictionary for one colour and font size.
 ///
 /// # Safety
@@ -2758,8 +2802,9 @@ unsafe fn draw_frame(shell: &mut MacShell) {
     for (index, title) in titles.iter().enumerate() {
         let left = TAB_MARGIN + index as f64 * tab_width;
         let selected = index == active;
-        fill_rect(
+        fill_rounded_rect(
             CGRect::new(left, 6.0, tab_width - 6.0, header - 12.0),
+            theme_core::chrome::CONTROL_RADIUS as f64,
             if selected {
                 palette.raised
             } else {
@@ -2881,7 +2926,12 @@ unsafe fn draw_frame(shell: &mut MacShell) {
     // The packaging panel, in front of the editor.
     if shell.package.open {
         let panel = shell.packaging_rect();
-        fill_rect(panel, palette.background, 0.96);
+        fill_rounded_rect(
+            panel,
+            theme_core::chrome::CONTROL_RADIUS as f64,
+            palette.background,
+            0.96,
+        );
         fill_rect(
             CGRect::new(panel.x, panel.y, panel.width, 1.0),
             palette.border,
@@ -2911,13 +2961,14 @@ unsafe fn draw_frame(shell: &mut MacShell) {
             let y = panel.y + PACKAGE_HEADER_HEIGHT + index as f64 * PACKAGE_ROW_HEIGHT;
             let selected = shell.package.focused && index == shell.package.focus;
             if selected {
-                fill_rect(
+                fill_rounded_rect(
                     CGRect::new(
                         panel.x + 8.0,
                         y,
                         panel.width - 16.0,
                         PACKAGE_ROW_HEIGHT - 4.0,
                     ),
+                    theme_core::chrome::CONTROL_RADIUS as f64,
                     palette.selection,
                     1.0,
                 );
@@ -2957,7 +3008,12 @@ unsafe fn draw_frame(shell: &mut MacShell) {
     // The extensions and tooling panel, in front of the editor.
     if shell.extensions.open {
         let panel = shell.extensions_rect();
-        fill_rect(panel, palette.background, 0.96);
+        fill_rounded_rect(
+            panel,
+            theme_core::chrome::CONTROL_RADIUS as f64,
+            palette.background,
+            0.96,
+        );
         fill_rect(
             CGRect::new(panel.x, panel.y, panel.width, 1.0),
             palette.border,
@@ -2993,13 +3049,14 @@ unsafe fn draw_frame(shell: &mut MacShell) {
             let y = panel.y + EXTENSIONS_HEADER_HEIGHT + index as f64 * EXTENSIONS_ROW_HEIGHT;
             let selected = shell.extensions.focused && index == shell.extensions.focus;
             if selected {
-                fill_rect(
+                fill_rounded_rect(
                     CGRect::new(
                         panel.x + 8.0,
                         y,
                         panel.width - 16.0,
                         EXTENSIONS_ROW_HEIGHT - 4.0,
                     ),
+                    theme_core::chrome::CONTROL_RADIUS as f64,
                     palette.selection,
                     1.0,
                 );
@@ -3065,7 +3122,12 @@ unsafe fn draw_frame(shell: &mut MacShell) {
             let visual = palette.control(state, control.is_active(&shell.preferences));
             (on_screen, visual, shell.settings.focus == Some(control))
         };
-        fill_rect(panel, palette.background, 0.96);
+        fill_rounded_rect(
+            panel,
+            theme_core::chrome::CONTROL_RADIUS as f64,
+            palette.background,
+            0.96,
+        );
         fill_rect(
             CGRect::new(panel.x, panel.y, panel.width, 1.0),
             palette.border,
@@ -3113,7 +3175,12 @@ unsafe fn draw_frame(shell: &mut MacShell) {
         );
         for control in Setting::ALL {
             let (rect, visual, focused) = control_visual(control);
-            fill_rect(rect, visual.fill, visual.opacity as f64);
+            fill_rounded_rect(
+                rect,
+                theme_core::chrome::CONTROL_RADIUS as f64,
+                visual.fill,
+                visual.opacity as f64,
+            );
             fill_rect(
                 CGRect::new(rect.x, rect.y, rect.width, 1.0),
                 visual.border,

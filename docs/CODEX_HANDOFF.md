@@ -267,7 +267,7 @@ Layout::workspace_pixels / graph_pixels / terminal_pixels
 ```bash
 cd /home/tianchuangya/桌面/TC-IDE
 git log --oneline -8
-~/.cargo/bin/rustup run stable cargo test --all-targets   # 应为 352 + 3 + 4
+~/.cargo/bin/rustup run stable cargo test --all-targets   # 当前至少 356 + 3 + 4
 ~/.cargo/bin/rustup run stable cargo clippy --all-targets -- -D warnings
 python3 tools/windows_editor_sim.py
 # 然后读 §6，从「把菜单同步到 Windows」开始
@@ -288,3 +288,15 @@ python3 tools/windows_editor_sim.py
 ### 当前仍需真实机器完成的验收
 
 Windows 真机上的 DirectWrite/Direct2D、ConPTY、编译器/LSP/调试器和安装包签名，必须在 Windows 主机执行 `docs/REAL-MACHINE-CHECKLIST.md`；Linux 交叉编译只能证明目标代码可编译，不能替代硬件和 SDK 验收。macOS Metal/CoreText 同理。
+
+## 12. 三端 UI 统一（2026-10-18 开始）
+
+- `theme_core::chrome` 是三端窗口骨架的唯一尺寸来源：48px 顶栏、40px 标签栏、
+  28px 状态栏、136px 固定标签宽、52px 代码槽、32px 控件高、8px 圆角与 16px 浮层外边距。
+  平台只负责 DPI 换算，不得再复制一套数字。
+- Linux 的顶栏/菜单/标签骨架与代码槽、Windows 的顶栏/状态栏/标签/代码槽、
+  macOS 的顶栏/状态栏/标签/代码槽已改为引用这些共享值。
+- macOS 不再用直角块假装相同组件：标签、设置控件、扩展行、打包行和三种浮层通过
+  CoreGraphics `CGPathCreateWithRoundedRect` 实际绘制共享 8px 圆角，不引入 WebView 或第三方 UI 框架。
+- “UI 统一”不等于放弃平台习惯：Windows/macOS 保留原生系统菜单，Linux 使用客户区菜单；
+  但编辑器客户区的比例、颜色、动效角色与控件状态必须共用。
