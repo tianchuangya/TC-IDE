@@ -12,10 +12,9 @@ export function registerSemanticDecorations(context: vscode.ExtensionContext): v
   const reference = vscode.window.createTextEditorDecorationType({
     backgroundColor: 'rgba(183, 116, 255, .13)', borderRadius: '2px', overviewRulerColor: '#b774ff', overviewRulerLane: vscode.OverviewRulerLane.Right,
   });
-  const changed = vscode.window.createTextEditorDecorationType({
-    border: '1px solid rgba(68, 190, 255, .9)', borderRadius: '3px',
-    backgroundColor: 'rgba(68, 190, 255, .18)',
-  });
+  const pulse = vscode.window.createTextEditorDecorationType({ border: '2px solid rgba(96, 185, 255, .98)', borderRadius: '4px', backgroundColor: 'rgba(54, 155, 255, .24)' });
+  const glow = vscode.window.createTextEditorDecorationType({ border: '1px solid rgba(151, 102, 255, .92)', borderRadius: '4px', backgroundColor: 'rgba(166, 100, 255, .20)', overviewRulerColor: '#A664FF', overviewRulerLane: vscode.OverviewRulerLane.Center });
+  const deleted = vscode.window.createTextEditorDecorationType({ before: { contentText: '│', color: '#78BAFF', fontWeight: 'bold' } });
   const bubble = vscode.window.createTextEditorDecorationType({
     after: { margin: '0 0 0 14px', color: 'var(--vscode-descriptionForeground)', backgroundColor: 'var(--vscode-editorWidget-background)', border: '1px solid var(--vscode-widget-border)' },
   });
@@ -25,12 +24,12 @@ export function registerSemanticDecorations(context: vscode.ExtensionContext): v
 
   const clear = (): void => {
     for (const editor of vscode.window.visibleTextEditors) {
-      editor.setDecorations(focus, []); editor.setDecorations(definition, []); editor.setDecorations(reference, []); editor.setDecorations(bubble, []);
+      editor.setDecorations(focus, []); editor.setDecorations(definition, []); editor.setDecorations(reference, []); editor.setDecorations(pulse, []); editor.setDecorations(glow, []); editor.setDecorations(deleted, []); editor.setDecorations(bubble, []);
     }
   };
   const update = (): void => {
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => { void refresh(); }, 90);
+    timer = setTimeout(() => { void refresh(); }, 260);
   };
   const refresh = async (): Promise<void> => {
     const editor = vscode.window.activeTextEditor;
@@ -57,16 +56,24 @@ export function registerSemanticDecorations(context: vscode.ExtensionContext): v
   const flash = (event: vscode.TextDocumentChangeEvent): void => {
     const editor = vscode.window.activeTextEditor;
     if (!editor || editor.document !== event.document || event.contentChanges.length === 0) return;
-    const options = event.contentChanges.slice(0, 8).map((change) => {
-      const first = change.text.split(/\r?\n/, 1)[0] ?? '';
-      const end = new vscode.Position(change.range.start.line, change.range.start.character + Math.max(1, first.length));
-      return new vscode.Range(change.range.start, end);
-    });
+    const inserted: vscode.Range[] = [];
+    const removed: vscode.Range[] = [];
+    for (const change of event.contentChanges.slice(0, 4)) {
+      if (change.text.length > 0) {
+        const startOffset = editor.document.offsetAt(change.range.start);
+        inserted.push(new vscode.Range(change.range.start, editor.document.positionAt(startOffset + change.text.length)));
+      } else {
+        removed.push(new vscode.Range(change.range.start, change.range.start));
+      }
+    }
     const effect = vscode.workspace.getConfiguration('tcIde.editor').get<string>('typingEffect', 'pulse');
     if (effect === 'none') return;
-    editor.setDecorations(changed, options);
+    const active = effect === 'glow' ? glow : pulse;
+    editor.setDecorations(pulse, active === pulse ? inserted : []);
+    editor.setDecorations(glow, active === glow ? inserted : []);
+    editor.setDecorations(deleted, removed);
     if (flashTimer) clearTimeout(flashTimer);
-    flashTimer = setTimeout(() => editor.setDecorations(changed, []), 240);
+    flashTimer = setTimeout(() => { editor.setDecorations(pulse, []); editor.setDecorations(glow, []); editor.setDecorations(deleted, []); }, 150);
   };
   const codeLens = vscode.languages.registerCodeLensProvider({ scheme: 'file' }, {
     async provideCodeLenses(document) {
@@ -76,7 +83,7 @@ export function registerSemanticDecorations(context: vscode.ExtensionContext): v
       }));
     },
   });
-  const disposables: vscode.Disposable[] = [focus, definition, reference, changed, bubble, codeLens,
+  const disposables: vscode.Disposable[] = [focus, definition, reference, pulse, glow, deleted, bubble, codeLens,
     vscode.window.onDidChangeTextEditorSelection(update), vscode.window.onDidChangeActiveTextEditor(update),
     vscode.workspace.onDidChangeTextDocument((event) => { flash(event); update(); }),
     vscode.workspace.onDidChangeConfiguration((event) => { if (event.affectsConfiguration('tcIde.editor')) update(); }),
@@ -94,7 +101,10 @@ function renderCommentBubbles(editor: vscode.TextEditor, decoration: vscode.Text
   const pattern = commentPattern(editor.document.languageId);
   if (!pattern) { editor.setDecorations(decoration, []); return; }
   const options: vscode.DecorationOptions[] = [];
-  for (let line = 0; line < Math.min(editor.document.lineCount, 600) && options.length < 12; line += 1) {
+  const visible = editor.visibleRanges[0];
+  const firstLine = visible ? Math.max(0, visible.start.line - 20) : 0;
+  const lastLine = visible ? Math.min(editor.document.lineCount, visible.end.line + 20) : Math.min(editor.document.lineCount, 120);
+  for (let line = firstLine; line < lastLine && options.length < 12; line += 1) {
     const text = editor.document.lineAt(line).text;
     const match = pattern.exec(text); pattern.lastIndex = 0;
     if (!match || !match[1]) continue;
