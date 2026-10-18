@@ -31,6 +31,47 @@ pub const MARKER_INSET: f32 = 6.0;
 /// Width of the fold marker.
 pub const MARKER_WIDTH: f32 = 12.0;
 
+/// How much secondary metadata a graph viewport can afford.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphDensity {
+    Compact,
+    Comfortable,
+    Expanded,
+}
+
+/// Choose graph detail from logical width and current node pressure.
+pub fn graph_density(panel_width: f32, scale: f32, visible_nodes: usize) -> GraphDensity {
+    let logical_width = panel_width.max(0.0) / scale.max(0.1);
+    if logical_width < 310.0 || visible_nodes > 24 {
+        GraphDensity::Compact
+    } else if logical_width < 430.0 || visible_nodes > 12 {
+        GraphDensity::Comfortable
+    } else {
+        GraphDensity::Expanded
+    }
+}
+
+/// Secondary path/line text at the density the viewport can read.
+pub fn detail_at_density(value: &str, density: GraphDensity) -> String {
+    let budget = match density {
+        GraphDensity::Compact => 0,
+        GraphDensity::Comfortable => 16,
+        GraphDensity::Expanded => usize::MAX,
+    };
+    if budget == 0 || value.is_empty() {
+        return String::new();
+    }
+    if value.chars().count() <= budget {
+        return value.to_string();
+    }
+    let mut short = value
+        .chars()
+        .take(budget.saturating_sub(1))
+        .collect::<String>();
+    short.push('…');
+    short
+}
+
 /// X position of the vertical path line.
 pub fn path_x(panel_left: f32, scale: f32) -> f32 {
     panel_left + PATH_OFFSET * scale
@@ -1269,6 +1310,22 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_detail_yields_to_width_and_node_pressure() {
+        assert_eq!(graph_density(280.0, 1.0, 3), GraphDensity::Compact);
+        assert_eq!(graph_density(380.0, 1.0, 3), GraphDensity::Comfortable);
+        assert_eq!(graph_density(520.0, 1.0, 3), GraphDensity::Expanded);
+        assert_eq!(graph_density(520.0, 1.0, 30), GraphDensity::Compact);
+        assert!(detail_at_density("src/editor/graph.rs:128", GraphDensity::Compact).is_empty());
+        assert_eq!(
+            detail_at_density("short.rs:2", GraphDensity::Comfortable),
+            "short.rs:2"
+        );
+        assert!(
+            detail_at_density("src/editor/graph.rs:128", GraphDensity::Comfortable).ends_with('…')
+        );
+    }
 
     fn occurrence(name: &str, line: usize, role: SymbolRole) -> SymbolOccurrence {
         SymbolOccurrence {

@@ -6292,6 +6292,7 @@ impl App {
             ),
         );
         let visible = self.graph_visible(&graph);
+        let density = graph_core::graph_density(w as f32, self.scale(), visible.len());
         let first_y = y + s(121);
         if let Some(last) = visible.last() {
             let (_, last_y) = self.node_position(&graph, *last);
@@ -6371,13 +6372,18 @@ impl App {
             // At compact density the hierarchy remains readable by keeping
             // names and structure while dropping the trailing line metadata.
             // It returns automatically as the panel is widened or zoomed in.
-            if w >= s(320) && self.graph_zoom >= 0.9 {
-                let detail_width = self.pango_text_size(&node.detail, false).0;
+            let detail = if self.graph_zoom < 0.9 {
+                String::new()
+            } else {
+                graph_core::detail_at_density(&node.detail, density)
+            };
+            if !detail.is_empty() {
+                let detail_width = self.pango_text_size(&detail, false).0;
                 self.text(
                     self.colors.muted,
                     (self.width - detail_width - s(26)).max(card_x + s(160)),
                     ny + s(5),
-                    &node.detail,
+                    &detail,
                 );
             }
         }

@@ -3345,6 +3345,7 @@ unsafe fn draw_frame(shell: &mut MacShell) {
         let rows = shell.graph_rows();
         let scroll = shell.graph.graph.clamped_scroll(shell.graph.scroll, rows);
         let visible = shell.graph.graph.visible(scroll, rows).to_vec();
+        let density = graph_core::graph_density(panel_width as f32, 1.0, visible.len());
         if !visible.is_empty() {
             let rail_x = panel_left + 8.0;
             let rail_top = graph_core::FIRST_ROW_TOP as f64 + graph_core::ROW_HEIGHT as f64 * 0.5;
@@ -3421,14 +3422,17 @@ unsafe fn draw_frame(shell: &mut MacShell) {
                 },
                 false,
             );
-            draw_text(
-                &node.detail,
-                panel_left + panel_width - 150.0,
-                y + 5.0,
-                10.0,
-                palette.muted,
-                false,
-            );
+            let detail = graph_core::detail_at_density(&node.detail, density);
+            if !detail.is_empty() {
+                draw_text(
+                    &detail,
+                    panel_left + panel_width - 150.0,
+                    y + 5.0,
+                    10.0,
+                    palette.muted,
+                    false,
+                );
+            }
         }
         let footer = shell.graph.graph.footer(scroll, rows);
         draw_text(

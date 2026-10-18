@@ -3608,6 +3608,7 @@ impl DirectEditorRenderer {
         let first_y = header_h + graph_core::FIRST_ROW_TOP * scale;
         let row_height = graph_core::ROW_HEIGHT * scale;
         let last_y = first_y + scene.graph_nodes.len().saturating_sub(1) as f32 * row_height;
+        let graph_density = graph_core::graph_density(graph_w, scale, scene.graph_nodes.len());
         if !scene.graph_nodes.is_empty() {
             unsafe {
                 Self::fill(
@@ -3709,13 +3710,14 @@ impl DirectEditorRenderer {
                     },
                 )
             };
-            if !node.detail.is_empty() {
+            let node_detail = graph_core::detail_at_density(&node.detail, graph_density);
+            if !node_detail.is_empty() {
                 unsafe {
                     Self::text(
                         &target_base,
                         &self.small_format,
                         &muted,
-                        &node.detail,
+                        &node_detail,
                         D2D_RECT_F {
                             left: width - 190.0 * scale,
                             top: y + 2.0 * scale,
