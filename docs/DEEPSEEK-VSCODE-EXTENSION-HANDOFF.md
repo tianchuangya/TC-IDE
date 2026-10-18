@@ -1117,3 +1117,26 @@ build、**187 条几何断言**、**10 张截图**、**打包检查**——全�
 > 本轮改用 `api.github.com/.../runs/{id}/jobs`（公开、未认证可用），直接拿到了每一步的结论，
 > 才定位到是 `Unit tests` 这一步。**这说明我上一轮的「需要项目所有者打开日志」是错的**：
 > jobs 接口足以定位到步骤名，只是拿不到日志正文。
+
+### 2026-10-18 / 两个工作流都已通过
+
+| 工作流 | 结果 |
+|---|---|
+| `vscode-extension.yml` | **success**（build：16 步全过） |
+| `build.yml` | **success**（linux / macos / windows / format / windows-typecheck 全部通过） |
+
+**原生 `linux` job 的失败原因（与我无关，但已修复）**：`Run the Windows state layer under Wine`
+这一步，harness 脚本自身有两个缺陷：
+
+1. 它生成的临时 crate **只拷贝 `[target]` 段**，丢掉了 `[dependencies]`；而 `extension_core`
+   使用 `serde_json`，导致编译失败并报 unresolved import。改为从 `[dependencies]` 起拷贝。
+2. mingw 工具**没有加入 PATH**。rustc 生成导入库时会按裸名调用 `dlltool`，手动解包的运行时因此
+   无法使用（除非调用者的 shell 本来就有该路径）。现在脚本自己把前缀的 `bin` 加进 PATH，
+   并在仍找不到工具时明确指出缺什么。
+
+修复后该步骤在 Linux 上编译出**真实的 Windows 后端**并运行：**46 项断言，0 失败**。
+
+**方法上的更正**：我此前说「CI 日志不可读」是错的。`api.github.com/.../actions/runs/{id}/jobs`
+**未认证即可访问**，并直接给出每个 step 的 conclusion——两处 CI 失败都是这样定位的
+（Node 20 的 glob 不展开、Wine harness 的两个缺陷）。只有日志**正文**需要 admin 权限。
+以后不要再靠看网页 HTML 猜。
