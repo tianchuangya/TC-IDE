@@ -96,6 +96,13 @@ async function measure(page, scenario) {
 }
 
 async function run() {
+  // The pages and the bundles are generated here rather than assumed: a fresh
+  // checkout has no dist/harness, and reading it anyway made every asset 404.
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const run_ = promisify(execFile);
+  await run_('node', ['scripts/capture-harness.mjs'], { cwd: ROOT });
+
   const { server, port } = await serve(join(ROOT, 'dist', 'harness'));
   const browser = await puppeteer.launch({
     args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],

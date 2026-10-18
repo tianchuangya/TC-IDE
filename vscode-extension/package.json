@@ -222,11 +222,11 @@
     ]
   },
   "scripts": {
-    "build": "node esbuild.mjs",
+    "build": "node esbuild.mjs && tsc --outDir dist/modules",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --max-warnings 0",
-    "test": "tsc --outDir dist && node --test \"dist/test/*.test.js\"",
+    "test": "tsc --outDir dist/modules && node --test \"dist/modules/test/*.test.js\"",
     "vscode:prepublish": "npm run build",
     "package": "vsce package --no-dependencies --out tc-ide-companion.vsix",
     "verify:package": "node scripts/verify-package.mjs",

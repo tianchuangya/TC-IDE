@@ -1,6 +1,6 @@
 # The extension ships two bundles and the files the manifest names. Everything
-# else - sources, individual compiled modules, the harness, its screenshots -
-# is development material and would only make the download bigger.
+# else - sources, the individual compiled modules, the harness, its screenshots
+# - is development material and would only make the download bigger.
 src/**
 scripts/**
 fixtures/**
@@ -10,12 +10,7 @@ tsconfig.json
 esbuild.mjs
 .eslintrc.json
 .gitignore
-dist/graph/**
-dist/project/**
-dist/semantic/**
-dist/test/**
-dist/motion.js
-dist/theme.js
+dist/modules/**
 dist/harness/**
 media/harness.js
 harness-shots/**

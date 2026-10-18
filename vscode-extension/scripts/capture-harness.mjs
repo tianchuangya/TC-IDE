@@ -15,7 +15,7 @@ import { extname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { findScenario, harnessPage, scenarios } = require('../dist/graph/harness.js');
+const { findScenario, harnessPage, scenarios } = require('../dist/modules/graph/harness.js');
 
 const ROOT = resolve(import.meta.dirname, '..');
 const OUT = join(ROOT, 'dist', 'harness');

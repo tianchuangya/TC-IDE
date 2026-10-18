@@ -49,7 +49,8 @@ jobs:
         # numbers from the design, which is the only way the layout can be
         # checked without a person looking at it.
         run: |
-          node scripts/capture-harness.mjs
+          # geometry-check generates the pages itself and launches the browser
+          # through puppeteer, so nothing has to exist beforehand.
           npx puppeteer browsers install chrome
           node scripts/geometry-check.mjs
           TC_IDE_CHROMIUM="$(node -e "console.log(require('puppeteer').executablePath())")" node scripts/capture-harness.mjs
