@@ -1,0 +1,187 @@
+{
+  "$schema": "vscode://schemas/color-theme",
+  "name": "TC-IDE Light",
+  "type": "light",
+  "colors": {
+    "editor.background": "#F5F5F7",
+    "editor.foreground": "#3A3A3C",
+    "editorLineNumber.foreground": "#6E6E73",
+    "editorLineNumber.activeForeground": "#1D1D1F",
+    "editor.selectionBackground": "#DBEAFE",
+    "editor.selectionForeground": "#0A5AA8",
+    "editorCursor.foreground": "#007AFF",
+    "editorWidget.background": "#FFFFFF",
+    "editorWidget.border": "#D1D1D6",
+    "editorGroupHeader.tabsBackground": "#FFFFFF",
+    "sideBar.background": "#F5F5F7",
+    "sideBar.foreground": "#3A3A3C",
+    "sideBarSectionHeader.background": "#FFFFFF",
+    "sideBarSectionHeader.border": "#D1D1D6",
+    "activityBar.background": "#F5F5F7",
+    "activityBar.foreground": "#3A3A3C",
+    "activityBarBadge.background": "#007AFF",
+    "activityBarBadge.foreground": "#FFFFFF",
+    "panel.background": "#F5F5F7",
+    "panel.border": "#D1D1D6",
+    "panelTitle.activeForeground": "#1D1D1F",
+    "panelTitle.inactiveForeground": "#6E6E73",
+    "statusBar.background": "#FFFFFF",
+    "statusBar.foreground": "#3A3A3C",
+    "statusBar.border": "#D1D1D6",
+    "titleBar.activeBackground": "#FFFFFF",
+    "titleBar.activeForeground": "#3A3A3C",
+    "titleBar.inactiveBackground": "#F5F5F7",
+    "titleBar.inactiveForeground": "#6E6E73",
+    "input.background": "#F2F2F7",
+    "input.foreground": "#3A3A3C",
+    "input.border": "#D1D1D6",
+    "input.placeholderForeground": "#6E6E73",
+    "focusBorder": "#007AFF",
+    "list.activeSelectionBackground": "#DBEAFE",
+    "list.activeSelectionForeground": "#0A5AA8",
+    "list.hoverBackground": "#F2F2F7",
+    "list.inactiveSelectionBackground": "#FFFFFF",
+    "button.background": "#F2F2F7",
+    "button.foreground": "#1D1D1F",
+    "button.hoverBackground": "#DBEAFE",
+    "badge.background": "#DBEAFE",
+    "badge.foreground": "#0A5AA8",
+    "scrollbarSlider.background": "#D1D1D680",
+    "scrollbarSlider.hoverBackground": "#D1D1D6B0",
+    "scrollbarSlider.activeBackground": "#D1D1D6",
+    "descriptionForeground": "#6E6E73",
+    "errorForeground": "#9E1B3D",
+    "menu.background": "#FFFFFF",
+    "menu.foreground": "#3A3A3C",
+    "menu.selectionBackground": "#DBEAFE",
+    "menu.selectionForeground": "#0A5AA8",
+    "menu.border": "#D1D1D6"
+  },
+  "tokenColors": [
+    {
+      "scope": [
+        "comment",
+        "punctuation.definition.comment"
+      ],
+      "settings": {
+        "foreground": "#5F6368"
+      }
+    },
+    {
+      "scope": [
+        "keyword",
+        "storage.type",
+        "storage.modifier"
+      ],
+      "settings": {
+        "foreground": "#0B5394"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.type",
+        "entity.name.class",
+        "support.type",
+        "support.class"
+      ],
+      "settings": {
+        "foreground": "#146B2E"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.function",
+        "support.function",
+        "meta.function-call"
+      ],
+      "settings": {
+        "foreground": "#71317F"
+      }
+    },
+    {
+      "scope": [
+        "constant",
+        "constant.numeric",
+        "constant.language",
+        "support.constant"
+      ],
+      "settings": {
+        "foreground": "#785700"
+      }
+    },
+    {
+      "scope": [
+        "variable",
+        "variable.other"
+      ],
+      "settings": {
+        "foreground": "#24292F"
+      }
+    },
+    {
+      "scope": [
+        "variable.parameter"
+      ],
+      "settings": {
+        "foreground": "#3D4451"
+      }
+    },
+    {
+      "scope": [
+        "variable.other.property",
+        "meta.object-literal.key"
+      ],
+      "settings": {
+        "foreground": "#1B5E8A"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.function.preprocessor",
+        "meta.preprocessor",
+        "keyword.control.import"
+      ],
+      "settings": {
+        "foreground": "#8A2F45"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.namespace",
+        "entity.name.module",
+        "support.module"
+      ],
+      "settings": {
+        "foreground": "#4A4F57"
+      }
+    },
+    {
+      "scope": [
+        "keyword.control.directive",
+        "meta.preprocessor.include"
+      ],
+      "settings": {
+        "foreground": "#9E1B3D"
+      }
+    },
+    {
+      "scope": [
+        "string",
+        "constant.character",
+        "constant.other.symbol"
+      ],
+      "settings": {
+        "foreground": "#8A4B08"
+      }
+    },
+    {
+      "scope": [
+        "punctuation",
+        "meta.brace"
+      ],
+      "settings": {
+        "foreground": "#6E6E73"
+      }
+    }
+  ]
+}

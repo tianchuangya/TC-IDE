@@ -1,0 +1,17 @@
+{
+  "Open a project to see relations": "打开一个项目后显示关系",
+  "Analyzing the current scope…": "正在分析当前范围…",
+  "This language provides no symbols or call hierarchy": "当前语言未提供符号或调用层级",
+  "No matches in the current scope": "当前范围内没有匹配项",
+  "Search files, classes, functions, variables": "搜索文件、类、函数、变量",
+  "Relation direction": "关系方向",
+  "Relation scope": "关系范围",
+  "Refresh graph": "刷新关系图",
+  "Follow the cursor": "跟随光标",
+  "Definition": "定义",
+  "Call": "调用",
+  "Reference": "引用",
+  "Retry": "重试",
+  "Open output": "打开输出",
+  "Cancel": "取消"
+}

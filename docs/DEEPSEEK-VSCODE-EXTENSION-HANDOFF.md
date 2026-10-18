@@ -1016,3 +1016,63 @@ DeepSeek 提交给 Codex/项目所有者前逐项回答“是/否/不适用”�
 ## 25. 实际完成记录
 
 尚未开始。第一步应创建 `vscode-extension/` 骨架并完成阶段 A，不得先制作静态 Webview 演示来冒充完整扩展。视觉实现必须从第 17 节 Token 和第 18 节关系图施工图开始，第一批截图只能标记为“待视觉批准”。
+
+### 2026-10-18 / 阶段 A（可运行骨架）
+
+**完成**：
+
+- `vscode-extension/` 独立 npm 工程：TypeScript 入口 + esbuild 双 bundle（Extension Host 用 CJS 并 external `vscode`；Webview 用浏览器 IIFE，已实测**不含任何 `vscode` 引用**）。
+- Manifest：Activity Bar 容器 `tcIde` + WebviewView `tcIde.graphView` + 5 个命令 + 10 项配置 + 2 套主题 + `viewsWelcome`。
+- TC-IDE Dark / Light 两套完整主题（颜色逐项取自 `src/theme_core.rs`），中英双语 l10n bundle。
+- 关系图 Webview 按第 17 节 Token 与第 18 节施工图实现：标题行 32、关系轨道 32（指示线为**单个移动元素**，不是三个按钮瞬切）、范围浮层（选中用 2px accent 短线，不用字母）、搜索框（150ms 防抖、Esc 两级）、面包屑 24、视口、footer 34；卡片槽 58、一级卡片距左 **42**、每级右移 16、卡片高 46、**叶子节点无 chevron**；加载/空/无 Provider/错误四态互斥。
+- `.tcIDE` 文档：创建命令、解析（未知字段告警、版本过高报错）、序列化。
+- 语义数据全部走真实 VS Code API：`executeDocumentSymbolProvider`、`prepareCallHierarchy`、`provideIncomingCalls/OutgoingCalls`；无 Provider 时返回 `degraded` 并在视图说明，**不猜测关系**。
+- 性能：provider 端 300ms 防抖 + 可取消 + 序号丢弃过期回答；Webview 只渲染可见行 + 上下各 3 行缓冲；动画循环在静止后停止。
+- **截图/几何 harness**：`src/graph/harness.ts` 与扩展复用同一份 `view.ts` markup/styles（无第二份 HTML）；10 个场景；`?testTime=` 可冻结时间。
+- **真实浏览器几何断言**：`scripts/geometry-check.mjs` 用 Chromium 读 DOM 断言 **187 条**，全部通过。
+- VSIX 打包检查 `scripts/verify-package.mjs`：清单指向的文件必须存在、主题必须可解析、bundle 必须包含所有命令与视图、无密钥特征。
+- CI：`.github/workflows/vscode-extension.yml`（typecheck / lint / test / build / geometry / package / 上传 vsix 与截图），**不创建 Release**。
+
+**修改文件**：`vscode-extension/` 全部为新增；另新增 `.github/workflows/vscode-extension.yml`。`src/` 下的原生程序**未改动**。
+
+**验证命令与结果**（均在 `vscode-extension/` 下执行）：
+
+| 命令 | 结果 |
+|---|---|
+| `npm run typecheck` | 通过 |
+| `npm run lint` | 通过（0 warning） |
+| `npm test` | **30 通过 / 0 失败** |
+| `npm run build` | 两个 bundle 成功 |
+| `node scripts/geometry-check.mjs` | **187/187 断言通过** |
+| `node scripts/verify-package.mjs --build` | 通过，vsix **27 412 字节 / 11 个文件** |
+
+**截图**：`vscode-extension/harness-shots/` 共 10 张，**两次运行逐字节一致**（可作回归基线）。
+
+> ⚠️ **这些截图尚未经视觉批准。** 实现者所用模型**不具备图像输入能力**，无法查看 PNG，
+> 因此**不能**由实现者确认「视觉一致」。按第 15.2 节，首批基准必须由项目所有者或有视觉能力的
+> Codex 查看后批准。在那之前状态是**「等待视觉验收」**，不是「视觉一致」。
+>
+> 已用数值代替肉眼的部分：截图主色像素恰好等于主题 Token（暗色 `#0D1219` 304 205 px、
+> `#1D2937` 95 335 px；亮色 `#F5F5F7` 337 253 px、`#F2F2F7` 65 865 px），证明 Token 真的生效；
+> 文字对比度由 `theme.test.ts` 断言 ≥4.5:1。
+
+**过程中发现并修掉的真实缺陷**（均由测试或工具抓出，非猜测）：
+
+1. 消息 `version: "1"`（字符串）曾被 `Number()` 强制转换通过 → 改为严格要求 `typeof === 'number'`。
+2. CSP 中 `style-src 'nonce-…' 'unsafe-inline'` **互相抵消**，内联 `element.style` 全被拦截 → 样式改用 `'unsafe-inline'`，脚本保持 nonce-only。
+3. 卡片因根元素 12px 内边距被定位到 54px 而非 42px → 绘制时减去该内边距。
+4. 加载态与错误态各自会与「空」面板**同时显示** → 状态面板改为互斥。
+5. `graph-error` 与 `graph-empty` 截图曾**逐字节相同**：harness 先判 `snapshot === null` 走错分支，且浏览器 `--screenshot` 在消息到达前就截图 → 修正分支顺序，改用 Puppeteer 等 `__TC_HARNESS_READY__` 后再截。
+
+**未完成（不要当成已做）**：
+
+- 编辑器内 Decoration / CodeLens / InlayHints（阶段 C）；
+- 调试变量内联显示（阶段 C）；
+- TaskProvider 与 Build/Run/Package（阶段 D）；
+- 黑洞/白洞打包动画（阶段 E）——**一行都还没写**；
+- 多目标打包选择；
+- 大项目性能实测（只有设计上的限流，**没有基准数字**）；
+- 视觉基准批准。
+
+**下一步**：把 `harness-shots/` 交给项目所有者或 Codex 做视觉批准；并行可开始阶段 B 的
+Call Hierarchy 双向联动与阶段 C 的 Decoration。

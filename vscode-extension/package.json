@@ -1,0 +1,247 @@
+{
+  "name": "tc-ide-companion",
+  "displayName": "TC-IDE Companion",
+  "description": "TC-IDE 的语义关系图、项目文档与构建可视化，作为 VS Code 扩展。",
+  "version": "0.1.0",
+  "publisher": "tianchuangya",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "semantic graph",
+    "call hierarchy",
+    "tc-ide"
+  ],
+  "main": "./dist/extension.js",
+  "l10n": "./l10n",
+  "activationEvents": [
+    "onCommand:tcIde.openGraph",
+    "onCommand:tcIde.refreshGraph",
+    "onView:tcIde.graphView"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "TC-IDE Companion",
+      "properties": {
+        "tcIde.graph.defaultRelation": {
+          "type": "string",
+          "enum": [
+            "follow",
+            "callers",
+            "callees"
+          ],
+          "default": "follow",
+          "enumDescriptions": [
+            "跟随当前符号",
+            "只看调用者",
+            "只看被调用"
+          ],
+          "description": "关系图默认显示的关系方向。"
+        },
+        "tcIde.graph.defaultScope": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "project",
+            "folder",
+            "file",
+            "symbol"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "依次优先：悬停符号 → 光标符号 → 当前文件",
+            "整个项目",
+            "当前文件夹",
+            "当前文件",
+            "当前符号"
+          ],
+          "description": "关系图默认范围。"
+        },
+        "tcIde.graph.maxNodes": {
+          "type": "number",
+          "default": 240,
+          "minimum": 20,
+          "maximum": 2000,
+          "description": "关系图节点上限；超过后聚类。默认与原生共享核心一致。"
+        },
+        "tcIde.graph.excludeGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules/**",
+            "**/target/**",
+            "**/.git/**"
+          ],
+          "description": "索引时排除的路径；与 files.exclude、search.exclude、.gitignore 合并。"
+        },
+        "tcIde.graph.followDelayMs": {
+          "type": "number",
+          "default": 300,
+          "minimum": 0,
+          "maximum": 3000,
+          "description": "鼠标离开编辑器后，回退到光标焦点前的延迟。"
+        },
+        "tcIde.graph.hoverRevertMs": {
+          "type": "number",
+          "default": 300,
+          "minimum": 0,
+          "maximum": 3000,
+          "description": "悬停符号失效后多久回退到光标焦点。"
+        },
+        "tcIde.editor.decorations": {
+          "type": "boolean",
+          "default": true,
+          "description": "在编辑器中显示当前符号与关系标识。"
+        },
+        "tcIde.editor.maxDecorations": {
+          "type": "number",
+          "default": 12,
+          "minimum": 0,
+          "maximum": 50,
+          "description": "同时高亮的关系数量上限；超出后只在关系图显示。"
+        },
+        "tcIde.package.animate": {
+          "type": "boolean",
+          "default": true,
+          "description": "构建时显示黑洞/白洞动画；关闭后只显示状态。"
+        },
+        "tcIde.reducedMotion": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "always",
+            "never"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "跟随系统与 VS Code 设置",
+            "始终使用减少动效",
+            "始终使用完整动效"
+          ],
+          "description": "是否减少动画。"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "tcIde.openGraph",
+        "title": "打开语义关系图",
+        "category": "TC-IDE",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "tcIde.refreshGraph",
+        "title": "刷新关系图",
+        "category": "TC-IDE",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "tcIde.focusScope",
+        "title": "切换关系范围",
+        "category": "TC-IDE",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "tcIde.toggleRelation",
+        "title": "切换关系方向",
+        "category": "TC-IDE",
+        "icon": "$(arrow-both)"
+      },
+      {
+        "command": "tcIde.createProjectDocument",
+        "title": "创建 .tcIDE 项目文档",
+        "category": "TC-IDE",
+        "icon": "$(new-file)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tcIde",
+          "title": "TC-IDE",
+          "icon": "media/icons/tc-ide.svg"
+        }
+      ]
+    },
+    "views": {
+      "tcIde": [
+        {
+          "type": "webview",
+          "id": "tcIde.graphView",
+          "name": "调用层级",
+          "icon": "media/icons/tc-ide.svg",
+          "contextualTitle": "TC-IDE 调用层级"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "tcIde.graphView",
+        "contents": "打开一个项目后显示语义关系。\n[刷新关系图](command:tcIde.refreshGraph)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "tcIde.refreshGraph",
+          "when": "view == tcIde.graphView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "tcIde.focusScope",
+          "when": "view == tcIde.graphView",
+          "group": "navigation@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "tcIde.openGraph",
+          "when": "workspaceFolderCount > 0"
+        }
+      ]
+    },
+    "themes": [
+      {
+        "label": "TC-IDE Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/tc-ide-dark-color-theme.json"
+      },
+      {
+        "label": "TC-IDE Light",
+        "uiTheme": "vs",
+        "path": "./themes/tc-ide-light-color-theme.json"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --max-warnings 0",
+    "test": "tsc --outDir dist && node --test \"dist/test/*.test.js\"",
+    "vscode:prepublish": "npm run build",
+    "package": "vsce package --no-dependencies --out tc-ide-companion.vsix",
+    "verify:package": "node scripts/verify-package.mjs",
+    "harness": "node scripts/capture-harness.mjs",
+    "harness:geometry": "node scripts/geometry-check.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vscode/vsce": "^2.24.0",
+    "esbuild": "^0.20.0",
+    "eslint": "^8.56.0",
+    "puppeteer": "^23.0.0",
+    "typescript": "^5.3.0"
+  }
+}

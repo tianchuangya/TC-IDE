@@ -1,0 +1,73 @@
+name: vscode extension
+
+# Builds and tests the companion extension. It packages the .vsix so a broken
+# manifest is caught here, and never creates a release: publishing is the
+# project owner's decision, not a side effect of a green build.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'vscode-extension/**'
+      - '.github/workflows/vscode-extension.yml'
+  pull_request:
+    paths:
+      - 'vscode-extension/**'
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: vscode-extension
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci || npm install --no-audit --no-fund
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build bundles
+        run: npm run build
+
+      - name: Geometry and screenshot harness
+        # The harness renders the real view in a real browser and asserts the
+        # numbers from the design, which is the only way the layout can be
+        # checked without a person looking at it.
+        run: |
+          node scripts/capture-harness.mjs
+          npx puppeteer browsers install chrome
+          node scripts/geometry-check.mjs
+          TC_IDE_CHROMIUM="$(node -e "console.log(require('puppeteer').executablePath())")" node scripts/capture-harness.mjs
+          ls -l harness-shots
+
+      - name: Check the packaged extension
+        run: node scripts/verify-package.mjs --build
+
+      - name: Upload the vsix
+        uses: actions/upload-artifact@v4
+        with:
+          name: tc-ide-companion-vsix
+          path: vscode-extension/tc-ide-companion.vsix
+          if-no-files-found: error
+
+      - name: Upload the screenshots for visual review
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-shots
+          path: vscode-extension/harness-shots
+          if-no-files-found: error

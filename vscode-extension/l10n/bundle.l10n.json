@@ -1,0 +1,17 @@
+{
+  "Open a project to see relations": "Open a project to see relations",
+  "Analyzing the current scope…": "Analyzing the current scope…",
+  "This language provides no symbols or call hierarchy": "This language provides no symbols or call hierarchy",
+  "No matches in the current scope": "No matches in the current scope",
+  "Search files, classes, functions, variables": "Search files, classes, functions, variables",
+  "Relation direction": "Relation direction",
+  "Relation scope": "Relation scope",
+  "Refresh graph": "Refresh graph",
+  "Follow the cursor": "Follow the cursor",
+  "Definition": "Definition",
+  "Call": "Call",
+  "Reference": "Reference",
+  "Retry": "Retry",
+  "Open output": "Open output",
+  "Cancel": "Cancel"
+}
