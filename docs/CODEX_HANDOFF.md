@@ -308,3 +308,8 @@ Windows 真机上的 DirectWrite/Direct2D、ConPTY、编译器/LSP/调试器和�
   不再把字母 `v` 当作下拉箭头。
 - “UI 统一”不等于放弃平台习惯：Windows/macOS 保留原生系统菜单，Linux 使用客户区菜单；
   但编辑器客户区的比例、颜色、动效角色与控件状态必须共用。
+- 第二轮视觉骨架引入了三端共用的“语义轨道”：活动文档下方保留 2px 蓝色轨道，
+  切换文件时亮段使用 `motion_core::flowing_segment` 缓动滑过；Linux 跟随现有文件切换弹簧，
+  静止后不继续以 60fps 空转。Windows 和 macOS 使用同一几何函数。
+- 自定义背景改为“身份纹理”而不是第二前景：`theme_core::editor_scrim_alpha` 会根据浅/深主题和
+  用户背景不透明度自适应加深代码遮罩。用户提高图片强度时，代码对比度不会被同比拉低。

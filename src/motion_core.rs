@@ -1167,6 +1167,37 @@ pub struct Layout {
     pub terminal: f32,
 }
 
+/// The bright travelling part of TC-IDE's semantic accent rail.
+///
+/// The full rail remains visible while this short segment moves across it.
+/// Keeping the arithmetic here makes a selected document feel like the same
+/// object on Cairo, Direct2D and CoreGraphics rather than three unrelated
+/// underlines.  The return value is always ordered and clipped to the rail.
+pub fn flowing_segment(
+    start: f32,
+    end: f32,
+    seconds: f32,
+    cycle_seconds: f32,
+    share: f32,
+) -> (f32, f32) {
+    if !start.is_finite()
+        || !end.is_finite()
+        || !seconds.is_finite()
+        || end <= start
+        || cycle_seconds <= 0.0
+    {
+        return (start, start);
+    }
+    let width = end - start;
+    let segment = width * share.clamp(0.04, 0.5);
+    let phase = (seconds.rem_euclid(cycle_seconds) / cycle_seconds).clamp(0.0, 1.0);
+    // Smoothstep avoids the mechanical constant-speed sweep that made the old
+    // UI feel like a loading bar.
+    let eased = phase * phase * (3.0 - 2.0 * phase);
+    let left = start + (width - segment) * eased;
+    (left, (left + segment).min(end))
+}
+
 impl Layout {
     /// The proportions the interface is built on.
     pub const DEFAULT: Layout = Layout {
@@ -1211,6 +1242,16 @@ impl Layout {
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+
+    #[test]
+    fn semantic_rail_segment_stays_inside_its_track() {
+        for seconds in [-4.0, 0.0, 0.4, 1.7, 80.0] {
+            let (left, right) = flowing_segment(20.0, 120.0, seconds, 1.8, 0.18);
+            assert!(left >= 20.0 && right <= 120.0);
+            assert!(right > left);
+        }
+        assert_eq!(flowing_segment(4.0, 4.0, 1.0, 1.0, 0.2), (4.0, 4.0));
+    }
 
     #[test]
     fn the_default_proportions_leave_the_editor_a_usable_share() {

@@ -43,6 +43,32 @@ pub mod chrome {
     pub const CONTROL_RADIUS: f32 = 8.0;
     /// Outer margin used by floating panels.
     pub const PANEL_MARGIN: f32 = 16.0;
+
+    /// Veil over a custom wallpaper inside the editor.  A background is an
+    /// identity layer, not the foreground: even at 100% user opacity it must
+    /// leave source text and semantic overlays dominant.
+    pub const EDITOR_SCRIM_DARK: f32 = 0.48;
+    pub const EDITOR_SCRIM_LIGHT: f32 = 0.62;
+
+    /// Thickness of the continuous accent rail used for active tabs, symbol
+    /// routes and graph focus.  This is the small visual signature shared by
+    /// all native backends.
+    pub const SEMANTIC_RAIL_HEIGHT: f32 = 2.0;
+}
+
+/// Opacity of the editor veil over a custom wallpaper.
+///
+/// Raising the wallpaper's own opacity must not make it compete with code.  We
+/// therefore increase the veil at the same time: at the normal 50% setting the
+/// picture contributes about 18% of the final editor colour; even at 100% it
+/// remains an identity texture rather than a second foreground.
+pub fn editor_scrim_alpha(light: bool, wallpaper_opacity: f32) -> f32 {
+    let base = if light {
+        chrome::EDITOR_SCRIM_LIGHT
+    } else {
+        chrome::EDITOR_SCRIM_DARK
+    };
+    (base + wallpaper_opacity.clamp(0.0, 1.0) * 0.30).min(0.88)
 }
 
 /// Syntax categories a person can customise independently.
@@ -440,6 +466,12 @@ mod tests {
         assert_eq!(chrome::TOP_BAR_HEIGHT, 48.0);
         assert_eq!(chrome::MENU_BAR_HEIGHT, 30.0);
         assert_eq!(chrome::TAB_STRIP_HEIGHT, 40.0);
+        assert_eq!(chrome::EDITOR_SCRIM_DARK, 0.48);
+        assert_eq!(chrome::EDITOR_SCRIM_LIGHT, 0.62);
+        assert_eq!(chrome::SEMANTIC_RAIL_HEIGHT, 2.0);
+        assert_eq!(editor_scrim_alpha(false, 0.0), 0.48);
+        assert!((editor_scrim_alpha(false, 0.5) - 0.63).abs() < f32::EPSILON);
+        assert!(editor_scrim_alpha(true, 1.0) <= 0.88);
         assert_eq!(chrome::STATUS_BAR_HEIGHT, 28.0);
         assert_eq!(chrome::TAB_WIDTH, 136.0);
         assert_eq!(chrome::CODE_GUTTER_WIDTH, 52.0);

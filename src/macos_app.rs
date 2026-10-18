@@ -2864,6 +2864,39 @@ unsafe fn draw_frame(shell: &mut MacShell) {
             },
             1.0,
         );
+        if selected {
+            let rail_left = left + 5.0;
+            let rail_right = left + tab_width - 11.0;
+            let rail_y = tab_top + theme_core::chrome::CONTROL_HEIGHT as f64
+                - theme_core::chrome::SEMANTIC_RAIL_HEIGHT as f64;
+            fill_rect(
+                CGRect::new(
+                    rail_left,
+                    rail_y,
+                    rail_right - rail_left,
+                    theme_core::chrome::SEMANTIC_RAIL_HEIGHT as f64,
+                ),
+                palette.accent,
+                1.0,
+            );
+            let (glint_left, glint_right) = motion_core::flowing_segment(
+                rail_left as f32,
+                rail_right as f32,
+                shell.started.elapsed().as_secs_f32(),
+                1.8,
+                0.18,
+            );
+            fill_rect(
+                CGRect::new(
+                    glint_left as f64,
+                    rail_y,
+                    (glint_right - glint_left) as f64,
+                    theme_core::chrome::SEMANTIC_RAIL_HEIGHT as f64,
+                ),
+                palette.bright,
+                1.0,
+            );
+        }
         draw_text(
             title,
             left + 8.0,

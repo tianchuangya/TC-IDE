@@ -2639,6 +2639,19 @@ impl DirectEditorRenderer {
                     Some(&source),
                 )
             };
+            let scrim_alpha =
+                theme_core::editor_scrim_alpha(scene.light_theme, scene.background_opacity);
+            let scrim = unsafe { Self::brush(&target_base, palette.background, scrim_alpha) }?;
+            unsafe {
+                Self::fill(
+                    &target_base,
+                    &scrim,
+                    region.left,
+                    region.top,
+                    region.right,
+                    region.bottom,
+                )
+            };
         }
         unsafe {
             Self::fill(
@@ -3468,6 +3481,38 @@ impl DirectEditorRenderer {
                         theme_core::chrome::CONTROL_RADIUS * scale,
                     )
                 };
+                if active {
+                    let rail_left = tab_x + 5.0 * scale;
+                    let rail_right = tab_x + tab_width - 11.0 * scale;
+                    let rail_top = tab_bottom - theme_core::chrome::SEMANTIC_RAIL_HEIGHT * scale;
+                    unsafe {
+                        Self::fill(
+                            &target_base,
+                            &accent,
+                            rail_left,
+                            rail_top,
+                            rail_right,
+                            tab_bottom,
+                        )
+                    };
+                    let (glint_left, glint_right) = crate::motion_core::flowing_segment(
+                        rail_left,
+                        rail_right,
+                        scene.animation_seconds,
+                        1.8,
+                        0.18,
+                    );
+                    unsafe {
+                        Self::fill(
+                            &target_base,
+                            &bright,
+                            glint_left,
+                            rail_top,
+                            glint_right,
+                            tab_bottom,
+                        )
+                    };
+                }
                 let dirty = scene.tab_dirty.get(index).copied().unwrap_or(false);
                 unsafe {
                     Self::text(

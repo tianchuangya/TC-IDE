@@ -5478,10 +5478,13 @@ impl App {
                 (self.height - tabs_bottom - s(70)).max(1) as f64,
             );
             cairo_clip(self.cairo);
+            let scrim =
+                theme_core::editor_scrim_alpha(self.light_theme, self.background_opacity as f32)
+                    as f64;
             if self.light_theme {
-                cairo_set_source_rgba(self.cairo, 1.0, 1.0, 1.0, 0.18);
+                cairo_set_source_rgba(self.cairo, 1.0, 1.0, 1.0, scrim);
             } else {
-                cairo_set_source_rgba(self.cairo, 0.035, 0.045, 0.055, 0.34);
+                cairo_set_source_rgba(self.cairo, 0.035, 0.045, 0.055, scrim);
             }
             cairo_paint(self.cairo);
             cairo_restore(self.cairo);
@@ -5519,9 +5522,26 @@ impl App {
                 );
                 self.line(
                     self.colors.accent,
-                    2,
+                    s(theme_core::chrome::SEMANTIC_RAIL_HEIGHT as i32).max(1) as u32,
                     (tab_x + shift, tabs_bottom - s(2)),
                     (tab_x + width + shift, tabs_bottom - s(2)),
+                );
+                // The glint follows the existing file-switch spring.  It moves
+                // at full frame rate while a tab changes, then becomes still;
+                // the idle editor therefore does not burn a core for decoration.
+                let elapsed = self.file_switch_motion.value.clamp(0.0, 0.999);
+                let (glint_left, glint_right) = motion_core::flowing_segment(
+                    (tab_x + shift) as f32,
+                    (tab_x + width + shift) as f32,
+                    elapsed,
+                    1.0,
+                    0.18,
+                );
+                self.line(
+                    self.colors.bright,
+                    s(2).max(1) as u32,
+                    (glint_left.round() as i32, tabs_bottom - s(2)),
+                    (glint_right.round() as i32, tabs_bottom - s(2)),
                 );
             } else if self.tab_close_hovered == Some(index) {
                 // A tab the pointer is on lifts slightly, so it is clear which
