@@ -10,6 +10,142 @@
 
 use std::fmt::Write as _;
 
+use serde_json::Value;
+
+/// The runtime a VS Code extension would need before TC-IDE can execute it.
+/// Reading a VSIX manifest must never make the extension panel claim that its
+/// JavaScript is already runnable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VsCodeRuntimeRequirement {
+    DeclarativeAssets,
+    ProtocolAdapter,
+    ExtensionHost,
+    UnsupportedApi,
+}
+
+impl VsCodeRuntimeRequirement {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DeclarativeAssets => "声明式资源",
+            Self::ProtocolAdapter => "协议适配器",
+            Self::ExtensionHost => "VS Code API 宿主",
+            Self::UnsupportedApi => "暂不支持的 API",
+        }
+    }
+}
+
+/// Compatibility facts extracted from a VS Code `package.json`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VsCodeExtensionReport {
+    pub id: String,
+    pub display_name: String,
+    pub version: String,
+    pub vscode_engine: String,
+    pub entrypoint: Option<String>,
+    pub browser_entrypoint: Option<String>,
+    pub contribution_points: Vec<String>,
+    pub runtime: VsCodeRuntimeRequirement,
+    pub reasons: Vec<String>,
+}
+
+/// Inspect a VS Code extension manifest without executing extension code.
+///
+/// This returns a capability report, not an installation success flag. It is
+/// safe to use for a local VSIX or an Open VSX listing before choosing the
+/// sandbox or protocol adapter the extension needs.
+pub fn inspect_vscode_manifest(text: &str) -> Result<VsCodeExtensionReport, String> {
+    let root: Value = serde_json::from_str(text)
+        .map_err(|error| format!("invalid VS Code package.json: {error}"))?;
+    let object = root
+        .as_object()
+        .ok_or_else(|| "VS Code package.json must contain an object".to_string())?;
+    let required = |key: &str| -> Result<String, String> {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| format!("VS Code package.json requires {key}"))
+    };
+    let name = required("name")?;
+    let publisher = required("publisher")?;
+    let version = required("version")?;
+    let display_name = object
+        .get("displayName")
+        .and_then(Value::as_str)
+        .unwrap_or(&name)
+        .to_string();
+    let vscode_engine = object
+        .get("engines")
+        .and_then(Value::as_object)
+        .and_then(|engines| engines.get("vscode"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let entrypoint = object
+        .get("main")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let browser_entrypoint = object
+        .get("browser")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let mut contribution_points: Vec<String> = object
+        .get("contributes")
+        .and_then(Value::as_object)
+        .map(|contributes| contributes.keys().cloned().collect())
+        .unwrap_or_default();
+    contribution_points.sort();
+
+    let proposed_api = object
+        .get("enabledApiProposals")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty());
+    let has_code = entrypoint.is_some() || browser_entrypoint.is_some();
+    let protocol_points = ["debuggers", "taskDefinitions"];
+    let uses_protocol = contribution_points
+        .iter()
+        .any(|point| protocol_points.contains(&point.as_str()));
+
+    let (runtime, reasons) = if proposed_api {
+        (
+            VsCodeRuntimeRequirement::UnsupportedApi,
+            vec!["扩展请求 VS Code proposed API，不能按稳定兼容层运行".into()],
+        )
+    } else if has_code {
+        let mut reasons = vec!["包含 JavaScript/TypeScript 入口，需要隔离的扩展宿主".into()];
+        if entrypoint.is_some() {
+            reasons.push("桌面入口依赖 Node.js 与 vscode API".into());
+        }
+        if browser_entrypoint.is_some() {
+            reasons.push("浏览器入口依赖 WebWorker 版 vscode API".into());
+        }
+        (VsCodeRuntimeRequirement::ExtensionHost, reasons)
+    } else if uses_protocol {
+        (
+            VsCodeRuntimeRequirement::ProtocolAdapter,
+            vec!["可优先映射到 TC-IDE 已有的 DAP/任务/终端能力".into()],
+        )
+    } else {
+        (
+            VsCodeRuntimeRequirement::DeclarativeAssets,
+            vec!["没有可执行入口，可在不运行第三方代码的情况下转换资源".into()],
+        )
+    };
+
+    Ok(VsCodeExtensionReport {
+        id: format!("{publisher}.{name}"),
+        display_name,
+        version,
+        vscode_engine,
+        entrypoint,
+        browser_entrypoint,
+        contribution_points,
+        runtime,
+        reasons,
+    })
+}
+
 /// What an extension provides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExtensionKind {
@@ -1108,5 +1244,64 @@ mod tests {
         assert_eq!(manifest.commands.len(), 2);
         assert_eq!(manifest.commands[1].label, "check");
         assert!(parse_plugin_manifest("[plugin]\nid=broken\n").is_err());
+    }
+
+    #[test]
+    fn vscode_declarative_extensions_are_not_mistaken_for_executable_code() {
+        let report = inspect_vscode_manifest(
+            r#"{
+                "name": "quiet-theme",
+                "publisher": "tc",
+                "displayName": "Quiet Theme",
+                "version": "1.2.3",
+                "engines": { "vscode": "^1.90.0" },
+                "contributes": { "themes": [], "grammars": [], "snippets": [] }
+            }"#,
+        )
+        .expect("manifest");
+        assert_eq!(report.id, "tc.quiet-theme");
+        assert_eq!(report.display_name, "Quiet Theme");
+        assert_eq!(report.runtime, VsCodeRuntimeRequirement::DeclarativeAssets);
+        assert_eq!(
+            report.contribution_points,
+            vec!["grammars", "snippets", "themes"]
+        );
+        assert!(report.entrypoint.is_none());
+    }
+
+    #[test]
+    fn vscode_node_extensions_require_an_extension_host() {
+        let report = inspect_vscode_manifest(
+            r#"{
+                "name": "formatter",
+                "publisher": "sample",
+                "version": "2.0.0",
+                "main": "./dist/extension.js",
+                "contributes": { "commands": [{"command": "sample.format"}] }
+            }"#,
+        )
+        .expect("manifest");
+        assert_eq!(report.runtime, VsCodeRuntimeRequirement::ExtensionHost);
+        assert!(report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("Node.js")));
+    }
+
+    #[test]
+    fn vscode_proposed_apis_are_refused_explicitly() {
+        let report = inspect_vscode_manifest(
+            r#"{
+                "name": "experimental",
+                "publisher": "sample",
+                "version": "0.1.0",
+                "main": "index.js",
+                "enabledApiProposals": ["chatParticipantPrivate"]
+            }"#,
+        )
+        .expect("manifest");
+        assert_eq!(report.runtime, VsCodeRuntimeRequirement::UnsupportedApi);
+        assert!(inspect_vscode_manifest("{}").is_err());
+        assert!(inspect_vscode_manifest("not-json").is_err());
     }
 }
