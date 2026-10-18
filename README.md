@@ -53,4 +53,4 @@ cargo run --release
 
 ## 路线
 
-此原型已验证 TC-IDE 的视觉语言和主要交互。关系图范围、搜索与层级已下沉到共享的 `graph_core`，终端网格、滚动与选择已下沉到共享的 `terminal_core`，并由 Linux 本地单元测试覆盖，Windows 后端在 Linux runner 上也会做一次不链接的类型检查；但右侧语义图在大型项目中仍缺少后台增量索引与视口聚类，语言“下载”仍是界面状态，语言“下载”仍是界面状态，Python 缓存目前只记录运行时元数据，尚未实现完整的 LSP/编译器下载。后续阶段会加入真实项目索引、Tree-sitter、LSP、GPU 字形动画和多平台打包器。详见 [架构说明](docs/ARCHITECTURE.md) 与 [VS Code 扩展兼容路线](docs/VSCODE-COMPATIBILITY.md)。
+此原型已验证 TC-IDE 的视觉语言和主要交互。关系图范围、搜索与层级已下沉到共享的 `graph_core`，终端网格、滚动与选择已下沉到共享的 `terminal_core`，并由 Linux 本地单元测试覆盖，Windows 后端在 Linux runner 上也会做一次不链接的类型检查；但右侧语义图在大型项目中仍缺少后台增量索引与视口聚类，语言“下载”仍是界面状态，语言“下载”仍是界面状态，Python 缓存目前只记录运行时元数据，尚未实现完整的 LSP/编译器下载。后续阶段会加入真实项目索引、Tree-sitter、LSP、GPU 字形动画和多平台打包器。详见 [架构说明](docs/ARCHITECTURE.md)、[VS Code 扩展兼容路线](docs/VSCODE-COMPATIBILITY.md) 与 [VS Code 版 TC-IDE 插件开发任务书](docs/DEEPSEEK-VSCODE-EXTENSION-HANDOFF.md)。
