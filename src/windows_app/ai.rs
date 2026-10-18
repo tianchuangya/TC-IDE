@@ -3,36 +3,14 @@
 use super::*;
 
 impl WindowsAppState {
-    /// Add the checked-in `.tcIDE` project map to every request.  This keeps
-    /// the AI grounded in the same files, symbols and relations shown by the
-    /// graph instead of making it infer the project from a bare prompt.
-    fn prompt_with_project_context(&self, prompt: &str) -> String {
-        const MAX_CONTEXT: usize = 12_000;
-        let document = tcide_project::serialize(&self.tcide_project);
-        let context = if document.len() > MAX_CONTEXT {
-            let end = document
-                .char_indices()
-                .take_while(|(index, _)| *index < MAX_CONTEXT)
-                .map(|(index, character)| index + character.len_utf8())
-                .last()
-                .unwrap_or(0)
-                .min(document.len());
-            format!("{}\n[project context truncated]", &document[..end])
-        } else {
-            document
-        };
-        format!(
-            "{prompt}\n\n[TC-IDE project context — read-only]\n{context}\n[/TC-IDE project context]"
-        )
-    }
-
     /// Send the prompt in the chat panel to the configured endpoint.
     pub(super) fn send_chat_prompt(&mut self) {
         let user_prompt = self.chat_input.trim().to_string();
         if user_prompt.is_empty() {
             return;
         }
-        let prompt = self.prompt_with_project_context(&user_prompt);
+        let document = tcide_project::serialize(&self.tcide_project);
+        let prompt = ai_core::prompt_with_project_context(&user_prompt, &document);
         if self.ai_key.is_empty() {
             self.chat_error = Some("An API key is required for this session".into());
             return;
@@ -219,7 +197,8 @@ impl WindowsAppState {
         let body = if prompt.is_empty() {
             ai_core::connection_test_body(&settings.model)
         } else {
-            let contextual = self.prompt_with_project_context(prompt);
+            let document = tcide_project::serialize(&self.tcide_project);
+            let contextual = ai_core::prompt_with_project_context(prompt, &document);
             ai_core::chat_body(&settings.model, &contextual, stream)
         };
         let Some(path) = self.write_ai_body(&body) else {

@@ -3475,13 +3475,17 @@ impl App {
             endpoint: self.ai_endpoint.clone(),
             model: self.ai_model.clone(),
         };
-        // The conversation so far goes with the prompt, so the answer has the
-        // context of the project rather than only this line.
+        // Keep the saved conversation human-readable, but attach the current
+        // `.tcIDE` map to this request so the model sees the same project
+        // structure as the relation panel.
+        let document = tcide_project::serialize(&self.tcide_project);
+        let contextual = ai_core::prompt_with_project_context(&prompt, &document);
         let turns = self.ai_messages.turns().to_vec();
-        let history = turns
+        let mut history = turns
             .iter()
             .map(|(from_user, text)| (if *from_user { "user" } else { "assistant" }, text.as_str()))
             .collect::<Vec<_>>();
+        history.push(("user", contextual.as_str()));
         let body = ai_core::chat_body_with_history(&settings.model, &history, true);
         let Some(path) = self.write_ai_body(&body) else {
             self.ai_error = Some(

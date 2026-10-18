@@ -16,6 +16,26 @@
 pub const API_KEY_ENV: &str = "TC_IDE_AI_KEY";
 /// Default request timeout in seconds.
 pub const DEFAULT_TIMEOUT_SECONDS: u32 = 60;
+/// Maximum serialized `.tcIDE` project map attached to one AI request.
+pub const MAX_PROJECT_CONTEXT_BYTES: usize = 12_000;
+
+/// Attach the current `.tcIDE` project map to a user prompt without changing
+/// the conversation stored on disk. The map is read-only context for the
+/// request and is bounded so large workspaces cannot grow the body forever.
+pub fn prompt_with_project_context(prompt: &str, document: &str) -> String {
+    let context = if document.len() > MAX_PROJECT_CONTEXT_BYTES {
+        let mut end = MAX_PROJECT_CONTEXT_BYTES.min(document.len());
+        while end > 0 && !document.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}\n[project context truncated]", &document[..end])
+    } else {
+        document.to_string()
+    };
+    format!(
+        "{prompt}\n\n[TC-IDE project context — read-only]\n{context}\n[/TC-IDE project context]"
+    )
+}
 
 /// Shell a command line is generated for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -657,6 +677,20 @@ mod tests {
         assert!(body.contains("line \\\"one\\\"\\nline two\\\\"));
         assert!(!body.contains('\n'));
         assert_eq!(json_escape("\u{1}"), "\\u0001");
+    }
+
+    #[test]
+    fn project_context_is_bounded_and_utf8_safe() {
+        let prompt = prompt_with_project_context("explain main", "project: demo\nfile: main.rs");
+        assert!(prompt.starts_with("explain main\n\n[TC-IDE project context"));
+        assert!(prompt.contains("file: main.rs"));
+        assert!(prompt.ends_with("[/TC-IDE project context]"));
+
+        let document = "界".repeat(MAX_PROJECT_CONTEXT_BYTES);
+        let prompt = prompt_with_project_context("分析", &document);
+        assert!(prompt.contains("[project context truncated]"));
+        assert!(prompt.contains("分析"));
+        assert!(prompt.len() < MAX_PROJECT_CONTEXT_BYTES + 256);
     }
 
     #[test]
