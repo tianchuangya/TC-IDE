@@ -2676,6 +2676,7 @@ impl DirectEditorRenderer {
 
         if let Some(focused) = scene.relation_symbol {
             let reveal = scene.relation_focus_motion.clamp(0.0, 1.0);
+            let semantic_route = crate::motion_core::semantic_route(reveal);
             let focused_line = scene
                 .lines
                 .get(focused.line)
@@ -2705,9 +2706,32 @@ impl DirectEditorRenderer {
                     1.5 * scale,
                 )
             };
-            let route_x = editor_right - 13.0 * scale;
             let source_y = focused_top + 12.0 * scale;
-            let source_end = focused_right + (route_x - focused_right) * reveal;
+            let tab_entry_y = header_h + theme_core::chrome::CONTROL_HEIGHT * scale;
+            let tab_entry_x = tree_w + 27.0 * scale;
+            let tab_entry_end = tab_entry_y + (source_y - tab_entry_y) * semantic_route.trunk;
+            let token_entry_end =
+                tab_entry_x + (focused_left - tab_entry_x) * semantic_route.source;
+            unsafe {
+                Self::fill(
+                    &target_base,
+                    &accent,
+                    tab_entry_x,
+                    tab_entry_y.min(tab_entry_end),
+                    tab_entry_x + 1.0 * scale,
+                    tab_entry_y.max(tab_entry_end) + 1.0 * scale,
+                );
+                Self::fill(
+                    &target_base,
+                    &accent,
+                    tab_entry_x,
+                    source_y,
+                    token_entry_end,
+                    source_y + 1.0 * scale,
+                );
+            }
+            let route_x = editor_right - 13.0 * scale;
+            let source_end = focused_right + (route_x - focused_right) * semantic_route.source;
             unsafe {
                 Self::fill(
                     &target_base,
@@ -2718,6 +2742,28 @@ impl DirectEditorRenderer {
                     source_y + 1.5 * scale,
                 )
             };
+            let graph_entry_x = graph_core::path_x(editor_right, scale);
+            let graph_entry_y = header_h + graph_core::FIRST_ROW_TOP * scale;
+            let vertical_end = source_y + (graph_entry_y - source_y) * semantic_route.trunk;
+            let graph_end = route_x + (graph_entry_x - route_x) * semantic_route.graph;
+            unsafe {
+                Self::fill(
+                    &target_base,
+                    &accent,
+                    route_x,
+                    source_y.min(vertical_end),
+                    route_x + theme_core::chrome::SEMANTIC_RAIL_HEIGHT * scale,
+                    source_y.max(vertical_end) + theme_core::chrome::SEMANTIC_RAIL_HEIGHT * scale,
+                );
+                Self::fill(
+                    &target_base,
+                    &accent,
+                    route_x,
+                    graph_entry_y,
+                    graph_end,
+                    graph_entry_y + theme_core::chrome::SEMANTIC_RAIL_HEIGHT * scale,
+                );
+            }
             for related in scene
                 .symbols
                 .iter()
@@ -2741,7 +2787,7 @@ impl DirectEditorRenderer {
                         * scale;
                 let related_top = code_top + related.line as f32 * line_step - 3.0 * scale;
                 let related_y = related_top + 12.0 * scale;
-                let branch_reveal = ((reveal - 0.22) / 0.78).clamp(0.0, 1.0);
+                let branch_reveal = semantic_route.branches;
                 let related_center = (related_left + related_right) * 0.5;
                 let related_outline_left =
                     related_center + (related_left - related_center) * branch_reveal;

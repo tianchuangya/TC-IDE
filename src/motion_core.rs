@@ -1198,6 +1198,32 @@ pub fn flowing_segment(
     (left, (left + segment).min(end))
 }
 
+/// Staged reveal of one semantic route.
+///
+/// A route first leaves the symbol, then turns along the editor boundary,
+/// then reaches the graph.  References start after the main route is readable,
+/// preventing every branch from exploding onto the screen in one frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SemanticRoute {
+    pub source: f32,
+    pub trunk: f32,
+    pub graph: f32,
+    pub branches: f32,
+}
+
+pub fn semantic_route(progress: f32) -> SemanticRoute {
+    fn stage(progress: f32, start: f32, end: f32) -> f32 {
+        let value = ((progress.clamp(0.0, 1.0) - start) / (end - start)).clamp(0.0, 1.0);
+        value * value * (3.0 - 2.0 * value)
+    }
+    SemanticRoute {
+        source: stage(progress, 0.00, 0.38),
+        trunk: stage(progress, 0.18, 0.68),
+        graph: stage(progress, 0.48, 0.88),
+        branches: stage(progress, 0.32, 1.00),
+    }
+}
+
 impl Layout {
     /// The proportions the interface is built on.
     pub const DEFAULT: Layout = Layout {
@@ -1251,6 +1277,27 @@ mod layout_tests {
             assert!(right > left);
         }
         assert_eq!(flowing_segment(4.0, 4.0, 1.0, 1.0, 0.2), (4.0, 4.0));
+    }
+
+    #[test]
+    fn semantic_route_reveals_in_reading_order() {
+        let early = semantic_route(0.2);
+        assert!(early.source > 0.0);
+        assert_eq!(early.graph, 0.0);
+        assert_eq!(early.branches, 0.0);
+        let middle = semantic_route(0.6);
+        assert_eq!(middle.source, 1.0);
+        assert!(middle.trunk > middle.graph);
+        let done = semantic_route(1.0);
+        assert_eq!(
+            done,
+            SemanticRoute {
+                source: 1.0,
+                trunk: 1.0,
+                graph: 1.0,
+                branches: 1.0
+            }
+        );
     }
 
     #[test]

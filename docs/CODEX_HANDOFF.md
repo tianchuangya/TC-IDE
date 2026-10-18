@@ -313,3 +313,7 @@ Windows 真机上的 DirectWrite/Direct2D、ConPTY、编译器/LSP/调试器和�
   静止后不继续以 60fps 空转。Windows 和 macOS 使用同一几何函数。
 - 自定义背景改为“身份纹理”而不是第二前景：`theme_core::editor_scrim_alpha` 会根据浅/深主题和
   用户背景不透明度自适应加深代码遮罩。用户提高图片强度时，代码对比度不会被同比拉低。
+- 语义轨道已从标签装饰扩展为真实导航路径：`motion_core::semantic_route` 把进场分为
+  `source -> trunk -> graph -> branches` 四段。Linux 从活动标签下缘沿代码槽落到悬停函数，
+  函数名圆角框定后右侧轨迹进入调用层级主干，同文件引用在主路径可读后再分叉；
+  离开悬停后沿同一弹簧平滑收回。Windows 使用相同分段几何，macOS 调用树主干使用同一流动亮段。

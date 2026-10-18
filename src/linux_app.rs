@@ -4414,7 +4414,7 @@ impl App {
         if self.graph_motion.value > 0.08 {
             self.draw_graph();
         }
-        if self.hovered_from_code {
+        if self.hovered_from_code || self.relation_focus_motion.value > 0.01 {
             self.draw_code_relations();
         }
         // Docked surfaces are part of the workspace. Draw them before every
@@ -6417,9 +6417,11 @@ impl App {
         if symbol.len() < 2 {
             return;
         }
-        let (box_x, box_y, _box_w, box_h) = self.code_symbol_bounds(line, start_byte, end_byte);
+        let (box_x, box_y, box_w, box_h) = self.code_symbol_bounds(line, start_byte, end_byte);
         let start = (box_x, box_y + box_h / 2);
         let gutter = editor_left + s(27);
+        let route = motion_core::semantic_route(amount);
+        self.rounded_outline(self.colors.accent, box_x, box_y, box_w, box_h, s(5));
         self.circle(
             self.colors.panel_2,
             self.colors.bright,
@@ -6427,12 +6429,81 @@ impl App {
             start.1,
             s(4),
         );
+        let source_left_end =
+            start.0 + ((gutter + relation_offset - start.0) as f32 * route.source).round() as i32;
         self.line(
             self.colors.accent,
             2,
             (start.0, start.1),
-            (gutter + relation_offset, start.1),
+            (source_left_end, start.1),
         );
+        // The active tab rail drops through the quiet code gutter before it
+        // reaches the focused symbol.  This is the visual sentence
+        // file -> symbol -> graph, without drawing across source text.
+        let tab_entry_y = self.editor_tabs_bottom() - s(2);
+        let tab_entry_end =
+            tab_entry_y + ((start.1 - tab_entry_y) as f32 * route.trunk).round() as i32;
+        self.line(
+            self.colors.accent,
+            1,
+            (gutter, tab_entry_y),
+            (gutter, tab_entry_end),
+        );
+        // The right-hand route is the continuous semantic rail: it leaves the
+        // focused token, turns at the editor boundary, and enters the graph's
+        // own hierarchy spine.  Each leg appears in reading order.
+        if self.graph_visible && self.graph_motion.value > 0.08 {
+            let graph_left = self.graph_left();
+            let graph_entry_x = graph_left + s(28);
+            let graph_entry_y = self.graph_bounds().1 + s(98);
+            let source_right = box_x + box_w;
+            let source_end =
+                source_right + ((graph_left - source_right) as f32 * route.source).round() as i32;
+            self.line(
+                self.colors.accent,
+                s(theme_core::chrome::SEMANTIC_RAIL_HEIGHT as i32).max(1) as u32,
+                (source_right, start.1),
+                (source_end, start.1),
+            );
+            let turn_end =
+                start.1 + ((graph_entry_y - start.1) as f32 * route.trunk).round() as i32;
+            self.line(
+                self.colors.accent,
+                2,
+                (graph_left, start.1),
+                (graph_left, turn_end),
+            );
+            let graph_end =
+                graph_left + ((graph_entry_x - graph_left) as f32 * route.graph).round() as i32;
+            self.line(
+                self.colors.accent,
+                2,
+                (graph_left, graph_entry_y),
+                (graph_end, graph_entry_y),
+            );
+            if route.graph > 0.96 {
+                self.circle(
+                    self.colors.bright,
+                    self.colors.accent,
+                    graph_entry_x,
+                    graph_entry_y,
+                    s(3),
+                );
+            }
+            let (glint_left, glint_right) = motion_core::flowing_segment(
+                source_right as f32,
+                graph_left.max(source_right + 1) as f32,
+                route.source.clamp(0.0, 0.999),
+                1.0,
+                0.14,
+            );
+            self.line(
+                self.colors.bright,
+                2,
+                (glint_left.round() as i32, start.1),
+                (glint_right.round() as i32, start.1),
+            );
+        }
         let mut drawn = 0;
         for (file_index, file) in self.files.iter().enumerate() {
             let mut file_has_relation = false;
@@ -6464,17 +6535,24 @@ impl App {
                         self.code_symbol_bounds(target_line, target_start, target_end);
                     let end = (target_x, target_y + target_h / 2);
                     let relation_gutter = gutter + relation_offset;
+                    let vertical_reveal = (route.branches * 1.7).clamp(0.0, 1.0);
+                    let horizontal_reveal = ((route.branches - 0.42) / 0.58).clamp(0.0, 1.0);
+                    let branch_y =
+                        start.1 + ((end.1 - start.1) as f32 * vertical_reveal).round() as i32;
+                    let branch_x = relation_gutter
+                        + ((end.0 - s(7) - relation_gutter) as f32 * horizontal_reveal).round()
+                            as i32;
                     self.line(
                         self.colors.accent,
                         1,
                         (relation_gutter, start.1),
-                        (relation_gutter, end.1),
+                        (relation_gutter, branch_y),
                     );
                     self.line(
                         self.colors.accent,
                         1,
                         (relation_gutter, end.1),
-                        (end.0 - s(7), end.1),
+                        (branch_x, end.1),
                     );
                     self.outline(self.colors.accent, target_x, target_y, target_w, target_h);
                     let role = symbol_role(value, &file.name, symbol, target_start, target_end);
@@ -8304,6 +8382,8 @@ impl App {
                 self.hovered_symbol =
                     editor_core::symbol_at(&self.files[0].lines, &self.files[0].name, line, start);
                 self.hovered_from_code = true;
+                self.graph_visible = true;
+                self.graph_motion = UiMotion::new(1.0);
                 true
             }
             "graph-callees" => {

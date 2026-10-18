@@ -3345,6 +3345,39 @@ unsafe fn draw_frame(shell: &mut MacShell) {
         let rows = shell.graph_rows();
         let scroll = shell.graph.graph.clamped_scroll(shell.graph.scroll, rows);
         let visible = shell.graph.graph.visible(scroll, rows).to_vec();
+        if !visible.is_empty() {
+            let rail_x = panel_left + 8.0;
+            let rail_top = graph_core::FIRST_ROW_TOP as f64 + graph_core::ROW_HEIGHT as f64 * 0.5;
+            let rail_bottom =
+                rail_top + visible.len().saturating_sub(1) as f64 * graph_core::ROW_HEIGHT as f64;
+            fill_rect(
+                CGRect::new(
+                    rail_x,
+                    rail_top,
+                    theme_core::chrome::SEMANTIC_RAIL_HEIGHT as f64,
+                    (rail_bottom - rail_top).max(2.0),
+                ),
+                palette.accent,
+                0.78,
+            );
+            let (glint_top, glint_bottom) = motion_core::flowing_segment(
+                rail_top as f32,
+                rail_bottom.max(rail_top + 1.0) as f32,
+                shell.started.elapsed().as_secs_f32(),
+                2.2,
+                0.16,
+            );
+            fill_rect(
+                CGRect::new(
+                    rail_x,
+                    glint_top as f64,
+                    theme_core::chrome::SEMANTIC_RAIL_HEIGHT as f64,
+                    (glint_bottom - glint_top).max(1.0) as f64,
+                ),
+                palette.bright,
+                1.0,
+            );
+        }
         for (row, node) in visible.iter().enumerate() {
             let index = scroll + row;
             let y = graph_core::FIRST_ROW_TOP as f64 + row as f64 * graph_core::ROW_HEIGHT as f64;
