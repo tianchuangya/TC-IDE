@@ -44,16 +44,25 @@ jobs:
       - name: Build bundles
         run: npm run build
 
-      - name: Geometry and screenshot harness
-        # The harness renders the real view in a real browser and asserts the
-        # numbers from the design, which is the only way the layout can be
-        # checked without a person looking at it.
+      - name: Install the browser for the harness
+        # Chromium is a 200MB download and the mirror can be slow or fail. It is
+        # installed in its own step with a generous timeout so a flaky download
+        # is reported as such instead of looking like a layout failure.
+        timeout-minutes: 12
         run: |
-          # geometry-check generates the pages itself and launches the browser
-          # through puppeteer, so nothing has to exist beforehand.
           npx puppeteer browsers install chrome
-          node scripts/geometry-check.mjs
-          TC_IDE_CHROMIUM="$(node -e "console.log(require('puppeteer').executablePath())")" node scripts/capture-harness.mjs
+          node -e "console.log(require('puppeteer').executablePath())"
+
+      - name: Geometry assertions in a real browser
+        # The harness renders the real markup and stylesheet and reads the DOM
+        # back, which is the only way the layout numbers can be checked without
+        # a person looking at a screenshot.
+        run: node scripts/geometry-check.mjs
+
+      - name: Capture the screenshots for review
+        run: |
+          TC_IDE_CHROMIUM="$(node -e "console.log(require('puppeteer').executablePath())")" \
+            node scripts/capture-harness.mjs
           ls -l harness-shots
 
       - name: Check the packaged extension
