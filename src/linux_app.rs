@@ -4479,17 +4479,11 @@ impl App {
         let header = self.shell_content_top();
         self.rect(self.colors.panel_2, 0, 0, self.width, identity_height);
         self.rect(
-            self.colors.bg,
+            self.colors.panel_2,
             0,
             identity_height,
             self.width,
             header - identity_height,
-        );
-        self.line(
-            self.colors.line,
-            1,
-            (0, identity_height - 1),
-            (self.width, identity_height - 1),
         );
         self.line(
             self.colors.line,
@@ -6315,21 +6309,20 @@ impl App {
             let (nx, node_y) = self.node_position(&graph, index);
             let ny = node_y + content_offset;
             let active = self.hovered == Some(index);
-            let related = self
+            let semantic_match = self
                 .hovered_symbol
                 .as_ref()
-                .map(|symbol| node.label.trim_end_matches("()") == symbol.name)
-                .unwrap_or(true)
-                || node.edge.is_none();
+                .is_some_and(|symbol| node.label.trim_end_matches("()") == symbol.name);
+            let related = semantic_match || node.edge.is_none();
             let card_x = nx + s(12);
             let card_w = (self.width - card_x - s(16)).max(s(120));
-            if active {
+            if active || semantic_match {
                 self.rounded_rect(self.colors.project, card_x, ny - s(19), card_w, s(39), s(7));
             } else {
                 self.rounded_rect(self.colors.panel_2, card_x, ny - s(19), card_w, s(39), s(7));
             }
             self.rounded_outline(
-                if active {
+                if active || semantic_match {
                     self.colors.accent
                 } else {
                     self.colors.line
@@ -6341,7 +6334,7 @@ impl App {
                 s(7),
             );
             self.rect(
-                if related {
+                if related || semantic_match {
                     self.colors.accent
                 } else {
                     self.colors.line
@@ -6359,7 +6352,9 @@ impl App {
                 _ => "fn",
             };
             self.text(self.colors.bg, nx - s(4), ny + s(5), marker);
-            let label_color = if related {
+            let label_color = if semantic_match {
+                self.colors.accent
+            } else if related {
                 self.colors.bright
             } else {
                 self.colors.muted
@@ -6851,6 +6846,19 @@ impl App {
                 2,
                 (list_x + s(10), selected_y + s(7)),
                 (list_x + s(178), selected_y + s(7)),
+            );
+            let (terminal_glint_left, terminal_glint_right) = motion_core::flowing_segment(
+                (list_x + s(10)) as f32,
+                (list_x + s(178)) as f32,
+                self.terminal_tab_position.rem_euclid(1.0).min(0.999),
+                1.0,
+                0.16,
+            );
+            self.line(
+                self.colors.bright,
+                2,
+                (terminal_glint_left.round() as i32, selected_y + s(7)),
+                (terminal_glint_right.round() as i32, selected_y + s(7)),
             );
             for (index, _terminal) in self.terminals.iter().take(4).enumerate() {
                 let row = top + s(79 + index as i32 * 34);

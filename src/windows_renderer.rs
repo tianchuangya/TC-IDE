@@ -430,6 +430,14 @@ impl ScenePaint<'_, '_> {
                                 bottom: top + 27.0 * self.scale,
                             },
                             6.0 * self.scale,
+                        );
+                        DirectEditorRenderer::fill(
+                            self.target,
+                            &self.accent,
+                            terminal_right + 8.0 * self.scale,
+                            top + 25.0 * self.scale,
+                            self.width - 8.0 * self.scale,
+                            top + 27.0 * self.scale,
                         )
                     };
                 }
@@ -3621,10 +3629,17 @@ impl DirectEditorRenderer {
                 .graph_selected
                 .map(|selected| selected == scene.graph_first_index + index)
                 .unwrap_or(false);
+            let semantic_match = scene
+                .relation_symbol
+                .is_some_and(|symbol| node.label.trim_end_matches("()") == symbol.name);
             unsafe {
                 Self::rounded(
                     &target_base,
-                    if active { &selection } else { &raised },
+                    if active || semantic_match {
+                        &selection
+                    } else {
+                        &raised
+                    },
                     D2D_RECT_F {
                         left: indent,
                         top: y - 12.0 * scale,
@@ -3635,7 +3650,7 @@ impl DirectEditorRenderer {
                 )
             };
             // Restrained differentiation per relation kind.
-            let color = if selected {
+            let color = if selected || semantic_match {
                 &accent
             } else {
                 match node.edge {
