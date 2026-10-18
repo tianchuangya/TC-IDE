@@ -10,7 +10,6 @@
 
 import * as vscode from 'vscode';
 
-import { graphGeometry } from '../graph/geometry';
 import type { GraphNodeDTO, GraphRelation, GraphScope, NodeLevel } from '../graph/protocol';
 
 export interface BuildOptions {
@@ -123,61 +122,112 @@ export async function buildGraph(
     return { nodes: [], total: 0, degraded: '没有打开的编辑器' };
   }
   const document = editor.document;
+  const scope = effectiveScope(options.scope, editor);
+  const documents = await documentsForScope(document, scope, token);
+  if (token.isCancellationRequested) return { nodes: [], total: 0 };
 
-  let symbols: readonly vscode.DocumentSymbol[] | undefined;
-  try {
-    symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
-      'vscode.executeDocumentSymbolProvider',
-      document.uri,
-    );
-  } catch {
-    symbols = undefined;
-  }
-  if (token.isCancellationRequested) {
-    return { nodes: [], total: 0 };
-  }
-  if (!symbols || symbols.length === 0) {
-    return {
-      nodes: [],
-      total: 0,
-      degraded: '当前语言未提供符号或调用层级',
-    };
+  const nodes: GraphNodeDTO[] = [];
+  const folders = new Set<string>();
+  const projectRoot = workspaceRootFor(document.uri);
+  const projectName = projectRoot ? vscode.workspace.asRelativePath(projectRoot, false) : '当前工作区';
+  const hasProjectRoot = scope === 'project' || scope === 'folder';
+  if (hasProjectRoot) {
+    nodes.push({
+      id: `project:${projectRoot?.toString() ?? 'workspace'}`,
+      level: 'project', title: projectName || '当前工作区', subtitle: `${documents.length} 个已索引文件`,
+      depth: 0, hasChildren: true, folded: false,
+      ...(projectRoot ? { location: { uri: projectRoot.toString(), line: 0, column: 0 } } : {}),
+    });
   }
 
-  // The file node first, so the hierarchy has a root the reader can name.
-  const fileNode: GraphNodeDTO = {
-    id: fileId(document.uri.toString()),
-    level: 'file',
-    title: vscode.workspace.asRelativePath(document.uri, false),
-    subtitle: `${document.languageId} · ${document.lineCount} 行`,
-    depth: 0,
-    hasChildren: true,
-    folded: false,
-    location: { uri: document.uri.toString(), line: 0, column: 0 },
+  for (const uri of documents) {
+    if (token.isCancellationRequested) break;
+    const opened = uri.toString() === document.uri.toString() ? document : await tryOpen(uri);
+    if (!opened) continue;
+    const baseDepth = hasProjectRoot ? 1 : 0;
+    const relative = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/');
+    const parts = relative.split('/');
+    const fileName = parts.pop() ?? uri.path.split('/').pop() ?? '文件';
+    let depth = baseDepth;
+    let prefix = '';
+    for (const segment of parts) {
+      prefix = prefix ? `${prefix}/${segment}` : segment;
+      const id = folderId(`${projectRoot?.toString() ?? ''}/${prefix}`);
+      if (!folders.has(id)) {
+        folders.add(id);
+        nodes.push({ id, level: 'folder', title: segment, subtitle: prefix, depth, hasChildren: true, folded: false });
+      }
+      depth += 1;
+    }
+    const symbols = await documentSymbols(uri);
+    nodes.push({
+      id: fileId(uri.toString()), level: 'file', title: fileName,
+      subtitle: `${opened.languageId} · ${opened.lineCount} 行`, depth,
+      hasChildren: symbols.length > 0, folded: false,
+      location: { uri: uri.toString(), line: 0, column: 0 },
+    });
+    const selected = scope === 'symbol' && uri.toString() === document.uri.toString()
+      ? symbolsForPosition(symbols, editor.selection.active) : symbols;
+    nodes.push(...nodesFromSymbols(uri, selected).map((node) => ({ ...node, depth: node.depth + depth + 1 })));
+  }
+
+  if (options.relation !== 'follow' && !token.isCancellationRequested) {
+    const calls = await callNeighbours(document.uri, editor.selection.active, options.relation, token);
+    if (calls.length) nodes.push(...calls.map((node) => ({ ...node, depth: hasProjectRoot ? 1 : 0 })));
+  }
+  const total = nodes.length;
+  const limited = nodes.slice(0, options.maxNodes);
+  return {
+    nodes: limited, total,
+    ...(total === 0 ? { degraded: '当前语言未提供符号；仍可用 VS Code 的语言扩展补全语义。' }
+      : total > options.maxNodes ? { degraded: `节点数超过上限 ${options.maxNodes}，已截取显示` } : {}),
   };
+}
 
-  let nodes = nodesFromSymbols(document.uri, symbols).map((node) => ({
-    ...node,
-    depth: node.depth + 1,
-  }));
+function effectiveScope(scope: GraphScope, _editor: vscode.TextEditor): Exclude<GraphScope, 'auto'> {
+  return scope === 'auto' ? 'file' : scope;
+}
 
-  // The relation adds the callers or callees of the symbol under the caret.
-  if (options.relation !== 'follow') {
-    const callers = await callNeighbours(document.uri, editor.selection.active, options.relation, token);
-    if (callers.length > 0) {
-      nodes = nodes.concat(callers);
+function workspaceRootFor(uri: vscode.Uri): vscode.Uri | undefined {
+  return vscode.workspace.getWorkspaceFolder(uri)?.uri ?? vscode.workspace.workspaceFolders?.[0]?.uri;
+}
+
+async function documentsForScope(active: vscode.TextDocument, scope: Exclude<GraphScope, 'auto'>, token: vscode.CancellationToken): Promise<vscode.Uri[]> {
+  if (scope === 'file' || scope === 'symbol') return [active.uri];
+  const root = workspaceRootFor(active.uri);
+  if (!root) return [active.uri];
+  const configured = vscode.workspace.getConfiguration('tcIde').get<string[]>('graph.excludeGlobs', []);
+  const excluded = configured.length ? `{${configured.join(',')}}` : undefined;
+  const found = await vscode.workspace.findFiles('**/*', excluded, 80);
+  const source = found.filter((uri) => isSourceFile(uri));
+  const folder = active.uri.with({ path: active.uri.path.replace(/\/[^/]+$/, '') }).path;
+  const filtered = scope === 'folder' ? source.filter((uri) => uri.path.startsWith(folder)) : source;
+  const unique = new Map<string, vscode.Uri>([[active.uri.toString(), active.uri]]);
+  for (const uri of filtered) unique.set(uri.toString(), uri);
+  void token;
+  return [...unique.values()].sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function isSourceFile(uri: vscode.Uri): boolean {
+  return /\.(c|cc|cpp|cxx|h|hpp|rs|ts|tsx|js|jsx|py|java|go|cs|json)$/i.test(uri.path);
+}
+
+async function tryOpen(uri: vscode.Uri): Promise<vscode.TextDocument | undefined> {
+  try { return await vscode.workspace.openTextDocument(uri); } catch { return undefined; }
+}
+
+async function documentSymbols(uri: vscode.Uri): Promise<readonly vscode.DocumentSymbol[]> {
+  try { return await vscode.commands.executeCommand<vscode.DocumentSymbol[]>('vscode.executeDocumentSymbolProvider', uri) ?? []; } catch { return []; }
+}
+
+function symbolsForPosition(symbols: readonly vscode.DocumentSymbol[], position: vscode.Position): readonly vscode.DocumentSymbol[] {
+  for (const symbol of symbols) {
+    if (symbol.range.contains(position)) {
+      const nested = symbolsForPosition(symbol.children, position);
+      return nested.length ? nested : [symbol];
     }
   }
-
-  const total = nodes.length + 1;
-  const limited = nodes.slice(0, Math.max(0, options.maxNodes - 1));
-  return {
-    nodes: [fileNode, ...limited],
-    total,
-    ...(total > options.maxNodes
-      ? { degraded: `节点数超过上限 ${graphGeometry.maxNodes}，已聚类显示` }
-      : {}),
-  };
+  return symbols;
 }
 
 /**

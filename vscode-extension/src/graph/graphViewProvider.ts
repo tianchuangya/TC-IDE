@@ -21,8 +21,8 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'tcIde.graphView';
 
   private view: vscode.WebviewView | undefined;
-  private scope: GraphScope = 'auto';
-  private relation: GraphRelation = 'follow';
+  private scope: GraphScope;
+  private relation: GraphRelation;
   private query = '';
   private readonly folded = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -31,7 +31,21 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
   private requestSeq = 0;
   private lastRequestId = '';
 
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(private readonly context: vscode.ExtensionContext) {
+    const settings = vscode.workspace.getConfiguration('tcIde.graph');
+    this.scope = settings.get<GraphScope>('defaultScope', 'auto');
+    this.relation = settings.get<GraphRelation>('defaultRelation', 'follow');
+  }
+
+  setScope(scope: GraphScope): void {
+    this.scope = scope;
+    this.requestRebuild(true);
+  }
+
+  setRelation(relation: GraphRelation): void {
+    this.relation = relation;
+    this.requestRebuild(true);
+  }
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
@@ -203,7 +217,7 @@ ${markup()}
 
   private maxNodes(): number {
     const configured = vscode.workspace.getConfiguration('tcIde').get<number>('graph.maxNodes', 240);
-    return Number.isFinite(configured) ? Math.min(Math.max(240 > configured ? configured : configured, 20), 2000) : 240;
+    return Number.isFinite(configured) ? Math.min(Math.max(configured, 20), 2000) : 240;
   }
 
   /** Reveal the view and rebuild it. */

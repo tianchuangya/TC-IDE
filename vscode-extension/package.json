@@ -21,8 +21,12 @@
   "main": "./dist/extension.js",
   "l10n": "./l10n",
   "activationEvents": [
+    "onStartupFinished",
     "onCommand:tcIde.openGraph",
     "onCommand:tcIde.refreshGraph",
+    "onCommand:tcIde.build",
+    "onCommand:tcIde.run",
+    "onCommand:tcIde.package",
     "onView:tcIde.graphView"
   ],
   "contributes": {
@@ -160,6 +164,24 @@
         "title": "创建 .tcIDE 项目文档",
         "category": "TC-IDE",
         "icon": "$(new-file)"
+      },
+      {
+        "command": "tcIde.build",
+        "title": "编译项目",
+        "category": "TC-IDE",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "tcIde.run",
+        "title": "运行项目",
+        "category": "TC-IDE",
+        "icon": "$(play)"
+      },
+      {
+        "command": "tcIde.package",
+        "title": "打包项目",
+        "category": "TC-IDE",
+        "icon": "$(package)"
       }
     ],
     "viewsContainers": {
@@ -204,6 +226,18 @@
       "commandPalette": [
         {
           "command": "tcIde.openGraph",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "tcIde.build",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "tcIde.run",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "tcIde.package",
           "when": "workspaceFolderCount > 0"
         }
       ]
