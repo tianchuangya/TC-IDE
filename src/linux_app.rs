@@ -931,6 +931,9 @@ struct App {
     activity_velocity: f32,
     graph_content_motion: UiMotion,
     relation_focus_motion: UiMotion,
+    /// Compact debug action button and its animated command list.
+    debug_menu_open: bool,
+    debug_menu_motion: UiMotion,
     collapsed_folders: BTreeSet<String>,
     terminal_open: bool,
     terminal_height: i32,
@@ -4457,6 +4460,9 @@ impl App {
         if self.menu_dropdown_motion.value > 0.01 {
             self.draw_menu_dropdown();
         }
+        if self.debug_menu_motion.value > 0.01 {
+            self.draw_debug_menu();
+        }
         if self.settings_motion.value > 0.01 {
             self.draw_settings_menu();
         }
@@ -5611,26 +5617,66 @@ impl App {
         self.rounded_outline(self.colors.line, new_tab_x, top + s(6), s(46), s(27), s(7));
         self.text(self.colors.muted, new_tab_x + s(18), top + s(24), "+");
         let debug_x = left + s(174);
-        for (index, label) in ["●  BP", "▶  F5", "→  F10", "■  STOP"].iter().enumerate() {
-            let bx = debug_x + index as i32 * s(78);
-            self.rounded_outline(self.colors.line, bx, top + s(6), s(72), s(27), s(7));
-            self.text(
-                if (index == 1 && self.debug_session.is_some())
-                    || (index == 0
-                        && self
-                            .breakpoints
-                            .lines(&self.active_breakpoint_path())
-                            .contains(&self.caret_line))
-                {
-                    self.colors.accent
-                } else {
-                    self.colors.muted
-                },
-                bx + s(7),
-                top + s(24),
-                label,
-            );
-        }
+        let debug_active = self.debug_session.is_some();
+        self.rounded_rect(
+            if self.debug_menu_open {
+                self.colors.project
+            } else {
+                self.colors.panel_2
+            },
+            debug_x,
+            top + s(6),
+            s(166),
+            s(27),
+            s(7),
+        );
+        self.rounded_outline(
+            if self.debug_menu_open || debug_active {
+                self.colors.accent
+            } else {
+                self.colors.line
+            },
+            debug_x,
+            top + s(6),
+            s(166),
+            s(27),
+            s(7),
+        );
+        self.circle(
+            if debug_active {
+                self.colors.accent
+            } else {
+                self.colors.panel_2
+            },
+            if debug_active {
+                self.colors.accent
+            } else {
+                self.colors.muted
+            },
+            debug_x + s(14),
+            top + s(19),
+            s(4),
+        );
+        self.text(
+            if debug_active {
+                self.colors.bright
+            } else {
+                self.colors.muted
+            },
+            debug_x + s(26),
+            top + s(24),
+            if debug_active {
+                self.tr("Debugging", "调试中")
+            } else {
+                self.tr("Debug actions", "调试操作")
+            },
+        );
+        self.text(
+            self.colors.accent,
+            debug_x + s(145),
+            top + s(24),
+            if self.debug_menu_open { "⌃" } else { "⌄" },
+        );
         let language = self.language_for_file(&self.files[self.selected_file].name);
         self.text(self.colors.muted, right - s(150), top + s(25), &language);
         XSetFont(self.display, self.gc, (*self.code_font).fid);
@@ -8282,6 +8328,14 @@ impl App {
                 self.new_menu_motion = UiMotion::new(1.0);
                 true
             }
+            "debug-menu" => {
+                self.caret_line = 2.min(self.files[self.selected_file].lines.len() - 1);
+                let path = self.active_breakpoint_path();
+                self.breakpoints.toggle(&path, self.caret_line);
+                self.debug_menu_open = true;
+                self.debug_menu_motion = UiMotion::new(1.0);
+                true
+            }
             "debug" => {
                 self.files = vec![FileBuffer::new(
                     "main.cpp".into(),
@@ -8720,6 +8774,7 @@ impl App {
             || Self::motion_is_running(self.terminal_motion, target(self.terminal_open))
             || Self::motion_is_running(self.graph_motion, target(self.graph_visible))
             || Self::motion_is_running(self.graph_content_motion, 1.0)
+            || Self::motion_is_running(self.debug_menu_motion, target(self.debug_menu_open))
             || Self::motion_is_running(
                 self.relation_focus_motion,
                 target(self.relation_focus_active()),
@@ -8850,6 +8905,12 @@ impl App {
             dt,
             MotionRole::Follow,
         );
+        Self::step_ui_motion(
+            &mut self.debug_menu_motion,
+            self.debug_menu_open,
+            dt,
+            MotionRole::Overlay,
+        );
         if !self.relation_focus_active() && self.relation_focus_motion.value <= 0.01 {
             self.relation_code_span = None;
         }
@@ -8925,6 +8986,7 @@ impl App {
         self.settings_motion = UiMotion::new(if self.settings_open { 1.0 } else { 0.0 });
         self.package_motion = UiMotion::new(if self.package_open { 1.0 } else { 0.0 });
         self.extensions_motion = UiMotion::new(if self.extensions_open { 1.0 } else { 0.0 });
+        self.debug_menu_motion = UiMotion::new(if self.debug_menu_open { 1.0 } else { 0.0 });
         self.menu_title_position = self.open_menu.unwrap_or(self.menu_cursor.menu).index() as f32;
         self.terminal_tab_position = self.terminal_active.min(3) as f32;
         self.activity_position = self.activity_section.min(1) as f32;
@@ -10518,6 +10580,90 @@ impl App {
         }
     }
 
+    fn debug_menu_rect(&self) -> (i32, i32, i32, i32) {
+        let left = self.layout.workspace_pixels(self.width as f32) as i32 + self.s(174);
+        let top =
+            self.editor_tabs_bottom() + self.s(4) + self.overlay_offset(self.debug_menu_motion);
+        (left, top, self.s(252), self.s(164))
+    }
+
+    /// Draw the compact debugger command list below its single toolbar button.
+    unsafe fn draw_debug_menu(&self) {
+        let (left, top, width, height) = self.debug_menu_rect();
+        let s = |v| self.s(v);
+        self.floating_panel(left, top, width, height);
+        let rows = [
+            ("●", self.tr("Toggle breakpoint", "切换断点"), "F9"),
+            ("▶", self.tr("Run / Continue", "运行 / 继续"), "F5"),
+            ("→", self.tr("Step over", "单步跳过"), "F10"),
+            ("■", self.tr("Stop debugging", "停止调试"), "Shift+F5"),
+        ];
+        for (index, (icon, label, shortcut)) in rows.iter().enumerate() {
+            let row_top = top + s(6 + index as i32 * 38);
+            let hovered = self.mouse_x >= left + s(4)
+                && self.mouse_x <= left + width - s(4)
+                && self.mouse_y >= row_top
+                && self.mouse_y <= row_top + s(34);
+            let enabled = index < 2 || self.debug_session.is_some();
+            if hovered && enabled {
+                self.rounded_rect(
+                    self.colors.project,
+                    left + s(4),
+                    row_top,
+                    width - s(8),
+                    s(34),
+                    s(7),
+                );
+            }
+            let breakpoint_here = index == 0
+                && self
+                    .breakpoints
+                    .lines(&self.active_breakpoint_path())
+                    .contains(&self.caret_line);
+            self.text(
+                if enabled
+                    && (hovered || breakpoint_here || (index == 1 && self.debug_session.is_some()))
+                {
+                    self.colors.accent
+                } else {
+                    self.colors.muted
+                },
+                left + s(14),
+                row_top + s(23),
+                icon,
+            );
+            self.text(
+                if enabled {
+                    self.colors.text
+                } else {
+                    self.colors.muted
+                },
+                left + s(42),
+                row_top + s(23),
+                label,
+            );
+            let shortcut_width = self.pango_text_size(shortcut, false).0;
+            self.text(
+                self.colors.muted,
+                left + width - shortcut_width - s(14),
+                row_top + s(23),
+                shortcut,
+            );
+        }
+    }
+
+    fn activate_debug_menu_item(&mut self, index: usize) {
+        match index {
+            0 => self.toggle_breakpoint(),
+            1 => self.start_or_continue_debugging(),
+            2 if self.debug_session.is_some() => self.step_debugging(),
+            3 if self.debug_session.is_some() => self.stop_debugging(),
+            _ => {
+                self.status_message = self.tr("Start debugging first", "请先启动调试").into();
+            }
+        }
+    }
+
     /// Close a file tab.
     ///
     /// The document is dropped and the selection moves to a sensible tab
@@ -11586,6 +11732,22 @@ impl App {
             }
             return;
         }
+        if self.debug_menu_open && button == 1 {
+            let (menu_x, menu_y, menu_w, menu_h) = self.debug_menu_rect();
+            if x >= menu_x && x <= menu_x + menu_w && y >= menu_y && y <= menu_y + menu_h {
+                let index = ((y - menu_y - s(6)) / s(38).max(1)).clamp(0, 3) as usize;
+                self.activate_debug_menu_item(index);
+                self.debug_menu_open = false;
+                return;
+            }
+            let button_y = self.shell_content_top() + s(6);
+            let button_x = self.layout.workspace_pixels(self.width as f32) as i32 + s(174);
+            let on_button =
+                x >= button_x && x <= button_x + s(166) && y >= button_y && y <= button_y + s(27);
+            if !on_button {
+                self.debug_menu_open = false;
+            }
+        }
         if self.syntax_colors_open {
             let (panel_x, panel_y, panel_w, _panel_h) = self.syntax_color_panel_rect();
             if button == 1 {
@@ -11818,14 +11980,9 @@ impl App {
             && y >= self.shell_content_top() + s(6)
             && y <= self.editor_tabs_bottom() - s(1)
             && x >= debug_x
-            && x < debug_x + s(312)
+            && x < debug_x + s(166)
         {
-            match ((x - debug_x) / s(78).max(1)).clamp(0, 3) {
-                0 => self.toggle_breakpoint(),
-                1 => self.start_or_continue_debugging(),
-                2 => self.step_debugging(),
-                _ => self.stop_debugging(),
-            }
+            self.debug_menu_open = !self.debug_menu_open;
             return;
         }
         if button == 1 && self.terminal_open && (y - self.terminal_top()).abs() <= s(7) {
@@ -12730,6 +12887,10 @@ impl App {
             .collect::<Vec<_>>();
         let input = std::str::from_utf8(&bytes).unwrap_or("");
         let control = event.state & CONTROL_MASK != 0;
+        if self.debug_menu_open && keysym == ESCAPE_KEYSYM {
+            self.debug_menu_open = false;
+            return true;
+        }
         if self.syntax_colors_open {
             if keysym == ESCAPE_KEYSYM {
                 if self.syntax_hex_focused {
@@ -15162,6 +15323,8 @@ pub fn run() {
             activity_velocity: 0.0,
             graph_content_motion: UiMotion::new(1.0),
             relation_focus_motion: UiMotion::new(0.0),
+            debug_menu_open: false,
+            debug_menu_motion: UiMotion::new(0.0),
             collapsed_folders: BTreeSet::new(),
             terminal_open: false,
             terminal_height: (230.0 * (width as f32 / 1440.0).clamp(0.85, 2.0)).round() as i32,

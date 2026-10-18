@@ -58,6 +58,7 @@ jobs:
           xvfb-run -a cargo run -- --render-frame /tmp/tc-emit.png --render-scene packaging-emit
           xvfb-run -a cargo run -- --render-frame /tmp/tc-edit.png --render-scene edit
           xvfb-run -a cargo run -- --render-frame /tmp/tc-debug.png --render-scene debug
+          xvfb-run -a cargo run -- --render-frame /tmp/tc-debug-menu.png --render-scene debug-menu
           xvfb-run -a cargo run -- --render-frame /tmp/tc-view.png --render-scene view
           xvfb-run -a cargo run -- --render-frame /tmp/tc-filemenu.png --render-scene file-menu
           xvfb-run -a cargo run -- --render-frame /tmp/tc-ai.png --render-scene ai-panel
@@ -92,6 +93,7 @@ jobs:
               "/tmp/tc-emit.png",
               "/tmp/tc-edit.png",
               "/tmp/tc-debug.png",
+              "/tmp/tc-debug-menu.png",
               "/tmp/tc-view.png",
               "/tmp/tc-filemenu.png",
               "/tmp/tc-ai.png",
