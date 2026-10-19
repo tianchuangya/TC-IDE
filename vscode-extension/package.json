@@ -120,6 +120,21 @@
           "default": "pulse",
           "description": "输入或删除时的微动效；不会替换 VS Code 原生文字渲染。"
         },
+        "tcIde.editor.nativeSmoothCaret": {
+          "type": "boolean",
+          "default": true,
+          "description": "使用 VS Code 官方平滑光标动画。"
+        },
+        "tcIde.dynamicEditor.mouseTrail": {
+          "type": "boolean",
+          "default": true,
+          "description": "TC 动态编辑器内显示低开销的鼠标余晖。"
+        },
+        "tcIde.dynamicEditor.lineTransition": {
+          "type": "boolean",
+          "default": true,
+          "description": "TC 动态编辑器按回车时显示行切换波纹。"
+        },
         "tcIde.editor.commentBubbles": {
           "type": "boolean",
           "default": true,
