@@ -17,6 +17,13 @@ import { SettingsViewProvider } from './settings/settingsViewProvider';
 import { DynamicEditorProvider } from './editor/dynamicEditorProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
+  // This is a native VS Code setting, not a CSS injection.  Keep the user's
+  // explicit TC switch authoritative, while making the default visible as
+  // soon as the extension is activated.
+  if (vscode.workspace.getConfiguration('tcIde').get('editor.nativeSmoothCaret', true)) {
+    void vscode.workspace.getConfiguration().update('editor.cursorSmoothCaretAnimation', 'on', vscode.ConfigurationTarget.Global);
+    void vscode.workspace.getConfiguration().update('editor.cursorBlinking', 'smooth', vscode.ConfigurationTarget.Global);
+  }
   const provider = new GraphViewProvider(context);
   const tasks = new TaskRunner();
   const packagePanel = new PackagePanel();
