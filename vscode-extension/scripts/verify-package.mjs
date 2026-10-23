@@ -39,6 +39,8 @@ async function main() {
     manifest.main,
     'dist/webview.js',
     'media/icons/tc-ide.svg',
+    'media/injected/tc-motion.css',
+    'media/injected/tc-motion.js',
     'l10n/bundle.l10n.json',
     'l10n/bundle.l10n.zh-cn.json',
     'themes/tc-ide-dark-color-theme.json',

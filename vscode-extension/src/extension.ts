@@ -15,6 +15,7 @@ import { TaskRunner, type TcTaskKind } from './tasks/taskRunner';
 import { PackagePanel } from './package/packagePanel';
 import { SettingsViewProvider } from './settings/settingsViewProvider';
 import { DynamicEditorProvider } from './editor/dynamicEditorProvider';
+import { registerEnhancedMotion } from './editor/enhancedMotion';
 
 export function activate(context: vscode.ExtensionContext): void {
   // This is a native VS Code setting, not a CSS injection.  Keep the user's
@@ -28,7 +29,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const tasks = new TaskRunner();
   const packagePanel = new PackagePanel();
   const settings = new SettingsViewProvider(context);
-  context.subscriptions.push(tasks, registerSemanticDecorations(context));
+  context.subscriptions.push(tasks, registerSemanticDecorations(context), registerEnhancedMotion(context));
   context.subscriptions.push(DynamicEditorProvider.register(context));
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(GraphViewProvider.viewType, provider, {

@@ -28,6 +28,8 @@
     "onCommand:tcIde.run",
     "onCommand:tcIde.package",
     "onCommand:tcIde.openDynamicEditor",
+    "onCommand:tcIde.enableEnhancedMotion",
+    "onCommand:tcIde.disableEnhancedMotion",
     "onCustomEditor:tcIde.dynamicEditor",
     "onView:tcIde.graphView"
   ],
@@ -222,6 +224,18 @@
         "title": "用 TC 动态编辑器打开当前文件",
         "category": "TC-IDE",
         "icon": "$(symbol-key)"
+      },
+      {
+        "command": "tcIde.enableEnhancedMotion",
+        "title": "启用普通编辑器增强动效",
+        "category": "TC-IDE",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "tcIde.disableEnhancedMotion",
+        "title": "关闭普通编辑器增强动效",
+        "category": "TC-IDE",
+        "icon": "$(circle-slash)"
       },
       {
         "command": "tcIde.build",
