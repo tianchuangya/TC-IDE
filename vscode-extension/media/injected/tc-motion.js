@@ -1,88 +1,10 @@
 /* TC-IDE enhanced motion layer. No network, eval, or workspace access. */
-(() => {
-  'use strict';
-  if (window.__tcIdeMotion?.dispose) window.__tcIdeMotion.dispose();
-
-  const layer = document.createElement('div');
-  layer.id = 'tcide-motion-layer';
-  layer.setAttribute('aria-hidden', 'true');
-  document.body.appendChild(layer);
-
-  const disposers = [];
-  const listen = (target, type, handler, options) => {
-    target.addEventListener(type, handler, options);
-    disposers.push(() => target.removeEventListener(type, handler, options));
-  };
-  const later = (node, delay) => setTimeout(() => node.remove(), delay);
-  const editorUnder = (target) => target instanceof Element ? target.closest('.monaco-editor') : null;
-  const activeCursor = () => {
-    const cursor = document.querySelector('.monaco-editor.focused .cursors-layer > .cursor');
-    if (!(cursor instanceof HTMLElement)) return null;
-    const rect = cursor.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0 ? rect : null;
-  };
-
-  let pointerFrame = 0;
-  let pointer = { x: -100, y: -100 };
-  listen(document, 'pointermove', (event) => {
-    if (!editorUnder(event.target) || Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 11) return;
-    pointer = { x: event.clientX, y: event.clientY };
-    if (pointerFrame) return;
-    pointerFrame = requestAnimationFrame(() => {
-      pointerFrame = 0;
-      const dot = document.createElement('i');
-      dot.className = 'tcide-pointer-trail';
-      dot.style.left = `${pointer.x}px`;
-      dot.style.top = `${pointer.y}px`;
-      layer.appendChild(dot);
-      later(dot, 420);
-    });
-  }, true);
-
-  let previousCursor = null;
-  const sampleCursor = (lineBreak = false) => requestAnimationFrame(() => requestAnimationFrame(() => {
-    const next = activeCursor();
-    if (!next) return;
-    if (previousCursor && (Math.abs(next.left - previousCursor.left) > .5 || Math.abs(next.top - previousCursor.top) > .5)) {
-      const ghost = document.createElement('i');
-      ghost.className = 'tcide-caret-ghost';
-      ghost.style.left = `${previousCursor.left}px`;
-      ghost.style.top = `${previousCursor.top}px`;
-      ghost.style.width = `${Math.max(2, previousCursor.width)}px`;
-      ghost.style.height = `${previousCursor.height}px`;
-      layer.appendChild(ghost);
-      later(ghost, 290);
-    }
-    if (lineBreak || (previousCursor && Math.abs(next.top - previousCursor.top) > next.height * .5)) {
-      const ripple = document.createElement('i');
-      ripple.className = 'tcide-line-ripple';
-      ripple.style.left = `${next.right + 5}px`;
-      ripple.style.top = `${next.top + next.height - 2}px`;
-      layer.appendChild(ripple);
-      later(ripple, 390);
-    }
-    previousCursor = next;
-  }));
-
-  listen(document, 'keydown', (event) => {
-    if (!editorUnder(event.target)) return;
-    if (!previousCursor) previousCursor = activeCursor();
-    sampleCursor(event.key === 'Enter');
-  }, true);
-  listen(document, 'mousedown', (event) => {
-    if (!editorUnder(event.target)) return;
-    previousCursor = activeCursor();
-  }, true);
-  listen(document, 'mouseup', (event) => {
-    if (editorUnder(event.target)) sampleCursor(false);
-  }, true);
-
-  window.__tcIdeMotion = {
-    dispose() {
-      if (pointerFrame) cancelAnimationFrame(pointerFrame);
-      for (const dispose of disposers) dispose();
-      layer.remove();
-      delete window.__tcIdeMotion;
-    },
-  };
-})();
+(()=>{'use strict';if(window.__tcIdeMotion?.dispose)window.__tcIdeMotion.dispose();
+const layer=document.createElement('div');layer.id='tcide-motion-layer';layer.setAttribute('aria-hidden','true');const canvas=document.createElement('canvas');canvas.id='tcide-pointer-canvas';layer.appendChild(canvas);document.body.appendChild(layer);
+const context=canvas.getContext('2d',{alpha:true}),disposers=[],timers=new Set();const listen=(target,type,handler,options)=>{target.addEventListener(type,handler,options);disposers.push(()=>target.removeEventListener(type,handler,options))};const later=(node,delay)=>{const timer=setTimeout(()=>{timers.delete(timer);node.remove()},delay);timers.add(timer)};const editorUnder=target=>target instanceof Element?target.closest('.monaco-editor'):null;const cursorElement=()=>{const cursor=document.querySelector('.monaco-editor.focused .cursors-layer>.cursor');if(!(cursor instanceof HTMLElement))return null;const rect=cursor.getBoundingClientRect();return rect.width>0&&rect.height>0?{cursor,rect}:null};
+let pixelRatio=1;const resize=()=>{pixelRatio=Math.min(window.devicePixelRatio||1,2);canvas.width=Math.round(innerWidth*pixelRatio);canvas.height=Math.round(innerHeight*pixelRatio);canvas.style.width=innerWidth+'px';canvas.style.height=innerHeight+'px';context?.setTransform(pixelRatio,0,0,pixelRatio,0,0)};resize();listen(window,'resize',resize,{passive:true});
+const points=[];let ribbonFrame=0,lastPoint={x:-100,y:-100};const drawRibbon=now=>{ribbonFrame=0;if(!context)return;while(points.length&&now-points[0].time>270)points.shift();context.clearRect(0,0,innerWidth,innerHeight);if(points.length>1){context.save();context.lineCap='round';context.lineJoin='round';for(let pass=0;pass<3;pass+=1){context.beginPath();context.moveTo(points[0].x,points[0].y);for(let index=1;index<points.length-1;index+=1){const current=points[index],next=points[index+1];context.quadraticCurveTo(current.x,current.y,(current.x+next.x)/2,(current.y+next.y)/2)}const newest=points[points.length-1];context.lineTo(newest.x,newest.y);const age=Math.min(1,(now-newest.time)/270);context.globalAlpha=(1-age)*[.17,.42,.78][pass];context.lineWidth=[12,5,1.4][pass];context.strokeStyle=['#389ee8','#6bcfff','#e4f8ff'][pass];context.shadowBlur=[20,12,4][pass];context.shadowColor=pass===0?'#4aaeff':'#8bdcff';context.stroke()}context.restore()}if(points.length)ribbonFrame=requestAnimationFrame(drawRibbon)};const wakeRibbon=()=>{if(!ribbonFrame)ribbonFrame=requestAnimationFrame(drawRibbon)};listen(document,'pointermove',event=>{if(!editorUnder(event.target)||Math.hypot(event.clientX-lastPoint.x,event.clientY-lastPoint.y)<5)return;lastPoint={x:event.clientX,y:event.clientY};points.push({...lastPoint,time:performance.now()});if(points.length>24)points.shift();wakeRibbon()},true);
+let previousCursor=null;const addSmear=(from,to)=>{const startX=from.left+from.width/2,startY=from.top+from.height/2,endX=to.left+to.width/2,endY=to.top+to.height/2,dx=endX-startX,dy=endY-startY,distance=Math.hypot(dx,dy);if(distance<2)return;const smear=document.createElement('i');smear.className='tcide-caret-smear';smear.style.left=startX+'px';smear.style.top=startY-1.5+'px';smear.style.width=Math.min(distance,420)+'px';const transform='rotate('+Math.atan2(dy,dx)+'rad)';smear.style.transform=transform;smear.style.setProperty('--tc-smear-transform',transform);layer.appendChild(smear);later(smear,260)};
+const impact=entry=>{const halo=document.createElement('i');halo.className='tcide-caret-impact';halo.style.left=entry.rect.left+entry.rect.width/2+'px';halo.style.top=entry.rect.top+entry.rect.height/2+'px';layer.appendChild(halo);later(halo,310);entry.cursor.classList.remove('tcide-enter-kick');void entry.cursor.offsetWidth;entry.cursor.classList.add('tcide-enter-kick');const timer=setTimeout(()=>{timers.delete(timer);entry.cursor.classList.remove('tcide-enter-kick')},240);timers.add(timer)};const sampleCursor=(enter=false)=>requestAnimationFrame(()=>requestAnimationFrame(()=>{const entry=cursorElement();if(!entry)return;if(previousCursor)addSmear(previousCursor,entry.rect);if(enter)impact(entry);previousCursor=entry.rect}));
+listen(document,'keydown',event=>{if(!editorUnder(event.target))return;if(!previousCursor)previousCursor=cursorElement()?.rect??null;sampleCursor(event.key==='Enter')},true);listen(document,'mousedown',event=>{if(editorUnder(event.target))previousCursor=cursorElement()?.rect??null},true);listen(document,'mouseup',event=>{if(editorUnder(event.target))sampleCursor(false)},true);
+window.__tcIdeMotion={dispose(){if(ribbonFrame)cancelAnimationFrame(ribbonFrame);for(const dispose of disposers)dispose();for(const timer of timers)clearTimeout(timer);layer.remove();delete window.__tcIdeMotion}}})();

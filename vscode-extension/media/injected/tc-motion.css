@@ -1,80 +1,12 @@
 /* TC-IDE enhanced motion layer. Loaded only after explicit user opt-in. */
-:root {
-  --tc-motion-accent: #78c8ff;
-  --tc-motion-glow: rgba(76, 176, 255, 0.72);
-}
-
-/* Monaco positions its caret with top/left. A short spring transition creates
-   a real smooth caret without changing the text model or selection. */
-.monaco-editor .cursors-layer > .cursor {
-  border-radius: 2px !important;
-  box-shadow: 0 0 6px var(--tc-motion-glow), 0 0 14px rgba(76, 176, 255, 0.3) !important;
-  transition:
-    left 82ms cubic-bezier(.2, .82, .24, 1),
-    top 92ms cubic-bezier(.2, .82, .24, 1),
-    height 92ms cubic-bezier(.2, .82, .24, 1),
-    opacity 120ms ease !important;
-  will-change: left, top;
-}
-
-#tcide-motion-layer {
-  position: fixed;
-  inset: 0;
-  z-index: 100000;
-  overflow: hidden;
-  pointer-events: none;
-  contain: strict;
-}
-
-.tcide-pointer-trail {
-  position: fixed;
-  width: 7px;
-  height: 7px;
-  margin: -3.5px;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(220, 244, 255, .95) 0 18%, var(--tc-motion-accent) 24%, rgba(70, 165, 255, .26) 56%, transparent 72%);
-  box-shadow: 0 0 10px var(--tc-motion-glow);
-  animation: tcidePointerTrail 390ms cubic-bezier(.16, .8, .26, 1) forwards;
-}
-
-.tcide-caret-ghost {
-  position: fixed;
-  border-radius: 2px;
-  background: linear-gradient(180deg, #dff5ff, var(--tc-motion-accent));
-  box-shadow: 0 0 7px var(--tc-motion-glow), 0 0 18px rgba(76, 176, 255, .35);
-  transform-origin: 50% 50%;
-  animation: tcideCaretGhost 260ms cubic-bezier(.12, .74, .28, 1) forwards;
-}
-
-.tcide-line-ripple {
-  position: fixed;
-  height: 2px;
-  width: min(300px, 34vw);
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--tc-motion-accent), rgba(120, 200, 255, .42), transparent);
-  box-shadow: 0 0 10px var(--tc-motion-glow);
-  transform-origin: left center;
-  animation: tcideLineRipple 360ms cubic-bezier(.16, .84, .24, 1) forwards;
-}
-
-@keyframes tcidePointerTrail {
-  0% { opacity: .86; transform: translate3d(0, 0, 0) scale(1); }
-  65% { opacity: .34; }
-  100% { opacity: 0; transform: translate3d(-7px, 7px, 0) scale(.18); }
-}
-
-@keyframes tcideCaretGhost {
-  0% { opacity: .72; transform: scaleY(1); }
-  100% { opacity: 0; transform: translate3d(-3px, 1px, 0) scaleY(.72); }
-}
-
-@keyframes tcideLineRipple {
-  0% { opacity: 0; transform: scaleX(.04) translateY(1px); filter: blur(1px); }
-  38% { opacity: .9; transform: scaleX(1); filter: blur(0); }
-  100% { opacity: 0; transform: scaleX(.86) translateY(-5px); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .monaco-editor .cursors-layer > .cursor { transition: none !important; }
-  .tcide-pointer-trail, .tcide-caret-ghost, .tcide-line-ripple { display: none !important; }
-}
+:root{--tc-motion-accent:#72d9ff;--tc-motion-accent-2:#a879ff;--tc-motion-glow:rgba(70,190,255,.68)}
+.monaco-editor .cursors-layer>.cursor{border-radius:3px!important;box-shadow:0 0 5px rgba(214,248,255,.92),0 0 15px var(--tc-motion-glow)!important;transition:left 72ms cubic-bezier(.16,.82,.22,1),top 82ms cubic-bezier(.16,.82,.22,1),height 82ms cubic-bezier(.16,.82,.22,1),opacity 110ms ease!important;will-change:left,top}
+#tcide-motion-layer{position:fixed;inset:0;z-index:100000;overflow:hidden;pointer-events:none;contain:strict}
+#tcide-pointer-canvas{position:absolute;inset:0;width:100%;height:100%}
+.tcide-caret-smear{position:fixed;height:3px;border-radius:999px;transform-origin:left center;background:linear-gradient(90deg,rgba(114,217,255,.08),rgba(114,217,255,.92) 72%,rgba(219,244,255,.98));box-shadow:0 0 7px var(--tc-motion-glow),0 0 16px rgba(168,121,255,.28);animation:tcideCaretSmear 235ms cubic-bezier(.12,.72,.22,1) forwards}
+.tcide-caret-impact{position:fixed;width:20px;height:20px;margin:-10px;border:1px solid rgba(114,217,255,.9);border-radius:50%;box-shadow:0 0 12px var(--tc-motion-glow),inset 0 0 8px rgba(168,121,255,.28);animation:tcideCaretImpact 280ms cubic-bezier(.12,.76,.22,1) forwards}
+.monaco-editor .cursors-layer>.cursor.tcide-enter-kick{animation:tcideEnterKick 220ms cubic-bezier(.18,.9,.24,1)!important}
+@keyframes tcideCaretSmear{0%{opacity:.82;filter:blur(.15px)}58%{opacity:.38}100%{opacity:0;filter:blur(1.5px);transform:var(--tc-smear-transform) scaleX(.18)}}
+@keyframes tcideCaretImpact{0%{opacity:.8;transform:scale(.18)}55%{opacity:.42;transform:scale(1)}100%{opacity:0;transform:scale(1.45)}}
+@keyframes tcideEnterKick{0%{transform:scaleY(1)}32%{transform:scaleY(.42) scaleX(1.7)}68%{transform:scaleY(1.12) scaleX(.9)}100%{transform:scale(1)}}
+@media (prefers-reduced-motion:reduce){.monaco-editor .cursors-layer>.cursor{transition:none!important}#tcide-motion-layer{display:none!important}}

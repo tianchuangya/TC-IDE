@@ -22,22 +22,11 @@ export function registerSemanticDecorations(context: vscode.ExtensionContext): v
   const glowPeak = vscode.window.createTextEditorDecorationType({ border: '2px solid rgba(176, 115, 255, .96)', borderRadius: '4px', backgroundColor: 'rgba(166, 100, 255, .28)', overviewRulerColor: '#A664FF', overviewRulerLane: vscode.OverviewRulerLane.Center });
   const glowOut = vscode.window.createTextEditorDecorationType({ border: '1px solid rgba(176, 115, 255, .18)', borderRadius: '4px', backgroundColor: 'rgba(166, 100, 255, .03)' });
   const deleted = vscode.window.createTextEditorDecorationType({ before: { contentText: '│', color: '#78BAFF', fontWeight: 'bold' } });
-  // Native editor motion: the extension API does not expose the editor DOM,
-  // so a short sequence of zero-width decorations gives the caret a visible
-  // afterimage without patching VS Code or replacing its editor.
-  const caretEchoIn = vscode.window.createTextEditorDecorationType({ after: { contentText: '  ·', color: 'rgba(116, 195, 255, .34)', fontWeight: 'bold' } });
-  const caretEchoPeak = vscode.window.createTextEditorDecorationType({ after: { contentText: '  ✦', color: '#78c8ff', fontWeight: 'bold' }, overviewRulerColor: '#78c8ff', overviewRulerLane: vscode.OverviewRulerLane.Center });
-  const caretEchoOut = vscode.window.createTextEditorDecorationType({ after: { contentText: '  ·', color: 'rgba(116, 195, 255, .18)', fontWeight: 'bold' } });
-  const lineWaveIn = vscode.window.createTextEditorDecorationType({ before: { contentText: '╰──', color: 'rgba(116, 195, 255, .28)', fontWeight: 'bold' } });
-  const lineWavePeak = vscode.window.createTextEditorDecorationType({ before: { contentText: '╰────────', color: '#78c8ff', fontWeight: 'bold' } });
-  const lineWaveOut = vscode.window.createTextEditorDecorationType({ before: { contentText: '╰──', color: 'rgba(116, 195, 255, .14)', fontWeight: 'bold' } });
   const bubble = vscode.window.createTextEditorDecorationType({
     after: { margin: '0 0 0 14px', color: 'var(--vscode-descriptionForeground)', backgroundColor: 'var(--vscode-editorWidget-background)', border: '1px solid var(--vscode-widget-border)' },
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const flashTimers: ReturnType<typeof setTimeout>[] = [];
-  const motionTimers: ReturnType<typeof setTimeout>[] = [];
-  const caretPositions = new Map<string, vscode.Position>();
   let sequence = 0;
 
   const clear = (): void => {
@@ -93,32 +82,6 @@ export function registerSemanticDecorations(context: vscode.ExtensionContext): v
     flashTimers.push(setTimeout(() => { editor.setDecorations(frames[0], []); editor.setDecorations(frames[1], inserted); }, 42));
     flashTimers.push(setTimeout(() => { editor.setDecorations(frames[1], []); editor.setDecorations(frames[2], inserted); }, 108));
     flashTimers.push(setTimeout(() => { editor.setDecorations(frames[2], []); editor.setDecorations(deleted, []); }, 185));
-    if (event.contentChanges.some((change) => change.text.includes('\n'))) {
-      const position = editor.selection.active;
-      playFrames(editor, [lineWaveIn, lineWavePeak, lineWaveOut], [new vscode.Range(position, position)]);
-    }
-  };
-  const animateCaret = (event: vscode.TextEditorSelectionChangeEvent): void => {
-    if (event.kind === vscode.TextEditorSelectionChangeKind.Command) return;
-    const editor = event.textEditor;
-    const next = event.selections[0]?.active;
-    if (!next || !event.selections[0]?.isEmpty) return;
-    const key = editor.document.uri.toString();
-    const previous = caretPositions.get(key);
-    caretPositions.set(key, next);
-    if (!previous || previous.isEqual(next)) return;
-    playFrames(editor, [caretEchoIn, caretEchoPeak, caretEchoOut], [new vscode.Range(previous, previous)]);
-    if (previous.line !== next.line) playFrames(editor, [lineWaveIn, lineWavePeak, lineWaveOut], [new vscode.Range(next, next)]);
-  };
-  const playFrames = (editor: vscode.TextEditor, frames: vscode.TextEditorDecorationType[], ranges: vscode.Range[]): void => {
-    const [first, peak, last] = frames;
-    if (!first || !peak || !last) return;
-    while (motionTimers.length) clearTimeout(motionTimers.pop());
-    for (const frame of frames) editor.setDecorations(frame, []);
-    editor.setDecorations(first, ranges);
-    motionTimers.push(setTimeout(() => { editor.setDecorations(first, []); editor.setDecorations(peak, ranges); }, 38));
-    motionTimers.push(setTimeout(() => { editor.setDecorations(peak, []); editor.setDecorations(last, ranges); }, 112));
-    motionTimers.push(setTimeout(() => { editor.setDecorations(last, []); }, 210));
   };
   const codeLens = vscode.languages.registerCodeLensProvider({ scheme: 'file' }, {
     async provideCodeLenses(document) {
@@ -132,13 +95,13 @@ export function registerSemanticDecorations(context: vscode.ExtensionContext): v
     while (flashTimers.length) clearTimeout(flashTimers.pop());
     for (const frame of [pulseIn, pulsePeak, pulseOut, glowIn, glowPeak, glowOut]) editor.setDecorations(frame, []);
   };
-  const disposables: vscode.Disposable[] = [focus, definition, reference, pulseIn, pulsePeak, pulseOut, glowIn, glowPeak, glowOut, deleted, caretEchoIn, caretEchoPeak, caretEchoOut, lineWaveIn, lineWavePeak, lineWaveOut, bubble, codeLens,
-    vscode.window.onDidChangeTextEditorSelection((event) => { animateCaret(event); update(); }), vscode.window.onDidChangeActiveTextEditor(update),
+  const disposables: vscode.Disposable[] = [focus, definition, reference, pulseIn, pulsePeak, pulseOut, glowIn, glowPeak, glowOut, deleted, bubble, codeLens,
+    vscode.window.onDidChangeTextEditorSelection(update), vscode.window.onDidChangeActiveTextEditor(update),
     vscode.workspace.onDidChangeTextDocument((event) => { flash(event); update(); }),
     vscode.workspace.onDidChangeConfiguration((event) => { if (event.affectsConfiguration('tcIde.editor')) update(); }),
   ];
   update();
-  const disposable = new vscode.Disposable(() => { if (timer) clearTimeout(timer); while (flashTimers.length) clearTimeout(flashTimers.pop()); while (motionTimers.length) clearTimeout(motionTimers.pop()); clear(); disposables.forEach((item) => item.dispose()); });
+  const disposable = new vscode.Disposable(() => { if (timer) clearTimeout(timer); while (flashTimers.length) clearTimeout(flashTimers.pop()); clear(); disposables.forEach((item) => item.dispose()); });
   context.subscriptions.push(disposable);
   return disposable;
 }
