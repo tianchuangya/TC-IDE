@@ -132,11 +132,6 @@
           "default": true,
           "description": "TC 动态编辑器内显示低开销的鼠标余晖。"
         },
-        "tcIde.dynamicEditor.lineTransition": {
-          "type": "boolean",
-          "default": true,
-          "description": "TC 动态编辑器按回车时显示行切换波纹。"
-        },
         "tcIde.editor.commentBubbles": {
           "type": "boolean",
           "default": true,
