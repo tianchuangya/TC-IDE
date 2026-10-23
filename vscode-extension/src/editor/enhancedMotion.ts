@@ -17,16 +17,16 @@ export function registerEnhancedMotion(context: vscode.ExtensionContext): vscode
       return;
     }
 
-    const resources = resourceUrls(context);
-    const current = vscode.workspace.getConfiguration().get<string[]>(cssSetting, []);
-    const kept = current.filter((item) => !isTcMotionResource(item));
-    await vscode.workspace.getConfiguration().update(cssSetting, [...kept, ...resources], vscode.ConfigurationTarget.Global);
     const choice = await vscode.window.showWarningMessage(
       '即将让 Loader 把 TC 动效注入 VS Code。启用后需要重新加载窗口，VS Code 可能显示校验警告。',
       { modal: true },
       '确认启用',
     );
     if (choice !== '确认启用') return;
+    const resources = resourceUrls(context);
+    const current = vscode.workspace.getConfiguration().get<string[]>(cssSetting, []);
+    const kept = current.filter((item) => !isTcMotionResource(item));
+    await vscode.workspace.getConfiguration().update(cssSetting, [...kept, ...resources], vscode.ConfigurationTarget.Global);
     await vscode.commands.executeCommand('extension.updateCustomCSS');
   });
 
